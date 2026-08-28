@@ -1,0 +1,38 @@
+# Local environment and repository metadata
+.env
+.env.*
+.git
+
+# Cloudflare Wrangler local secrets and state
+.wrangler
+**/.wrangler
+.dev.vars
+.dev.vars.*
+**/.dev.vars
+**/.dev.vars.*
+
+# Dependencies and generated output
+node_modules
+**/node_modules
+dist
+**/dist
+.astro
+**/.astro
+coverage
+tmp
+apps/web/src/data/publication.json
+# The API does not read fixtures at runtime.
+fixtures
+
+# Local databases, backups, certificates, and logs
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.bak
+*.sql.gz
+*.pem
+*.key
+*.p12
+*.pfx
+*.log

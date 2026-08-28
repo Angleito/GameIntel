@@ -1,0 +1,12 @@
+{
+  "id": "gta-vi",
+  "canonicalName": "Grand Theft Auto VI",
+  "aliases": ["GTA VI", "GTA 6", "Grand Theft Auto VI", "Grand Theft Auto 6"],
+  "version": "1",
+  "capabilities": { "story": true, "progression": true, "onlineMode": false, "map": true },
+  "categories": ["news", "vehicle", "mechanic", "location", "mission", "release"],
+  "spoilerSafeCategories": ["news", "release"],
+  "defaultExploitMode": "intended_only",
+  "platforms": ["PS5", "Xbox Series X|S", "PC"],
+  "sourceQueries": ["GTA VI", "GTA 6", "Grand Theft Auto VI"]
+}

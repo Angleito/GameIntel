@@ -1,0 +1,37 @@
+---
+import Base from "../layouts/Base.astro";
+import publication from "../data/publication";
+type PublicArticle = {
+  slug: string;
+  title: string;
+  description: string;
+  collectionId: string;
+  status: string;
+  publishedAt: string | null;
+  body: {
+    sections: Array<{
+      heading: string;
+      paragraphs: Array<{
+        text: string;
+        evidenceLevel: "suspected" | "corroborated" | "confirmed" | "disputed";
+        attributionType: "official" | "trusted_secondary" | "community" | "reviewed_leak_reporting";
+        editorialAssessment: string | null;
+        citations: number[];
+      }>;
+    }>;
+  };
+  citations: Array<{ number: number; label: string; url: string }>;
+};
+const articles = publication.records as unknown as PublicArticle[];
+---
+<Base title="GameIntel | Evidence-aware game data">
+  <section class="hero">
+    <p class="eyebrow">Independent game intelligence</p>
+    <h1>Game data<br />with receipts.</h1>
+    <div class="hero__rule"></div>
+    <p class="lede">GameIntel turns permitted public sources into normalized records, claims, evidence, and human-readable coverage.</p>
+    <div class="hero__details"><span><strong>Now covering</strong> GTA VI</span><span><strong>Standard</strong> Evidence first</span></div>
+  </section>
+  <section><div class="section-heading"><h2>In focus</h2><p>Reference profile</p></div><div class="grid"><a class="card" href="/games/gta-vi/"><span class="meta">Launch profile / GTA VI</span><h2>Grand Theft Auto VI</h2><p>Explore the first GameIntel profile and its evidence-aware public record.</p></a><a class="card" href="/editorial-policy/"><span class="meta">How we work</span><h2>Claims, sources, proof.</h2><p>Human-reviewed evidence before every public article, export, or API response.</p></a></div></section>
+  {articles.length > 0 && <section><div class="section-heading"><h2>Latest coverage</h2><p>Approved for publication</p></div><div class="grid">{articles.slice(0, 6).map((article) => <a class="card" href={`/articles/${article.slug}/`}><span class="meta">GTA VI · {article.status}</span><h2>{article.title}</h2><p>{article.description}</p></a>)}</div></section>}
+</Base>

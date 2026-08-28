@@ -1,0 +1,151 @@
+---
+import type { FeaturedMediaSet } from "../data/featured-media";
+
+const { media } = Astro.props as { media: FeaturedMediaSet };
+const slideshowUrl = import.meta.env.PUBLIC_MEDIA_SLIDESHOW_URL || "/api/media/gta-vi/slideshow";
+const firstSlide = media.slides[0];
+---
+
+<div class="media-backdrop" data-media-backdrop data-media-feed-url={slideshowUrl} data-media-slides={JSON.stringify(media.slides)}>
+  <div class="media-backdrop__images" aria-hidden="true">
+    <img class="media-backdrop__slide is-active" data-media-slide src={firstSlide.url} alt="" loading="eager" fetchpriority="high" style={`object-position: ${firstSlide.focalPoint}; --slide-accent: ${firstSlide.accent};`} />
+    <img class="media-backdrop__slide" data-media-slide alt="" aria-hidden="true" />
+  </div>
+  <div class="media-backdrop__veil" aria-hidden="true"></div>
+  <div class="media-backdrop__credit">
+    <p class="media-backdrop__caption" data-media-caption>Grand Theft Auto VI / {firstSlide.collection} / {firstSlide.caption}</p>
+    <a data-media-source href={firstSlide.sourceUrl} rel="noopener" target="_blank">Official source: {firstSlide.attribution}</a>
+  </div>
+</div>
+
+<script>
+  type MediaSlide = {
+    url: string;
+    caption: string;
+    collection: string;
+    attribution: string;
+    sourceUrl: string;
+    focalPoint?: string;
+    accent?: string;
+  };
+
+  const isSafeUrl = (value: unknown, allowSameOriginPath = false): value is string => {
+    if (typeof value !== "string" || !value || /[\u0000-\u001f\u007f]/.test(value)) return false;
+    if (allowSameOriginPath && value.startsWith("/") && !value.startsWith("//")) return true;
+    try {
+      const url = new URL(value);
+      return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  };
+
+  const isSafeFocalPoint = (value: unknown): boolean => value === undefined
+    || (typeof value === "string" && /^(?:left|center|right|top|bottom|(?:\d{1,3}%))(?:\s+(?:left|center|right|top|bottom|(?:\d{1,3}%)))?$/.test(value));
+  const isSafeAccent = (value: unknown): boolean => value === undefined
+    || (typeof value === "string" && /^#[0-9a-f]{3,8}$/i.test(value));
+
+  const isMediaSlide = (value: unknown): value is MediaSlide => {
+    if (!value || typeof value !== "object") return false;
+    const slide = value as Record<string, unknown>;
+    return ["caption", "collection", "attribution"].every((key) => typeof slide[key] === "string")
+      && isSafeUrl(slide.url, true)
+      && isSafeUrl(slide.sourceUrl)
+      && isSafeFocalPoint(slide.focalPoint)
+      && isSafeAccent(slide.accent);
+  };
+
+  document.querySelectorAll<HTMLElement>("[data-media-backdrop]").forEach((backdrop) => {
+    const imageSlots = Array.from(backdrop.querySelectorAll<HTMLImageElement>("[data-media-slide]"));
+    const caption = backdrop.querySelector<HTMLElement>("[data-media-caption]");
+    const source = backdrop.querySelector<HTMLAnchorElement>("[data-media-source]");
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const feedUrl = backdrop.dataset.mediaFeedUrl;
+    let slides: MediaSlide[] = [];
+    try {
+      const fallback = JSON.parse(backdrop.dataset.mediaSlides ?? "[]");
+      slides = Array.isArray(fallback) ? fallback.filter(isMediaSlide) : [];
+    } catch {
+      return;
+    }
+    if (imageSlots.length !== 2 || slides.length === 0) return;
+
+    let activeIndex = 0;
+    let activeSlot = 0;
+    let timer: number | undefined;
+
+    const renderSlide = (image: HTMLImageElement, slide: MediaSlide) => {
+      image.src = slide.url;
+      image.style.objectPosition = slide.focalPoint ?? "center center";
+      image.style.setProperty("--slide-accent", slide.accent ?? "#f17ab7");
+    };
+
+    const updateCredit = () => {
+      const slide = slides[activeIndex];
+      if (caption) caption.textContent = `Grand Theft Auto VI / ${slide.collection} / ${slide.caption}`;
+      if (source) {
+        source.href = slide.sourceUrl;
+        source.textContent = `Official source: ${slide.attribution}`;
+      }
+    };
+
+    const preloadNext = () => {
+      if (slides.length < 2) return;
+      renderSlide(imageSlots[1 - activeSlot], slides[(activeIndex + 1) % slides.length]);
+    };
+
+    const show = (index: number) => {
+      activeIndex = (index + slides.length) % slides.length;
+      activeSlot = 1 - activeSlot;
+      imageSlots.forEach((image, slot) => image.classList.toggle("is-active", slot === activeSlot));
+      updateCredit();
+      preloadNext();
+    };
+
+    const stop = () => {
+      if (timer !== undefined) window.clearInterval(timer);
+      timer = undefined;
+    };
+
+    const start = () => {
+      stop();
+      if (!document.hidden && !reducedMotion.matches && slides.length > 1) timer = window.setInterval(() => show(activeIndex + 1), 30_000);
+    };
+
+    const reset = (nextSlides: MediaSlide[]) => {
+      slides = nextSlides;
+      activeIndex = 0;
+      activeSlot = 0;
+      renderSlide(imageSlots[activeSlot], slides[activeIndex]);
+      imageSlots.forEach((image, slot) => image.classList.toggle("is-active", slot === activeSlot));
+      updateCredit();
+      if (slides.length > 1) {
+        preloadNext();
+      } else {
+        imageSlots[1].removeAttribute("src");
+      }
+    };
+
+    const loadFeed = async () => {
+      if (!isSafeUrl(feedUrl, true)) return;
+      try {
+        const response = await fetch(feedUrl, { headers: { Accept: "application/json" } });
+        if (!response.ok) return;
+        const feed = await response.json();
+        if (!Array.isArray(feed)) return;
+        const workerSlides = feed.filter(isMediaSlide);
+        if (workerSlides.length === 0) return;
+        reset(workerSlides);
+        start();
+      } catch {
+        // Keep the local media when the Worker feed is unavailable.
+      }
+    };
+
+    document.addEventListener("visibilitychange", () => document.hidden ? stop() : start());
+    reducedMotion.addEventListener("change", () => reducedMotion.matches ? stop() : start());
+    preloadNext();
+    void loadFeed();
+    start();
+  });
+</script>

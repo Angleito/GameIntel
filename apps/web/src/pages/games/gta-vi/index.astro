@@ -1,0 +1,16 @@
+---
+import Base from "../../../layouts/Base.astro";
+import publication from "../../../data/publication";
+type PublicArticle = { slug: string; title: string; description: string; collectionId: string; status: string };
+const articles = (publication.records as PublicArticle[]).filter((article) => article.collectionId === "gta-vi");
+---
+<Base title="GTA VI | Game Intelligence" description="Evidence-first Grand Theft Auto VI coverage." collectionId="gta-vi">
+  <section class="hero">
+    <p class="eyebrow">Launch profile / GTA VI</p>
+    <h1>Grand Theft<br />Auto VI</h1>
+    <div class="hero__rule"></div>
+    <p class="lede">A living index of human-reviewed reporting and structured discoveries. Spoiler-sensitive details remain outside this public publication layer.</p>
+    <div class="hero__details"><span><strong>Profile</strong> GTA VI</span><span><strong>Coverage</strong> Source-backed</span></div>
+  </section>
+  <section><div class="section-heading"><h2>Published coverage</h2><p>{articles.length} approved records</p></div><div class="grid">{articles.length ? articles.map((article) => <a class="card" href={`/articles/${article.slug}/`}><span class="meta">{article.status}</span><h2>{article.title}</h2><p>{article.description}</p></a>) : <div class="card"><h2>No published stories yet</h2><p>The local operator must review and approve a story before it appears here.</p></div>}</div></section>
+</Base>

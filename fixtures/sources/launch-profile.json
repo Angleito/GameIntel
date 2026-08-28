@@ -1,0 +1,45 @@
+{
+  "source": {
+    "id": "fixture-editorial",
+    "type": "official",
+    "canonicalUrl": "https://example.com/game-intelligence/launch-profile",
+    "publicCitationUrl": "https://www.rockstargames.com/VI",
+    "sourceStrength": "PRIMARY",
+    "publicationMode": "normal",
+    "policy": {
+      "accessMode": "manual",
+      "requestsPerMinute": 1,
+      "retainRawTextDays": 7,
+      "mayStoreFullText": false,
+      "attributionRequired": true,
+      "termsReviewedAt": "2026-08-27"
+    },
+    "enabled": true
+  },
+  "item": {
+    "collectionId": "gta-vi",
+    "externalId": "launch-profile-fixture-1",
+    "url": "https://example.com/game-intelligence/launch-profile",
+    "title": "GTA VI launch profile: what this newsroom tracks",
+    "text": "This synthetic fixture demonstrates the GTA VI launch profile and the evidence-first publication workflow. It is not a factual game report.",
+    "sourceStrength": "PRIMARY",
+    "publicationMode": "normal",
+    "discoveredAt": "2026-08-27T12:00:00.000Z",
+    "publishedAt": "2026-08-27T12:00:00.000Z",
+    "lineageId": "fixture-lineage-launch-profile",
+    "claims": [
+      {
+        "subject": "GTA VI launch profile",
+        "predicate": "tracks",
+        "value": "source-backed announcements and discoveries",
+        "qualifiers": { "status": "synthetic fixture" },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceType": "official_document",
+        "excerpt": "This synthetic fixture demonstrates the GTA VI launch profile and the evidence-first publication workflow.",
+        "startMs": null,
+        "endMs": null
+      }
+    ]
+  }
+}

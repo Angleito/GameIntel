@@ -1,0 +1,106 @@
+---
+import project from "../../../../config/project.json";
+import MediaBackdrop from "../components/MediaBackdrop.astro";
+import { getFeaturedMedia } from "../data/featured-media";
+
+const { title = project.name, description = project.description, collectionId } = Astro.props;
+const media = getFeaturedMedia(collectionId);
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <link rel="canonical" href={new URL(Astro.url.pathname, Astro.site)} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <MediaBackdrop media={media} />
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="GameIntel home">GAME<span>INTEL</span><i>GG</i></a>
+      <nav aria-label="Primary navigation"><a href="/games/gta-vi/">GTA VI</a><a href="/editorial-policy/">Method</a><a href="/source-policy/">Policy</a></nav>
+    </header>
+    <main><slot /></main>
+    <footer>
+      <p>{project.disclaimer}</p>
+      <div><a href="/about/">About</a><a href="/editorial-policy/">Editorial policy</a><a href="/source-policy/">Source policy</a></div>
+    </footer>
+  </body>
+</html>
+<style is:global>
+  :root { font-family: Arial, Helvetica, sans-serif; color: #fff7ed; background: #100716; font-synthesis: none; }
+  * { box-sizing: border-box; }
+  html { background: #100716; }
+  body { min-width: 320px; min-height: 100vh; margin: 0; overflow-x: hidden; background: #100716; }
+  a { color: inherit; }
+  .media-backdrop { display: contents; }
+  .media-backdrop__images, .media-backdrop__slide, .media-backdrop__veil { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .media-backdrop__images { position: fixed; z-index: 0; overflow: hidden; background: #100716; }
+  .media-backdrop__veil { position: fixed; z-index: 1; pointer-events: none; }
+  .media-backdrop__slide { object-fit: cover; opacity: 0; transform: scale(1.035); transition: opacity 1.4s ease, transform 11s linear; }
+  .media-backdrop__slide.is-active { opacity: 1; transform: scale(1); }
+  .media-backdrop__veil { background: linear-gradient(90deg, rgba(16, 7, 22, .94) 0%, rgba(16, 7, 22, .76) 42%, rgba(16, 7, 22, .38) 100%), linear-gradient(0deg, rgba(16, 7, 22, .86) 0%, transparent 48%); }
+  .media-backdrop__credit { position: fixed; z-index: 3; right: 24px; bottom: 22px; display: grid; justify-items: end; gap: 7px; color: #fff7ed; font-size: .68rem; letter-spacing: .11em; text-align: right; text-transform: uppercase; }
+  .media-backdrop__caption { max-width: min(560px, calc(100vw - 48px)); margin: 0; padding: 5px 7px; background: rgba(16, 7, 22, .45); color: rgba(255, 247, 237, .82); line-height: 1.35; }
+  .media-backdrop__credit a { border: 1px solid rgba(255, 247, 237, .42); background: rgba(16, 7, 22, .45); color: #fff7ed; padding: 6px 8px; font: inherit; letter-spacing: inherit; text-decoration: none; text-transform: uppercase; }
+  .media-backdrop__credit a:hover, .media-backdrop__credit a:focus-visible { border-color: #61e0d7; color: #61e0d7; outline: none; }
+  .site-header, main, footer { position: relative; z-index: 2; }
+  .site-header { max-width: 1200px; margin: auto; padding: 28px 32px 22px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 247, 237, .25); }
+  .brand { color: #fff7ed; font-family: Impact, "Arial Black", sans-serif; font-size: 1.04rem; font-weight: 900; letter-spacing: .11em; line-height: 1; text-decoration: none; }
+  .brand span { color: #f17ab7; }
+  .brand i { color: #61e0d7; font-family: Arial, Helvetica, sans-serif; font-size: .5rem; font-style: normal; letter-spacing: .02em; margin-left: 4px; vertical-align: top; }
+  nav, footer div { display: flex; gap: 22px; }
+  nav a, footer a { color: rgba(255, 247, 237, .74); font-size: .71rem; font-weight: 700; letter-spacing: .12em; text-decoration: none; text-transform: uppercase; }
+  nav a:hover, nav a:focus-visible, footer a:hover, footer a:focus-visible { color: #61e0d7; outline: none; }
+  main { max-width: 1200px; min-height: calc(100vh - 180px); margin: auto; padding: 104px 32px 120px; }
+  section + section { margin-top: 96px; }
+  .eyebrow { margin: 0; color: #61e0d7; font-size: .7rem; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; }
+  h1, h2, h3 { font-family: Impact, "Arial Black", sans-serif; font-weight: 900; letter-spacing: -.025em; line-height: .96; }
+  h1 { max-width: 890px; margin: 15px 0 22px; font-size: clamp(3.5rem, 9.5vw, 8.6rem); text-transform: uppercase; }
+  h2 { margin: 0; font-size: clamp(1.7rem, 3vw, 2.8rem); text-transform: uppercase; }
+  p { color: rgba(255, 247, 237, .78); line-height: 1.7; }
+  .lede { max-width: 650px; margin: 0; font-size: clamp(1.03rem, 2vw, 1.24rem); }
+  .hero { max-width: 760px; }
+  .hero__rule { width: 68px; height: 3px; margin: 36px 0 20px; background: #f17ab7; }
+  .hero__details { display: flex; flex-wrap: wrap; gap: 9px 18px; margin-top: 28px; color: rgba(255, 247, 237, .76); font-size: .72rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+  .hero__details strong { color: #fff7ed; }
+  .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid rgba(255, 247, 237, .3); }
+  .section-heading h2 { font-size: clamp(1.6rem, 3.5vw, 3rem); }
+  .section-heading p { margin: 0; color: #f17ab7; font-size: .7rem; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border: 1px solid rgba(255, 247, 237, .22); background: rgba(255, 247, 237, .22); }
+  .card { position: relative; display: flex; min-height: 245px; flex-direction: column; justify-content: end; padding: 28px; overflow: hidden; background: rgba(22, 10, 30, .84); text-decoration: none; transition: background .2s ease, transform .2s ease; }
+  .card::before { position: absolute; top: 0; left: 0; width: 5px; height: 100%; background: #f17ab7; content: ""; transform: scaleY(.23); transform-origin: bottom; transition: transform .2s ease; }
+  .card:hover, .card:focus-visible { background: rgba(47, 14, 52, .94); outline: none; transform: translateY(-4px); }
+  .card:hover::before, .card:focus-visible::before { background: #61e0d7; transform: scaleY(1); }
+  .card h2 { max-width: 610px; margin: 12px 0; font-size: clamp(1.5rem, 2.7vw, 2.5rem); }
+  .card p { max-width: 620px; margin: 0; font-size: .93rem; }
+  .meta { color: #61e0d7; font-size: .68rem; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; }
+  .article { max-width: 850px; padding: clamp(25px, 5vw, 55px); border: 1px solid rgba(255, 247, 237, .22); background: rgba(18, 8, 25, .88); box-shadow: 0 24px 70px rgba(0, 0, 0, .23); }
+  .article h1 { font-size: clamp(3rem, 7vw, 6.3rem); }
+  .article-cover { margin: 34px 0 0; border: 1px solid rgba(255, 247, 237, .3); background: rgba(16, 7, 22, .64); }
+  .article-cover img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: cover; }
+  .article-cover figcaption { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 18px; padding: 13px 15px; color: rgba(255, 247, 237, .76); font-size: .68rem; font-weight: 700; letter-spacing: .1em; line-height: 1.45; text-transform: uppercase; }
+  .article-cover a { color: #61e0d7; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .article section { margin-top: 52px; }
+  .article section h2 { padding-bottom: 13px; border-bottom: 2px solid #f17ab7; font-size: clamp(1.6rem, 3vw, 2.5rem); }
+  .fact { margin: 23px 0 8px; }
+  .evidence-label { display: inline-block; margin: 0 8px 2px 0; padding: 3px 6px; border: 1px solid; font-size: .63rem; font-weight: 800; letter-spacing: .1em; line-height: 1.2; text-transform: uppercase; vertical-align: middle; }
+  .evidence-confirmed { color: #61e0d7; border-color: #61e0d7; }
+  .evidence-corroborated { color: #9bddd5; border-color: #9bddd5; }
+  .evidence-suspected { color: #ffbc78; border-color: #ffbc78; }
+  .evidence-disputed { color: #ff91a6; border-color: #ff91a6; }
+  .citations { margin-left: 4px; }
+  .citation-link, .citations-section a { color: #61e0d7; font-weight: 800; }
+  .citation-link + .citation-link { margin-left: 4px; }
+  .assessment { margin: 0 0 18px; padding-left: 15px; border-left: 2px solid rgba(255, 247, 237, .4); font-size: .9rem; font-style: italic; }
+  .assessment-label { color: #fff7ed; font-style: normal; font-weight: 700; }
+  .citations-section { border-top: 0; margin-top: 60px; padding-top: 0; }
+  .citations-section ol { padding-left: 24px; color: rgba(255, 247, 237, .78); line-height: 1.7; }
+  .citations-section li + li { margin-top: 8px; }
+  footer { max-width: 1200px; margin: auto; padding: 28px 32px 45px; display: flex; justify-content: space-between; gap: 28px; border-top: 1px solid rgba(255, 247, 237, .25); }
+  footer p { max-width: 580px; margin: 0; color: rgba(255, 247, 237, .64); font-size: .76rem; line-height: 1.55; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  @media (max-width: 720px) { .site-header { padding: 22px 20px 18px; } nav { gap: 13px; } nav a { font-size: .64rem; } main { padding: 66px 20px 92px; } .media-backdrop__veil { background: linear-gradient(90deg, rgba(16, 7, 22, .93), rgba(16, 7, 22, .77)), linear-gradient(0deg, rgba(16, 7, 22, .88), transparent 52%); } .media-backdrop__credit { right: 15px; bottom: 15px; max-width: calc(100vw - 30px); } .article-cover figcaption { align-items: flex-start; flex-direction: column; } .grid { grid-template-columns: 1fr; } .card { min-height: 210px; padding: 24px; } .section-heading { align-items: flex-start; flex-direction: column; gap: 9px; } section + section { margin-top: 70px; } footer { padding: 24px 20px 35px; align-items: flex-start; flex-direction: column; } footer div { flex-wrap: wrap; gap: 12px 18px; } }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
+</style>

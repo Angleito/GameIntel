@@ -1,0 +1,26 @@
+sources:
+  - id: rockstar-official
+    domains: [rockstargames.com]
+    access: permitted_scrape
+    rpm: 2
+    userAgent: gameintelgg/0.1
+    source_strength: PRIMARY
+    publication_mode: normal
+    public_citation_base: https://www.rockstargames.com/VI
+    enabled: false
+  - id: netflix-tudum
+    domains: [netflix.com]
+    access: permitted_scrape
+    rpm: 2
+    userAgent: gameintelgg/0.1
+    source_strength: TRUSTED_SECONDARY
+    publication_mode: normal
+    public_citation_base: https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look
+    enabled: false
+  - id: operator-note
+    domains: []
+    access: manual
+    rpm: 0
+    source_strength: UNVERIFIED
+    publication_mode: discussion_only
+    enabled: true

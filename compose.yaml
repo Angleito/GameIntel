@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gameintel}
+      POSTGRES_USER: ${POSTGRES_USER:-gameintel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    command: ["bun", "run", "scripts/migrate.ts"]
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-gameintel}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    environment:
+      API_PORT: ${API_PORT:-3000}
+      DATABASE_URL: "postgres://${POSTGRES_USER:-gameintel}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
+      GAMEINTEL_PROFILE: ${GAMEINTEL_PROFILE:-gta-vi}
+      LOCAL_OPERATOR_TOKEN: ${LOCAL_OPERATOR_TOKEN:?Set LOCAL_OPERATOR_TOKEN in .env}
+      OPENCODE_AGENT: ${OPENCODE_AGENT:-research-writer}
+      OPENCODE_ENABLED: ${OPENCODE_ENABLED:-false}
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-openai/gpt-5.6-luna}
+      OPENCODE_URL: ${OPENCODE_URL:-http://host.docker.internal:4096}
+      OPENCODE_USERNAME: ${OPENCODE_USERNAME:-}
+      OPENCODE_PASSWORD: ${OPENCODE_PASSWORD:-}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:4321}
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:${API_PORT:-3000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:

@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gameintel-media-slideshow",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "r2_buckets": [
+    {
+      "binding": "MEDIA_BUCKET",
+      "bucket_name": "replace-with-private-media-bucket"
+    }
+  ],
+  "vars": {
+    "MEDIA_CATALOG_KEY": "REPLACE_WITH_IMMUTABLE_CATALOG_KEY"
+  }
+  // Set the secret outside this file:
+  // npx wrangler secret put DAILY_SHUFFLE_SECRET
+}

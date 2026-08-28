@@ -1,0 +1,43 @@
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Cloudflare Wrangler local secrets and state
+.wrangler/
+**/.wrangler/
+.dev.vars
+.dev.vars.*
+**/.dev.vars
+**/.dev.vars.*
+
+# Dependencies and generated output
+node_modules/
+**/node_modules/
+.astro/
+**/.astro/
+dist/
+**/dist/
+coverage/
+tmp/
+# Official media downloads and generated R2 import catalog
+tmp/gta-vi-media/
+apps/web/src/data/publication.json
+
+# Local databases, backups, and certificates
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.bak
+*.sql.gz
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Logs and local tooling
+*.log
+.DS_Store
+.idea/
+.vscode/

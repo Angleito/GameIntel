@@ -1,0 +1,41 @@
+{
+  "name": "gameintelgg",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Open-source, evidence-aware source ingestion and publication platform for GameIntel",
+  "workspaces": ["apps/*", "packages/*", "services/*"],
+  "scripts": {
+    "dev": "bun run --filter @gameintel/web dev",
+    "dev:api": "bun run --filter @gameintel/api dev",
+    "build": "bun run --filter @gameintel/web build",
+    "test": "bun test",
+    "typecheck": "bun run --filter '*' typecheck",
+    "db:migrate": "bun run scripts/migrate.ts",
+    "db:purge": "bun run scripts/purge-retained-content.ts",
+    "seed": "bun run scripts/seed.ts",
+    "example": "bun run scripts/example.ts",
+    "prepare:publication": "bun run scripts/prepare-publication.ts",
+    "security:scan": "bun run scripts/audit-release.ts",
+    "release:check": "bun run security:scan && bun test && bun run typecheck && PUBLIC_BASE_URL=https://gameintel.example GAMEINTEL_RELEASE=true bun run build && GAMEINTEL_RELEASE=true bun run security:scan",
+    "operator": "bun run services/newsroom/src/cli.ts",
+    "publish": "bun run services/publisher/src/index.ts",
+    "export": "bun run services/publisher/src/index.ts",
+    "media:gta-vi:sync": "bun run scripts/sync-gta-vi-media.ts",
+    "media:gta-vi:publish": "bun run scripts/publish-gta-vi-media.ts"
+  },
+  "dependencies": {
+    "@gameintel/core": "workspace:*",
+    "@gameintel/db": "workspace:*",
+    "@gameintel/output": "workspace:*",
+    "@gameintel/pipeline": "workspace:*",
+    "@opencode-ai/sdk": "^1.18.23",
+    "hono": "^4.7.2",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "astro": "^7.2.9",
+    "typescript": "^5.8.2"
+  }
+}

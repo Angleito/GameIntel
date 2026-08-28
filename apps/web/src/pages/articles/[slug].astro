@@ -1,0 +1,66 @@
+---
+import Base from "../../layouts/Base.astro";
+import publication from "../../data/publication";
+type EvidenceLevel = "suspected" | "corroborated" | "confirmed" | "disputed";
+type AttributionType = "official" | "trusted_secondary" | "community" | "reviewed_leak_reporting";
+type PublicFact = {
+  text: string;
+  evidenceLevel: EvidenceLevel;
+  attributionType: AttributionType;
+  editorialAssessment: string | null;
+  citations: number[];
+};
+type PublicCitation = { number: number; label: string; url: string };
+type PublicCoverMedia = {
+  id: string;
+  caption: string;
+  altText: string;
+  collection: string;
+  attribution: string;
+  sourceUrl: string;
+  publicUrl: string;
+};
+type PublicArticle = {
+  slug: string;
+  title: string;
+  description: string;
+  publishedAt: string | null;
+  body: {
+    sections: Array<{ heading: string; paragraphs: PublicFact[] }>;
+  };
+  citations: PublicCitation[];
+  coverMedia?: PublicCoverMedia | null;
+};
+const evidenceLabels: Record<EvidenceLevel, string> = {
+  suspected: "Suspected",
+  corroborated: "Corroborated",
+  confirmed: "Confirmed",
+  disputed: "Disputed",
+};
+export function getStaticPaths() {
+  return (publication.records as unknown as PublicArticle[]).map((article) => ({ params: { slug: article.slug }, props: { article } }));
+}
+const { article } = Astro.props as { article: PublicArticle };
+const citationsByNumber = new Map(article.citations.map((citation) => [citation.number, citation]));
+const coverMedia = article.coverMedia ?? null;
+---
+<Base title={`${article.title} | Game Intelligence`} description={article.description} collectionId="gta-vi">
+  <article class="article">
+    <p class="eyebrow">Grand Theft Auto VI · Published</p>
+    <h1>{article.title}</h1>
+    <p class="lede">{article.description}</p>
+    <p class="meta">Published{article.publishedAt && ` · ${new Date(article.publishedAt).toLocaleDateString()}`}</p>
+    {coverMedia && <figure class="article-cover">
+      <img src={coverMedia.publicUrl} alt={coverMedia.altText} loading="eager" fetchpriority="high" />
+      <figcaption><span>Grand Theft Auto VI / {coverMedia.collection} / {coverMedia.caption}</span><a href={coverMedia.sourceUrl} rel="noopener" target="_blank">Official source: {coverMedia.attribution}</a></figcaption>
+    </figure>}
+    {article.body.sections.map((section) => <section><h2>{section.heading}</h2>{section.paragraphs.map((fact) => <>
+      <p class="fact"><span class={`evidence-label evidence-${fact.evidenceLevel}`} aria-label={`Evidence level: ${evidenceLabels[fact.evidenceLevel]}`}>{evidenceLabels[fact.evidenceLevel]}</span>{fact.text}{fact.citations.length > 0 && <sup class="citations" aria-label="Citations">{fact.citations.map((number) => {
+        const citation = citationsByNumber.get(number);
+        return citation && <a class="citation-link" href={citation.url} aria-label={`Citation ${citation.number}: ${citation.label}`} rel="nofollow noopener">{citation.number}</a>;
+      })}</sup>}</p>
+      {fact.editorialAssessment && <p class="assessment"><span class="assessment-label">Editorial assessment:</span> {fact.editorialAssessment}</p>}
+    </>)}</section>)}
+    <section class="citations-section" aria-labelledby="citations-heading"><p class="eyebrow" id="citations-heading">Citations</p><ol>{article.citations.map((citation) => <li id={`citation-${citation.number}`}><a href={citation.url} rel="nofollow noopener">{citation.label}</a></li>)}</ol></section>
+  </article>
+</Base>

@@ -1,0 +1,146 @@
+{
+  "source": {
+    "id": "netflix-tudum",
+    "type": "editorial",
+    "canonicalUrl": "https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look",
+    "publicCitationUrl": "https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look",
+    "sourceStrength": "TRUSTED_SECONDARY",
+    "publicationMode": "normal",
+    "policy": {
+      "accessMode": "permitted_scrape",
+      "requestsPerMinute": 2,
+      "retainRawTextDays": 2,
+      "mayStoreFullText": false,
+      "attributionRequired": true,
+      "termsReviewedAt": null
+    },
+    "enabled": false
+  },
+  "item": {
+    "collectionId": "gta-vi",
+    "externalId": "https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look",
+    "url": "https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look",
+      "title": "What Netflix's GTA VI Extended Look Announcement Confirms",
+    "text": "Netflix Tudum describes an extended GTA VI look available to subscribers, using PS5 in-game footage. It states a November 19 release for PS5 and Xbox Series X|S and describes Jason, Lucia, and Leonida. The release year and further article detail are not captured here.",
+    "sourceStrength": "TRUSTED_SECONDARY",
+    "publicationMode": "normal",
+    "discoveredAt": "2026-08-27T00:00:00.000Z",
+    "publishedAt": null,
+    "lineageId": "fixture-lineage-gta-vi-netflix-tudum",
+    "inputKind": "manual_fixture",
+    "contentType": "text/html",
+    "language": "en",
+    "claims": [
+      {
+        "subject": "GTA VI extended look",
+        "predicate": "is_available_to",
+        "value": "Netflix subscribers",
+        "qualifiers": {
+          "status": "source-stated"
+        },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceLevel": "confirmed",
+        "attributionType": "trusted_secondary",
+        "statement": "Netflix Tudum reports that an extended GTA VI look is available to Netflix subscribers.",
+        "editorialAssessment": null,
+        "evidenceType": "trusted_reporting",
+        "excerpt": "An extended GTA VI look is available to Netflix subscribers.",
+        "startMs": null,
+        "endMs": null
+      },
+      {
+        "subject": "GTA VI extended look",
+        "predicate": "uses",
+        "value": "PS5 in-game footage",
+        "qualifiers": {
+          "status": "source-stated"
+        },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceLevel": "confirmed",
+        "attributionType": "trusted_secondary",
+        "statement": "Netflix Tudum reports that the look uses PS5 in-game footage.",
+        "editorialAssessment": null,
+        "evidenceType": "trusted_reporting",
+        "excerpt": "The look uses PS5 in-game footage.",
+        "startMs": null,
+        "endMs": null
+      },
+      {
+        "subject": "GTA VI",
+        "predicate": "has_a_stated_release_date_of",
+        "value": "November 19",
+        "qualifiers": {
+          "platforms": "PS5 and Xbox Series X|S",
+          "year": "not specified in this fixture basis",
+          "status": "source-stated"
+        },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceLevel": "confirmed",
+        "attributionType": "trusted_secondary",
+        "statement": "Netflix Tudum states that GTA VI is scheduled for November 19 on PS5 and Xbox Series X|S.",
+        "editorialAssessment": null,
+        "evidenceType": "trusted_reporting",
+        "excerpt": "Tudum states a November 19 release for PS5 and Xbox Series X|S.",
+        "startMs": null,
+        "endMs": null
+      },
+      {
+        "subject": "Jason",
+        "predicate": "is_described_in",
+        "value": "the Tudum GTA VI extended-look feature",
+        "qualifiers": {
+          "detail": "specific characterization not retained"
+        },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceLevel": "confirmed",
+        "attributionType": "trusted_secondary",
+        "statement": "Netflix Tudum describes Jason in the GTA VI extended-look feature.",
+        "editorialAssessment": null,
+        "evidenceType": "trusted_reporting",
+        "excerpt": "The feature describes Jason.",
+        "startMs": null,
+        "endMs": null
+      },
+      {
+        "subject": "Lucia",
+        "predicate": "is_described_in",
+        "value": "the Tudum GTA VI extended-look feature",
+        "qualifiers": {
+          "detail": "specific characterization not retained"
+        },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceLevel": "confirmed",
+        "attributionType": "trusted_secondary",
+        "statement": "Netflix Tudum describes Lucia in the GTA VI extended-look feature.",
+        "editorialAssessment": null,
+        "evidenceType": "trusted_reporting",
+        "excerpt": "The feature describes Lucia.",
+        "startMs": null,
+        "endMs": null
+      },
+      {
+        "subject": "Leonida",
+        "predicate": "is_described_in",
+        "value": "the Tudum GTA VI extended-look feature",
+        "qualifiers": {
+          "detail": "specific setting detail not retained"
+        },
+        "spoilerTags": [],
+        "exploitClass": null,
+        "evidenceLevel": "confirmed",
+        "attributionType": "trusted_secondary",
+        "statement": "Netflix Tudum describes Leonida in the GTA VI extended-look feature.",
+        "editorialAssessment": null,
+        "evidenceType": "trusted_reporting",
+        "excerpt": "The feature describes Leonida.",
+        "startMs": null,
+        "endMs": null
+      }
+    ]
+  }
+}
