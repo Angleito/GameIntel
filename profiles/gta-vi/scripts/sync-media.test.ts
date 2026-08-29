@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { assertOfficialAssetUrl, assertSafeObjectKey, parseSourceConfig } from "./sync-gta-vi-media.ts";
+import { assertOfficialAssetUrl, assertSafeObjectKey, parseSourceConfig } from "./sync-media.ts";
 
 const config = parseSourceConfig({
   version: "1",

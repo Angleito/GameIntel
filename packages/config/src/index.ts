@@ -1,4 +1,7 @@
 import { readFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import {
@@ -46,6 +49,13 @@ export const SourceRegistryEntrySchema = z.object({
   terms_reviewed_at: z.string().nullable().optional(),
   retain_raw_text_days: z.number().nonnegative().optional(),
   may_store_full_text: z.boolean().optional(),
+  // Discovery turns a feed source into a queue of items: the scheduler runs
+  // the adapter's discover() on the poll_url and enqueues each discovered
+  // reference as its own ingestion job.
+  discovery: z.object({
+    adapter: z.literal("rss"),
+    enabled: z.boolean(),
+  }).optional(),
   enabled: z.boolean(),
 }).superRefine((entry, context) => {
   if (entry.access !== "manual" && entry.domains.length === 0) {
@@ -59,6 +69,12 @@ export const SourceRegistryEntrySchema = z.object({
   }
   if (entry.poll_interval_seconds !== undefined && entry.poll_url === undefined) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["poll_url"], message: "Pollable sources require an explicit poll_url" });
+  }
+  if (entry.discovery !== undefined && entry.access !== "rss") {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["discovery"], message: "Discovery currently supports only rss sources" });
+  }
+  if (entry.discovery !== undefined && entry.poll_interval_seconds === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["discovery"], message: "Discovery sources require a poll cadence" });
   }
   if (entry.poll_url !== undefined && entry.access !== "manual") {
     let hostname: string;
@@ -81,6 +97,28 @@ export type SourceRegistryEntry = z.infer<typeof SourceRegistryEntrySchema>;
 export const SourceRegistrySchema = z.object({ sources: z.array(SourceRegistryEntrySchema) });
 export type SourceRegistry = z.infer<typeof SourceRegistrySchema>;
 
+const MediaSlideSchema = z.object({
+  url: z.string().min(1),
+  caption: z.string().min(1),
+  collection: z.string().min(1),
+  attribution: z.string().min(1),
+  focalPoint: z.string().optional().default("center center"),
+  accent: z.string().regex(/^#[0-9a-f]{3,8}$/i),
+  sourceUrl: PublicHttpUrlSchema,
+});
+export const MediaShowcaseSchema = z.object({
+  profileId: z.string().min(1),
+  label: z.string().min(1),
+  sourceName: z.string().min(1),
+  sourceUrl: PublicHttpUrlSchema,
+  slides: z.array(MediaSlideSchema).min(1),
+});
+export type MediaShowcase = z.infer<typeof MediaShowcaseSchema>;
+
+export async function loadMediaShowcase(path: string | URL): Promise<MediaShowcase> {
+  return MediaShowcaseSchema.parse(JSON.parse(await readFile(path, "utf8")));
+}
+
 export async function loadProjectConfig(path: string | URL): Promise<ProjectConfig> {
   return ProjectConfigSchema.parse(JSON.parse(await readFile(path, "utf8")));
 }
@@ -93,14 +131,68 @@ export async function loadSourceRegistry(path: string | URL): Promise<SourceRegi
   return SourceRegistrySchema.parse(parseYaml(await readFile(path, "utf8"))).sources;
 }
 
-export function profilePath(profileId = process.env.GAMEINTEL_PROFILE ?? "gta-vi"): URL {
-  if (!/^[a-z0-9-]+$/.test(profileId)) throw new Error("Profile id must contain only lowercase letters, numbers, and hyphens");
-  return new URL(`../../../config/games/${profileId}/profile.json`, import.meta.url);
+const PROJECT_FILE = "config/project.json";
+const PROFILE_ID_PATTERN = /^[a-z0-9-]+$/;
+
+// The repository root is discovered once: first relative to this module
+// (unbundled packages), then by walking up from the working directory (bundled
+// output such as an Astro build). Profiles live under profiles/<profile-id>/;
+// the default profile comes from configuration (GAMEINTEL_PROFILE or the
+// project's defaultProfileId), never from a hard-coded game name.
+let repoRoot: string | null = null;
+
+function discoverRepoRoot(): string {
+  if (repoRoot) return repoRoot;
+  const moduleCandidate = fileURLToPath(new URL(`../../../${PROJECT_FILE}`, import.meta.url));
+  if (existsSync(moduleCandidate)) {
+    repoRoot = dirname(dirname(moduleCandidate));
+    return repoRoot;
+  }
+  let current = process.cwd();
+  while (true) {
+    if (existsSync(join(current, PROJECT_FILE))) {
+      repoRoot = current;
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  throw new Error("Could not locate the repository root (config/project.json)");
 }
 
-export function sourceRegistryPath(profileId = process.env.GAMEINTEL_PROFILE ?? "gta-vi"): URL {
-  if (!/^[a-z0-9-]+$/.test(profileId)) throw new Error("Profile id must contain only lowercase letters, numbers, and hyphens");
-  return new URL(`../../../config/games/${profileId}/source-registry.yaml`, import.meta.url);
+function defaultProfileId(): string {
+  const fromEnv = process.env.GAMEINTEL_PROFILE;
+  if (fromEnv) return fromEnv;
+  return ProjectConfigSchema.parse(JSON.parse(readFileSync(join(discoverRepoRoot(), PROJECT_FILE), "utf8"))).defaultProfileId;
+}
+
+function resolvedProfileId(profileId?: string): string {
+  const resolved = profileId ?? defaultProfileId();
+  if (!PROFILE_ID_PATTERN.test(resolved)) {
+    throw new Error("Profile id must contain only lowercase letters, numbers, and hyphens");
+  }
+  return resolved;
+}
+
+function profileFile(profileId: string, name: string): URL {
+  return new URL(`file://${join(discoverRepoRoot(), "profiles", profileId, name)}`);
+}
+
+export function profilePath(profileId?: string): URL {
+  return profileFile(resolvedProfileId(profileId), "profile.json");
+}
+
+export function sourceRegistryPath(profileId?: string): URL {
+  return profileFile(resolvedProfileId(profileId), "source-registry.yaml");
+}
+
+export function mediaSourcePath(profileId?: string): URL {
+  return profileFile(resolvedProfileId(profileId), "media-source.json");
+}
+
+export function mediaShowcasePath(profileId?: string): URL {
+  return profileFile(resolvedProfileId(profileId), "media-showcase.json");
 }
 
 export function validateSourcePolicy(policy: unknown) {

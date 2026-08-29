@@ -1,0 +1,27 @@
+---
+import Base from "../../../layouts/Base.astro";
+import project from "../../../../../../config/project.json";
+import { loadCollectionProfile, profilePath } from "@gameintel/config";
+import publication from "../../../data/publication";
+type PublicArticle = { slug: string; title: string; description: string; collectionId: string; status: string };
+
+export function getStaticPaths() {
+  const profileId = process.env.GAMEINTEL_PROFILE || project.defaultProfileId;
+  return [{ params: { gameId: profileId } }];
+}
+
+const { gameId } = Astro.params;
+const profile = await loadCollectionProfile(profilePath(gameId));
+const profileLabel = profile.aliases[0] ?? profile.canonicalName;
+const articles = (publication.records as PublicArticle[]).filter((article) => article.collectionId === gameId);
+---
+<Base title={`${profileLabel} | Game Intelligence`} description={`Evidence-first ${profile.canonicalName} coverage.`} collectionId={gameId}>
+  <section class="hero">
+    <p class="eyebrow">Launch profile / {profileLabel}</p>
+    <h1>{profile.canonicalName}</h1>
+    <div class="hero__rule"></div>
+    <p class="lede">A living index of human-reviewed reporting and structured discoveries. Spoiler-sensitive details remain outside this public publication layer.</p>
+    <div class="hero__details"><span><strong>Profile</strong> {profileLabel}</span><span><strong>Coverage</strong> Source-backed</span></div>
+  </section>
+  <section><div class="section-heading"><h2>Published coverage</h2><p>{articles.length} approved records</p></div><div class="grid">{articles.length ? articles.map((article) => <a class="card" href={`/articles/${article.slug}/`}><span class="meta">{article.status}</span><h2>{article.title}</h2><p>{article.description}</p></a>) : <div class="card"><h2>No published stories yet</h2><p>The local operator must review and approve a story before it appears here.</p></div>}</div></section>
+</Base>

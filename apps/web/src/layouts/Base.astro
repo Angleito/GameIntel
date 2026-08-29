@@ -1,10 +1,13 @@
 ---
 import project from "../../../../config/project.json";
+import { loadCollectionProfile, profilePath } from "@gameintel/config";
 import MediaBackdrop from "../components/MediaBackdrop.astro";
 import { getFeaturedMedia } from "../data/featured-media";
 
+const profile = await loadCollectionProfile(profilePath(project.defaultProfileId));
 const { title = project.name, description = project.description, collectionId } = Astro.props;
-const media = getFeaturedMedia(collectionId);
+const media = await getFeaturedMedia(collectionId ?? profile.id);
+const profileLabel = profile.aliases[0] ?? profile.canonicalName;
 ---
 <!doctype html>
 <html lang="en">
@@ -16,10 +19,10 @@ const media = getFeaturedMedia(collectionId);
     <title>{title}</title>
   </head>
   <body>
-    <MediaBackdrop media={media} />
+    <MediaBackdrop media={media} creditName={profile.canonicalName} slideshowUrl={`/api/media/${profile.id}/slideshow`} />
     <header class="site-header">
       <a class="brand" href="/" aria-label="GameIntel home">GAME<span>INTEL</span><i>GG</i></a>
-      <nav aria-label="Primary navigation"><a href="/games/gta-vi/">GTA VI</a><a href="/editorial-policy/">Method</a><a href="/source-policy/">Policy</a></nav>
+      <nav aria-label="Primary navigation"><a href={`/games/${profile.id}/`}>{profileLabel}</a><a href="/editorial-policy/">Method</a><a href="/source-policy/">Policy</a></nav>
     </header>
     <main><slot /></main>
     <footer>

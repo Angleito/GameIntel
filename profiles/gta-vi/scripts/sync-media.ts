@@ -3,12 +3,16 @@
  * assets and a catalog. Only the configured official page and static asset path
  * are accepted; downloads are bounded and are never uploaded by this command.
  *
+ * This tooling is profile-local: it lives under profiles/gta-vi/ and its
+ * constants describe the GTA VI media source only.
+ *
  * Usage:
- *   R2_PUBLIC_BASE_URL=https://media.example.com bun run media:gta-vi:sync
- *   bun run media:gta-vi:sync --dry-run
+ *   R2_PUBLIC_BASE_URL=https://media.example.com bun run media:sync
+ *   bun run media:sync --dry-run
  */
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { mediaSourcePath } from "@gameintel/config";
 
 export type SourceConfig = {
   version: string;
@@ -638,7 +642,7 @@ export function parseCatalog(value: unknown, config: SourceConfig, baseUrl?: str
 }
 
 function usage(): void {
-  console.log("Usage: R2_PUBLIC_BASE_URL=https://media.example.com bun run media:gta-vi:sync [--dry-run]");
+  console.log("Usage: R2_PUBLIC_BASE_URL=https://media.example.com bun run media:sync [--dry-run]");
 }
 
 async function readJson(path: string, label: string): Promise<unknown> {
@@ -670,7 +674,7 @@ async function main(): Promise<void> {
     throw new Error("Unknown argument.");
   }
 
-  const config = parseSourceConfig(await readJson(resolve("config/games/gta-vi/media-source.json"), "media source config"));
+  const config = parseSourceConfig(await readJson(mediaSourcePath(process.env.GAMEINTEL_PROFILE ?? "gta-vi"), "media source config"));
   const page = await fetchBoundedOfficial(
     assertOfficialPageUrl(config.sourcePageUrl),
     (url) => assertOfficialPageUrl(url.toString()),

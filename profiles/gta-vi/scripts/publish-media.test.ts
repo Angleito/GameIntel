@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { assertR2Endpoint } from "./publish-gta-vi-media.ts";
+import { assertR2Endpoint } from "@gameintel/r2";
 
 describe("R2 publishing boundaries", () => {
   const accountId = "0123456789abcdef0123456789abcdef";

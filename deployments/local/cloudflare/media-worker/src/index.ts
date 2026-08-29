@@ -5,9 +5,10 @@ export interface Env {
   MEDIA_BUCKET: R2Bucket;
   DAILY_SHUFFLE_SECRET: string;
   MEDIA_CATALOG_KEY: string;
+  // Profile-scoped worker route; defaults to the repository's showcase profile.
+  MEDIA_GAME_ID?: string;
 }
 
-const GAME_ID = "gta-vi";
 const PATH_PATTERN = /^\/api\/media\/([^/]+)\/slideshow\/?$/;
 
 function json(body: unknown, status: number, headers: HeadersInit = {}): Response {
@@ -68,7 +69,8 @@ export default {
     }
 
     const gameId = gameIdForPath(new URL(request.url).pathname);
-    if (gameId !== GAME_ID) return json({ error: "Not found" }, 404);
+    const allowedGameId = (env.MEDIA_GAME_ID ?? "gta-vi").trim().toLowerCase();
+    if (!allowedGameId || gameId !== allowedGameId) return json({ error: "Not found" }, 404);
 
     const key = cacheKey(request.url, gameId);
     const cached = await caches.default.match(key);
