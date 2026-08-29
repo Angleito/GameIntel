@@ -40,6 +40,9 @@ services:
         test "$$APP_DATABASE_USER" != "$$POSTGRES_USER";
         test "$$APP_OPERATOR_DATABASE_USER" != "$$POSTGRES_USER";
         test "$$APP_PUBLIC_DATABASE_USER" != "$$POSTGRES_USER";
+        test "$$APP_DATABASE_USER" != "$$APP_OPERATOR_DATABASE_USER";
+        test "$$APP_DATABASE_USER" != "$$APP_PUBLIC_DATABASE_USER";
+        test "$$APP_OPERATOR_DATABASE_USER" != "$$APP_PUBLIC_DATABASE_USER";
         until pg_isready -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"; do sleep 1; done;
         psql -v ON_ERROR_STOP=1 -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
         -v app_user="$$APP_DATABASE_USER" -v app_password="$$APP_DATABASE_PASSWORD"

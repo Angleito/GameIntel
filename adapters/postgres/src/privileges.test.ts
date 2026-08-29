@@ -155,6 +155,93 @@ describe("PostgreSQL capability role privileges", () => {
     }
   });
 
+  test("public role cannot read internal knowledge-base tables or submission identity columns", async () => {
+    const db = createDb(publicUrl);
+    try {
+      await denied(() => db`SELECT report FROM public_submissions LIMIT 1`);
+      await denied(() => db`SELECT submitter_session_hash FROM public_submissions LIMIT 1`);
+      await denied(() => db`SELECT submitter_ip_hash FROM public_submissions LIMIT 1`);
+      await denied(() => db`SELECT submitter_account_id FROM public_submissions LIMIT 1`);
+      await denied(() => db`SELECT title FROM source_items LIMIT 1`);
+      await denied(() => db`SELECT id FROM source_item_revisions LIMIT 1`);
+      await denied(() => db`SELECT id FROM claims LIMIT 1`);
+      await denied(() => db`SELECT id FROM evidence LIMIT 1`);
+      await denied(() => db`SELECT id FROM evidence_reviews LIMIT 1`);
+      await denied(() => db`SELECT id FROM article_revisions LIMIT 1`);
+      await denied(() => db`SELECT id FROM provenance_families LIMIT 1`);
+      await denied(() => db`SELECT id FROM source_item_provenance LIMIT 1`);
+      await denied(() => db`SELECT id FROM submission_moderation_actions LIMIT 1`);
+      await denied(() => db`SELECT id FROM audit_log LIMIT 1`);
+      await denied(() => db`SELECT id FROM events LIMIT 1`);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("public role can read submission-intake projection columns", async () => {
+    await cleanup();
+    const db = createDb(publicUrl);
+    try {
+      const rows = await db`SELECT id, collection_id, content_hash, created_at FROM public_submissions LIMIT 1`;
+      expect(Array.isArray(rows)).toBe(true);
+    } finally {
+      await closeDb(db);
+      await cleanup();
+    }
+  });
+
+  test("operator role can read articles including drafts for the operator listing", async () => {
+    const db = createDb(operatorUrl);
+    try {
+      const rows = await db`SELECT id, status FROM articles WHERE game_id = 'privilege-test' LIMIT 1`;
+      expect(Array.isArray(rows)).toBe(true);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("operator role cannot create or mutate articles or bypass the publication boundary", async () => {
+    const db = createDb(operatorUrl);
+    try {
+      await denied(() => db`UPDATE articles SET status = 'published' WHERE id = 'none'`);
+      await denied(() => db`UPDATE articles SET published_at = now() WHERE id = 'none'`);
+      await denied(() => db`UPDATE articles SET confidence = 1 WHERE id = 'none'`);
+      await denied(() => db`INSERT INTO articles (id, game_id, slug, title, seo_title, description, body, status, newsworthiness, confidence) VALUES ('x', 'privilege-test', 's', 't', 't', 'd', '{}', 'draft', 0, 0)`);
+      await denied(() => db`INSERT INTO article_revisions (id, article_id, revision_number, body, change_summary) VALUES ('x', 'y', 1, '{}', '')`);
+      await denied(() => db`INSERT INTO article_sources (id, article_id, source_id, citation_label, public_citation_url) VALUES ('x', 'y', 'z', 'l', 'https://example.com')`);
+      await denied(() => db`INSERT INTO article_media (article_id, media_id, role, selection_source, review_status) VALUES ('x', 'y', 'cover', 'automatic', 'pending')`);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("bootstrap logins are members of exactly one capability group", async () => {
+    const logins = new Map<string, string>([
+      ["app", new URL(runtimeUrl).username],
+      ["operator", new URL(operatorUrl).username],
+      ["public", new URL(publicUrl).username],
+    ]);
+    const db = createDb(migrationUrl);
+    try {
+      const memberships = await db`
+        SELECT pg_roles.rolname AS member, member_of.rolname AS group_role
+        FROM pg_auth_members
+        JOIN pg_roles pg_roles ON pg_roles.oid = pg_auth_members.member
+        JOIN pg_roles member_of ON member_of.oid = pg_auth_members.roleid
+        WHERE member_of.rolname IN ('gameintel_runtime', 'gameintel_operator', 'gameintel_public')
+          AND pg_roles.rolname = ANY(${db.array([...logins.values()])})
+      `;
+      for (const [label, username] of logins) {
+        const groups = memberships.filter((row) => row.member === username).map((row) => row.group_role as string);
+        expect(groups).toHaveLength(1);
+      }
+      const allGroups = [...new Set(memberships.map((row) => row.group_role as string))];
+      expect(allGroups).toEqual(["gameintel_runtime", "gameintel_operator", "gameintel_public"]);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
   test("runtime role retains editorial write access", async () => {
     await cleanup();
     const db = createDb(runtimeUrl);

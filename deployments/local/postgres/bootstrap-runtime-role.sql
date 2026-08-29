@@ -4,6 +4,8 @@
 --   app_user     -> gameintel_runtime (worker, scheduler, publisher, operator CLI)
 --   operator_user -> gameintel_operator (token-protected operator API surface)
 --   public_user  -> gameintel_public (public API reads and submission intake)
+-- Memberships are revoked before the intended grant so a misconfigured login
+-- can never accumulate capabilities from more than one group.
 
 SELECT format(
   'CREATE ROLE %I LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L',
@@ -28,6 +30,10 @@ FROM (VALUES
   (:'operator_user', :'operator_password'),
   (:'public_user', :'public_password')
 ) AS roles(role_name, role_password)
+\gexec
+
+SELECT format('REVOKE gameintel_runtime, gameintel_operator, gameintel_public FROM %I', role_name)
+FROM (VALUES (:'app_user'), (:'operator_user'), (:'public_user')) AS logins(role_name)
 \gexec
 
 SELECT format('GRANT %I TO %I', group_name, role_name)

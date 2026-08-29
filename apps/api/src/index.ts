@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import {
+  effectivePublicationMode,
   PublicHttpUrlSchema,
   PublicSubmissionReviewDecisionSchema,
   PublicSubmissionSchema,
@@ -8,7 +9,7 @@ import {
   toSafeArticle,
 } from "@gameintel/core";
 import { SubmissionRateLimitError } from "@gameintel/contracts";
-import { loadCollectionProfile, loadProjectConfig, profilePath } from "@gameintel/config";
+import { loadCollectionProfile, loadProjectConfig, loadSourceRegistry, profilePath, sourceRegistryPath } from "@gameintel/config";
 import { ingestText, promotePublicSubmission } from "@gameintel/newsroom";
 import { LocalAbuseProtection, StaticOperatorIdentityProvider, SubmissionIdentityError } from "@gameintel/newsroom/identity";
 import { createServiceRuntime } from "@gameintel/newsroom/runtime";
@@ -284,6 +285,11 @@ app.post("/internal/operator/ingest/text", async (c) => {
   const body = parsed.data;
   if (body.gameId !== profile.id) return c.json({ error: "Game not found" }, 404);
   try {
+    const entry = (await loadSourceRegistry(sourceRegistryPath(profile.id))).find((candidate) => candidate.id === (body.sourceId ?? "operator-note"));
+    if (!entry) return c.json({ error: "Source is not registered" }, 400);
+    if (effectivePublicationMode(entry.source_strength, entry.publication_mode) === "normal") {
+      return c.json({ error: "This endpoint accepts discussion-only intake; article-capable sources are restricted to the worker and operator CLI" }, 400);
+    }
     return c.json(await ingestText(operatorRuntime.persistence, {
       collectionId: body.gameId,
       sourceId: body.sourceId ?? "operator-note",

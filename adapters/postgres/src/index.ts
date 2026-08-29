@@ -1207,18 +1207,18 @@ export async function purgeExpiredSourceContent(db: Db, options: { execute?: boo
 
 async function submissionCount(db: Db, condition: "ip" | "session" | "account" | "global", identity?: string): Promise<number> {
   if (condition === "ip") {
-    const rows = await db`SELECT count(*)::int AS count FROM public_submissions WHERE submitter_ip_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
+    const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE submitter_ip_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
     return Number(rows[0]?.count ?? 0);
   }
   if (condition === "session") {
-    const rows = await db`SELECT count(*)::int AS count FROM public_submissions WHERE submitter_session_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
+    const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE submitter_session_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
     return Number(rows[0]?.count ?? 0);
   }
   if (condition === "account") {
-    const rows = await db`SELECT count(*)::int AS count FROM public_submissions WHERE submitter_account_id = ${identity!} AND created_at >= now() - interval '1 day'`;
+    const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE submitter_account_id = ${identity!} AND created_at >= now() - interval '1 day'`;
     return Number(rows[0]?.count ?? 0);
   }
-  const rows = await db`SELECT count(*)::int AS count FROM public_submissions WHERE created_at >= now() - interval '1 minute'`;
+  const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE created_at >= now() - interval '1 minute'`;
   return Number(rows[0]?.count ?? 0);
 }
 
