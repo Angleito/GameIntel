@@ -71,24 +71,27 @@ export async function listCoverCandidates(db: Db, articleId: string): Promise<Co
 }
 
 export async function setCoverMedia(db: Db, articleId: string, mediaId: string, selectionSource: "automatic" | "editor" = "editor"): Promise<void> {
-  const rows = await db`
-    SELECT a.game_id AS article_game_id, ma.game_id AS media_game_id, ma.spoiler_tags
-    FROM articles a CROSS JOIN media_assets ma
-    WHERE a.id = ${articleId} AND ma.id = ${mediaId}
-  `;
-  if (!rows.length) throw new Error("Article or media asset not found");
-  if (rows[0].article_game_id !== rows[0].media_game_id) throw new Error("Cover media must belong to the article collection");
-  if (jsonArray(rows[0].spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
-  await db`
-    INSERT INTO article_media (article_id, media_id, role, selection_source, review_status)
-    VALUES (${articleId}, ${mediaId}, 'cover', ${selectionSource}, 'pending')
-    ON CONFLICT (article_id, role) DO UPDATE SET
-      media_id = EXCLUDED.media_id, selection_source = EXCLUDED.selection_source, review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL, created_at = now()
-  `;
-  // A pending or replaced cover must not remain in the public surface; a
-  // published article's materialized record is refreshed (drafts have no
-  // record and the refresh is a no-op).
-  await refreshPublicArticleRecord(db, articleId);
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`
+      SELECT a.game_id AS article_game_id, ma.game_id AS media_game_id, ma.spoiler_tags
+      FROM articles a CROSS JOIN media_assets ma
+      WHERE a.id = ${articleId} AND ma.id = ${mediaId}
+    `;
+    if (!rows.length) throw new Error("Article or media asset not found");
+    if (rows[0].article_game_id !== rows[0].media_game_id) throw new Error("Cover media must belong to the article collection");
+    if (jsonArray(rows[0].spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
+    await transaction`
+      INSERT INTO article_media (article_id, media_id, role, selection_source, review_status)
+      VALUES (${articleId}, ${mediaId}, 'cover', ${selectionSource}, 'pending')
+      ON CONFLICT (article_id, role) DO UPDATE SET
+        media_id = EXCLUDED.media_id, selection_source = EXCLUDED.selection_source, review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL, created_at = now()
+    `;
+    // A pending or replaced cover must not remain in the public surface; a
+    // published article's materialized record is refreshed (drafts have no
+    // record and the refresh is a no-op). The mutation and refresh commit
+    // together so the media state can never outlive a failed refresh.
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
 }
 
 export async function recommendArticleCover(db: Db, input: { articleId: string; title: string; description: string; safeClaimText: string[] }): Promise<string | null> {
@@ -102,20 +105,24 @@ export async function recommendArticleCover(db: Db, input: { articleId: string; 
 }
 
 export async function approveMediaAsset(db: Db, mediaId: string, reviewer: string): Promise<void> {
-  const rows = await db`UPDATE media_assets SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now() WHERE id = ${mediaId} RETURNING id`;
-  if (!rows.length) throw new Error("Media asset not found");
-  await refreshCoverArticlesForAssets(db, [mediaId]);
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`UPDATE media_assets SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now() WHERE id = ${mediaId} RETURNING id`;
+    if (!rows.length) throw new Error("Media asset not found");
+    await refreshCoverArticlesForAssets(transaction, [mediaId]);
+  });
 }
 
 export async function approveMediaCollection(db: Db, collectionId: string, reviewer: string): Promise<number> {
-  const rows = await db`
-    UPDATE media_assets
-    SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now()
-    WHERE game_id = ${collectionId} AND review_status = 'pending' AND jsonb_array_length(spoiler_tags) = 0
-    RETURNING id
-  `;
-  await refreshCoverArticlesForAssets(db, rows.map((row) => row.id as string));
-  return rows.length;
+  return inTransaction(db, async (transaction) => {
+    const rows = await transaction`
+      UPDATE media_assets
+      SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now()
+      WHERE game_id = ${collectionId} AND review_status = 'pending' AND jsonb_array_length(spoiler_tags) = 0
+      RETURNING id
+    `;
+    await refreshCoverArticlesForAssets(transaction, rows.map((row) => row.id as string));
+    return rows.length;
+  });
 }
 
 // Refreshes the materialized public record of every published article whose
@@ -131,24 +138,30 @@ async function refreshCoverArticlesForAssets(db: Db, mediaIds: string[]): Promis
 }
 
 export async function approveCoverMedia(db: Db, articleId: string, reviewer: string): Promise<void> {
-  const rows = await db`
-    SELECT am.media_id, ma.review_status AS asset_review_status
-    FROM article_media am JOIN media_assets ma ON ma.id = am.media_id
-    WHERE am.article_id = ${articleId} AND am.role = 'cover'
-  `;
-  if (!rows.length) throw new Error("Article has no selected cover media");
-  if (rows[0].asset_review_status !== "approved") throw new Error("Cover media asset must be approved before its assignment");
-  await db`UPDATE article_media SET review_status = 'approved', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover'`;
-  await refreshPublicArticleRecord(db, articleId);
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`
+      SELECT am.media_id, ma.review_status AS asset_review_status
+      FROM article_media am JOIN media_assets ma ON ma.id = am.media_id
+      WHERE am.article_id = ${articleId} AND am.role = 'cover'
+    `;
+    if (!rows.length) throw new Error("Article has no selected cover media");
+    if (rows[0].asset_review_status !== "approved") throw new Error("Cover media asset must be approved before its assignment");
+    await transaction`UPDATE article_media SET review_status = 'approved', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover'`;
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
 }
 
 export async function rejectCoverMedia(db: Db, articleId: string, reviewer: string): Promise<void> {
-  const rows = await db`UPDATE article_media SET review_status = 'rejected', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover' RETURNING media_id`;
-  if (!rows.length) throw new Error("Article has no selected cover media");
-  await refreshPublicArticleRecord(db, articleId);
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`UPDATE article_media SET review_status = 'rejected', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover' RETURNING media_id`;
+    if (!rows.length) throw new Error("Article has no selected cover media");
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
 }
 
 export async function clearCoverMedia(db: Db, articleId: string): Promise<void> {
-  await db`DELETE FROM article_media WHERE article_id = ${articleId} AND role = 'cover'`;
-  await refreshPublicArticleRecord(db, articleId);
+  await inTransaction(db, async (transaction) => {
+    await transaction`DELETE FROM article_media WHERE article_id = ${articleId} AND role = 'cover'`;
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
 }
