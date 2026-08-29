@@ -30,6 +30,13 @@ function assertDiscoveryEntry(entry: RegistryEntry): void {
 // job. The queue deduplicates active item executions, and completed items are
 // safely re-refreshable later. The feed itself is never ingested as an
 // article.
+//
+// Lease fencing note: the per-item assertIngestionJobLeaseHeld checks narrow
+// the reclaim window but are not atomic with the enqueues (the FOR UPDATE
+// lock commits before each child INSERT). This is acceptable because the
+// worker loop's lease-verified complete/fail calls discard this execution's
+// outcome after a loss, and the child jobs are themselves deduplicated and
+// policy-bound regardless of when they were enqueued.
 export async function processDiscoveryJob(
   runtime: GameIntelRuntime,
   job: IngestionJob,
