@@ -810,6 +810,19 @@ export async function materializePublicArticle(db: Db, article: Article): Promis
   `;
 }
 
+// Keeps the materialized public surface consistent with the article row after
+// any mutation that affects public output (publication, evidence demotion,
+// cover changes, media approval or revocation). Call this transactionally
+// from the same operation that changed the article or its media.
+export async function refreshPublicArticleRecord(db: Db, articleId: string, article?: Article | null): Promise<void> {
+  const current = article ?? await getArticle(db, articleId);
+  if (!current || (current.status !== "published" && current.status !== "updated") || !toSafeArticle(current)) {
+    await db`DELETE FROM public_article_records WHERE article_id = ${articleId}`;
+    return;
+  }
+  await materializePublicArticle(db, current);
+}
+
 async function lockArticle(db: Db, articleId: string): Promise<Record<string, unknown>> {
   const articles = await db`SELECT id, status FROM articles WHERE id = ${articleId} FOR UPDATE`;
   if (!articles.length) throw new Error("Article not found");
@@ -1005,13 +1018,9 @@ async function refreshArticleEvidenceState(db: Db, articleId: string): Promise<A
       END
     WHERE id = ${articleId}
   `;
-  // A demoted article is no longer part of the public surface; its
-  // materialized sanitized record must not outlive it.
-  await db`
-    DELETE FROM public_article_records
-    WHERE article_id = ${articleId}
-      AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.id = ${articleId} AND a.status IN ('published', 'updated'))
-  `;
+  // A demoted article is no longer public-safe; drop its materialized record
+  // (refreshPublicArticleRecord also covers any residual public state).
+  await refreshPublicArticleRecord(db, articleId);
   return evidence;
 }
 
@@ -1232,7 +1241,7 @@ export async function markPublished(db: Db, articleId: string, operator: string)
     // public role can only ever read this record, never the article row.
     const published = await getArticle(transaction, articleId);
     if (!published) throw new Error("Published article not found");
-    await materializePublicArticle(transaction, published);
+    await refreshPublicArticleRecord(transaction, articleId, published);
     return published;
   });
 }

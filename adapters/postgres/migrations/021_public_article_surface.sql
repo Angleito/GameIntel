@@ -8,7 +8,7 @@
 -- including editorial-only fields and internal body sections, are never
 -- readable by a public process.
 
-CREATE TABLE public_article_records (
+CREATE TABLE IF NOT EXISTS public_article_records (
   article_id text PRIMARY KEY,
   collection_id text NOT NULL,
   slug text NOT NULL,
@@ -22,8 +22,12 @@ CREATE TABLE public_article_records (
   published_at timestamptz,
   updated_at timestamptz NOT NULL
 );
-CREATE INDEX public_article_records_collection ON public_article_records(collection_id, published_at DESC);
-CREATE INDEX public_article_records_slug ON public_article_records(slug);
+CREATE INDEX IF NOT EXISTS public_article_records_collection ON public_article_records(collection_id, published_at DESC);
+CREATE INDEX IF NOT EXISTS public_article_records_slug ON public_article_records(slug);
+-- The runtime role maintains the surface (materialize on publish, delete on
+-- demotion or media revocation), so it needs DELETE on this one internal
+-- table, mirroring the article_media carve-out.
+GRANT DELETE ON public_article_records TO gameintel_runtime;
 
 -- The previous public read functions returned the raw article row (a.*),
 -- including editorial fields, internal body sections, and internal
@@ -31,6 +35,8 @@ CREATE INDEX public_article_records_slug ON public_article_records(slug);
 -- materialized public surface.
 DROP FUNCTION IF EXISTS public_article_get(text);
 DROP FUNCTION IF EXISTS public_article_list(text);
+DROP FUNCTION IF EXISTS public_public_article_get(text);
+DROP FUNCTION IF EXISTS public_public_article_list(text);
 
 CREATE FUNCTION public_public_article_get(p_id_or_slug text) RETURNS jsonb
 LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog
@@ -70,7 +76,7 @@ AS $$
     'updatedAt', to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
     'citations', t.citations,
     'coverMedia', t.cover_media
-  )), '[]'::jsonb)
+  ) ORDER BY t.published_at DESC, t.article_id), '[]'::jsonb)
   FROM public.public_article_records t
   WHERE t.collection_id = p_collection_id
 $$;
@@ -84,6 +90,7 @@ GRANT EXECUTE ON FUNCTION public_public_article_list(text) TO gameintel_public;
 -- parameters: a compromised public client can no longer disable abuse limits
 -- by supplying enormous values.
 DROP FUNCTION IF EXISTS public_submission_submit(text, text, text, text, text, text, jsonb, jsonb, text, integer, integer, integer, integer, integer);
+DROP FUNCTION IF EXISTS public_submission_submit(text, text, text, text, text, text, jsonb, jsonb, text, integer);
 
 CREATE FUNCTION public_submission_submit(
   p_collection_id text,

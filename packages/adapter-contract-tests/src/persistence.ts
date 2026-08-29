@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { GameIntelPersistence } from "@gameintel/contracts";
 import { hashText, lineageFor } from "@gameintel/core";
 import { testItem, testPolicy, testProfile, testSourceInput } from "./fixtures.ts";
@@ -130,6 +133,62 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(safeSingle!.body.sections.every((section) => section.publicSafe && section.spoilerTags.length === 0)).toBe(true);
       const raw = await persistence.getArticle(articleId);
       expect(JSON.stringify(raw?.body)).toContain("Internal note");
+    });
+
+    test("keeps the public surface in sync with post-publication cover changes", async () => {
+      const seededResult = await seeded();
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Cover sync article",
+        description: "Cover sync.",
+        body: {
+          summary: "Cover sync.",
+          sections: [{ heading: "Evidence", paragraphs: [{ text: "Verified observation.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [seededResult.claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] }],
+          unknowns: [],
+        },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId: seededResult.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      const evidence = await persistence.listArticleEvidence(articleId);
+      await persistence.reviewEvidence(evidence[0].id, "reviewer-a", "approved", "Supports the claim");
+      await persistence.reviewArticle(articleId, "editor", "Review complete");
+      await persistence.approveArticle(articleId, "approver");
+      await persistence.markPublished(articleId, "publisher");
+      expect((await persistence.getPublicArticle(articleId))?.coverMedia).toBeNull();
+
+      const directory = await mkdtemp(join(tmpdir(), "gameintel-cover-"));
+      const catalogPath = join(directory, "catalog.json");
+      await writeFile(catalogPath, JSON.stringify({
+        media: [{
+          id: "media-contract-cover", collectionId: "contract-test", collection: "Screenshots", caption: "Cover", altText: "Cover alt",
+          tags: ["official"], spoilerTags: [], attribution: "Contract", sourceUrl: "https://contract.example.com/src.jpg",
+          sourcePageUrl: "https://contract.example.com/page", originalKey: "originals/x", displayKey: "display/x",
+          publicUrl: "https://media.example.com/x.jpg", contentType: "image/jpeg", width: 10, height: 10, checksum: "a".repeat(64),
+        }],
+      }));
+      try {
+        await persistence.importMediaCatalog(catalogPath);
+        await persistence.approveMediaAsset("media-contract-cover", "editor");
+        await persistence.setCoverMedia(articleId, "media-contract-cover", "editor");
+        await persistence.approveCoverMedia(articleId, "editor");
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia?.id).toBe("media-contract-cover");
+        expect((await persistence.getArticle(articleId))?.coverMedia?.reviewStatus).toBe("approved");
+
+        await persistence.rejectCoverMedia(articleId, "editor");
+        expect((await persistence.getArticle(articleId))?.coverMedia?.reviewStatus).toBe("rejected");
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia).toBeNull();
+
+        await persistence.setCoverMedia(articleId, "media-contract-cover", "editor");
+        await persistence.approveCoverMedia(articleId, "editor");
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia?.id).toBe("media-contract-cover");
+
+        await persistence.clearCoverMedia(articleId);
+        expect((await persistence.getArticle(articleId))?.coverMedia).toBeNull();
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia).toBeNull();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     });
 
     test("blocks publication while any reviewer rejects or disputes evidence", async () => {

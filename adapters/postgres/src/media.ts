@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { assertUniqueMedia, MediaCatalogSchema, mediaCoverScore, type CatalogMedia } from "@gameintel/core";
 import type { CoverMediaCandidate } from "@gameintel/contracts";
-import type { Db } from "./index.ts";
+import { inTransaction, refreshPublicArticleRecord, type Db } from "./index.ts";
 
 export type { CoverMediaCandidate };
 
@@ -29,20 +29,31 @@ export async function importMediaCatalog(db: Db, catalogPath: string): Promise<{
   if (!catalog.success) throw new Error(`Invalid media catalog: ${catalog.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
   assertUniqueMedia(catalog.data.media);
 
-  for (const item of catalog.data.media) {
-    await db`
-      INSERT INTO media_assets (id, game_id, collection, caption, alt_text, tags, spoiler_tags, attribution, source_url, source_page_url, original_key, display_key, public_url, content_type, width, height, checksum, review_status)
-      VALUES (${item.id}, ${item.collectionId}, ${item.collection}, ${item.caption}, ${item.altText}, ${db.json(item.tags)}, ${db.json(item.spoilerTags)}, ${item.attribution}, ${item.sourceUrl}, ${item.sourcePageUrl}, ${item.originalKey}, ${item.displayKey}, ${item.publicUrl}, ${item.contentType}, ${item.width}, ${item.height}, ${item.checksum}, 'pending')
-      ON CONFLICT (id) DO UPDATE SET
-        game_id = EXCLUDED.game_id, collection = EXCLUDED.collection, caption = EXCLUDED.caption, alt_text = EXCLUDED.alt_text,
-        tags = EXCLUDED.tags, spoiler_tags = EXCLUDED.spoiler_tags, attribution = EXCLUDED.attribution,
-        source_url = EXCLUDED.source_url, source_page_url = EXCLUDED.source_page_url, original_key = EXCLUDED.original_key,
-        display_key = EXCLUDED.display_key, public_url = EXCLUDED.public_url, content_type = EXCLUDED.content_type,
-        width = EXCLUDED.width, height = EXCLUDED.height, checksum = EXCLUDED.checksum,
-        review_status = 'pending', approved_by = NULL, approved_at = NULL, updated_at = now()
+  return inTransaction(db, async (transaction) => {
+    for (const item of catalog.data.media) {
+      await transaction`
+        INSERT INTO media_assets (id, game_id, collection, caption, alt_text, tags, spoiler_tags, attribution, source_url, source_page_url, original_key, display_key, public_url, content_type, width, height, checksum, review_status)
+        VALUES (${item.id}, ${item.collectionId}, ${item.collection}, ${item.caption}, ${item.altText}, ${transaction.json(item.tags)}, ${transaction.json(item.spoilerTags)}, ${item.attribution}, ${item.sourceUrl}, ${item.sourcePageUrl}, ${item.originalKey}, ${item.displayKey}, ${item.publicUrl}, ${item.contentType}, ${item.width}, ${item.height}, ${item.checksum}, 'pending')
+        ON CONFLICT (id) DO UPDATE SET
+          game_id = EXCLUDED.game_id, collection = EXCLUDED.collection, caption = EXCLUDED.caption, alt_text = EXCLUDED.alt_text,
+          tags = EXCLUDED.tags, spoiler_tags = EXCLUDED.spoiler_tags, attribution = EXCLUDED.attribution,
+          source_url = EXCLUDED.source_url, source_page_url = EXCLUDED.source_page_url, original_key = EXCLUDED.original_key,
+          display_key = EXCLUDED.display_key, public_url = EXCLUDED.public_url, content_type = EXCLUDED.content_type,
+          width = EXCLUDED.width, height = EXCLUDED.height, checksum = EXCLUDED.checksum,
+          review_status = 'pending', approved_by = NULL, approved_at = NULL, updated_at = now()
+      `;
+    }
+    // Importing resets affected assets to pending; published articles using
+    // them as covers lose their public cover until re-approved.
+    const affected = catalog.data.media.map((item) => item.id);
+    const coverArticles = await transaction`
+      SELECT DISTINCT article_id
+      FROM article_media
+      WHERE role = 'cover' AND media_id = ANY(${transaction.array(affected)})
     `;
-  }
-  return { imported: catalog.data.media.length, collectionIds: [...new Set(catalog.data.media.map((item) => item.collectionId))].sort() };
+    for (const article of coverArticles) await refreshPublicArticleRecord(transaction, article.article_id as string);
+    return { imported: catalog.data.media.length, collectionIds: [...new Set(catalog.data.media.map((item) => item.collectionId))].sort() };
+  });
 }
 
 export async function listCoverCandidates(db: Db, articleId: string): Promise<CoverMediaCandidate[]> {
@@ -74,6 +85,10 @@ export async function setCoverMedia(db: Db, articleId: string, mediaId: string, 
     ON CONFLICT (article_id, role) DO UPDATE SET
       media_id = EXCLUDED.media_id, selection_source = EXCLUDED.selection_source, review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL, created_at = now()
   `;
+  // A pending or replaced cover must not remain in the public surface; a
+  // published article's materialized record is refreshed (drafts have no
+  // record and the refresh is a no-op).
+  await refreshPublicArticleRecord(db, articleId);
 }
 
 export async function recommendArticleCover(db: Db, input: { articleId: string; title: string; description: string; safeClaimText: string[] }): Promise<string | null> {
@@ -89,6 +104,7 @@ export async function recommendArticleCover(db: Db, input: { articleId: string; 
 export async function approveMediaAsset(db: Db, mediaId: string, reviewer: string): Promise<void> {
   const rows = await db`UPDATE media_assets SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now() WHERE id = ${mediaId} RETURNING id`;
   if (!rows.length) throw new Error("Media asset not found");
+  await refreshCoverArticlesForAssets(db, [mediaId]);
 }
 
 export async function approveMediaCollection(db: Db, collectionId: string, reviewer: string): Promise<number> {
@@ -98,7 +114,20 @@ export async function approveMediaCollection(db: Db, collectionId: string, revie
     WHERE game_id = ${collectionId} AND review_status = 'pending' AND jsonb_array_length(spoiler_tags) = 0
     RETURNING id
   `;
+  await refreshCoverArticlesForAssets(db, rows.map((row) => row.id as string));
   return rows.length;
+}
+
+// Refreshes the materialized public record of every published article whose
+// cover references one of the affected media assets.
+async function refreshCoverArticlesForAssets(db: Db, mediaIds: string[]): Promise<void> {
+  if (!mediaIds.length) return;
+  const articles = await db`
+    SELECT DISTINCT article_id
+    FROM article_media
+    WHERE role = 'cover' AND media_id = ANY(${db.array(mediaIds)})
+  `;
+  for (const article of articles) await refreshPublicArticleRecord(db, article.article_id as string);
 }
 
 export async function approveCoverMedia(db: Db, articleId: string, reviewer: string): Promise<void> {
@@ -110,13 +139,16 @@ export async function approveCoverMedia(db: Db, articleId: string, reviewer: str
   if (!rows.length) throw new Error("Article has no selected cover media");
   if (rows[0].asset_review_status !== "approved") throw new Error("Cover media asset must be approved before its assignment");
   await db`UPDATE article_media SET review_status = 'approved', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover'`;
+  await refreshPublicArticleRecord(db, articleId);
 }
 
 export async function rejectCoverMedia(db: Db, articleId: string, reviewer: string): Promise<void> {
   const rows = await db`UPDATE article_media SET review_status = 'rejected', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover' RETURNING media_id`;
   if (!rows.length) throw new Error("Article has no selected cover media");
+  await refreshPublicArticleRecord(db, articleId);
 }
 
 export async function clearCoverMedia(db: Db, articleId: string): Promise<void> {
   await db`DELETE FROM article_media WHERE article_id = ${articleId} AND role = 'cover'`;
+  await refreshPublicArticleRecord(db, articleId);
 }
