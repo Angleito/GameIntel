@@ -2240,7 +2240,14 @@ suites, and a full Compose stack smoke:
   `gameintel_operator` (jobs/moderation/promotion, no evidence review or
   publication) group roles; migration 017 grants the operator provenance upsert;
   three logins bootstrapped per capability; the API runs two runtimes
-  (public/operator); `privileges.test.ts` asserts the deny matrix.
+  (public/operator); `privileges.test.ts` asserts the deny matrix. Review
+  hardening: 018 revokes all article writes from the operator role, 019 narrows
+  public reads to the published article surface plus the submission-intake
+  projection and stops automatic future-table reads, the bootstrap revokes
+  stray memberships before granting exactly one capability group per login,
+  and the tests prove the operator cannot publish, the public role cannot read
+  internal tables or submission identity columns, and each login belongs to
+  exactly one group.
 - [x] ~~14. Separate public intake from editorial capabilities (34–35)~~ —
   `StaticOperatorIdentityProvider` + `LocalAbuseProtection` implement the
   contracts (`@gameintel/newsroom/identity`); API middleware and submission
@@ -2272,10 +2279,11 @@ suites, and a full Compose stack smoke:
   consistency check, and the `check:clean` repository-cleanliness gate; new
   `release:check:postgres` runs the env-gated reference-adapter suites.
 - [x] ~~28–29. Polling and discovery patterns~~ — RSS discovery wired
-  end-to-end: registry `discovery: { adapter: rss, enabled: true }` runs the
-  adapter's `discover()` on each cadence and enqueues each feed item as its
-  own job (scheduler-loop tests cover enqueue, dedupe, and failure behavior);
-  discovery example added to the GTA VI registry (disabled).
+  end-to-end through the queue boundary: the scheduler enqueues a
+  `source_discover` job per due feed source (the feed URL is never ingested
+  as an article), and the isolated ingestion worker fetches the feed through
+  the controlled transport, parses items, and enqueues each one as its own
+  ingestion job; discovery failures reuse the queue's retry/lease machinery.
 - [x] ~~46. Avoid premature infrastructure~~ — unchanged; the reference
   deployment remains entirely local and free.
 
