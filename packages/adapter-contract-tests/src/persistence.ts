@@ -93,13 +93,18 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
         description: "A contract test article.",
         body: {
           summary: "A contract test summary.",
-          sections: [{ heading: "Evidence", paragraphs: [{ text: "Verified observation.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [seededResult.claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] }],
+          sections: [
+            { heading: "Evidence", paragraphs: [{ text: "Verified observation.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [seededResult.claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] },
+            { heading: "Internal note", paragraphs: [{ text: "Editorial-only detail.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [], editorialAssessment: null }], publicSafe: false, spoilerTags: [] },
+            { heading: "Spoiler section", paragraphs: [{ text: "Spoiler detail.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [], editorialAssessment: null }], publicSafe: true, spoilerTags: ["spoiler"] },
+          ],
           unknowns: [],
         },
         newsworthiness: 0.5,
         confidence: 0.5,
         sourceRefs: [{ sourceId: "contract-source", claimId: seededResult.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
       });
+      expect(await persistence.getPublicArticle(articleId)).toBeNull();
       const evidence = await persistence.listArticleEvidence(articleId);
       expect(evidence).toHaveLength(1);
       expect(evidence[0].current).toBe(true);
@@ -112,9 +117,19 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(published.status).toBe("published");
       const publicArticles = await persistence.publicArticles("contract-test");
       expect(publicArticles).toHaveLength(1);
-      const safe = publicArticles[0] as { title: string; citations: Array<{ number: number; label: string; url: string }> };
+      const safe = publicArticles[0] as { title: string; citations: Array<{ number: number; label: string; url: string }>; body: { sections: Array<{ heading: string }> } };
       expect(safe.title).toBe("Contract test article");
       expect(safe.citations).toEqual([{ number: 1, label: "Contract source", url: "https://contract.example.com/report" }]);
+      expect(safe.body.sections.map((section) => section.heading)).toEqual(["Evidence"]);
+      const safeSingle = await persistence.getPublicArticle(articleId);
+      expect(safeSingle).not.toBeNull();
+      expect(JSON.stringify(safeSingle)).not.toContain("Internal note");
+      expect(JSON.stringify(safeSingle)).not.toContain("Spoiler section");
+      expect(JSON.stringify(safeSingle)).not.toContain("approvedBy");
+      expect(safeSingle!.citations).toEqual([{ number: 1, label: "Contract source", url: "https://contract.example.com/report" }]);
+      expect(safeSingle!.body.sections.every((section) => section.publicSafe && section.spoilerTags.length === 0)).toBe(true);
+      const raw = await persistence.getArticle(articleId);
+      expect(JSON.stringify(raw?.body)).toContain("Internal note");
     });
 
     test("blocks publication while any reviewer rejects or disputes evidence", async () => {
@@ -213,7 +228,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       await persistence.ensureGame(testProfile());
       await persistence.ensureSource(testSourceInput());
       await persistence.audit("operator-a", "test.action", "source", "contract-source", "Audit contract check");
-      const articles = await persistence.listArticles("contract-test", false);
+      const articles = await persistence.listArticles("contract-test");
       expect(articles).toHaveLength(0);
       expect(await persistence.getArticle("missing")).toBeNull();
     });

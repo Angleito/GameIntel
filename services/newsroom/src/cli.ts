@@ -74,7 +74,7 @@ try {
       profileId,
     }), null, 2));
   } else if (command === "list") {
-    console.log(JSON.stringify(await runtime.persistence.listArticles(profileId, false), null, 2));
+    console.log(JSON.stringify(await runtime.persistence.listArticles(profileId), null, 2));
   } else if (command === "import-media") {
     if (!args[0]) throw new Error("Usage: newsroom import-media <catalog.json>");
     console.log(JSON.stringify(await runtime.persistence.importMediaCatalog(args[0]), null, 2));

@@ -55,6 +55,7 @@ import {
   SourcePolicySchema,
   SourceStrengthSchema,
   type SourceStrength,
+  type SafeArticle,
   toSafeArticle,
 } from "@gameintel/core";
 
@@ -767,24 +768,46 @@ const articleSelect = (db: Db) => db`
     ) cover ON true
 `;
 
-export async function getArticle(db: Db, idOrSlug: string, publishedOnly = false): Promise<Article | null> {
-  // Published-only reads go through the SECURITY DEFINER function so the
-  // public role holds no SELECT on the article tables; the operator/editorial
-  // paths keep the raw query so drafts remain visible to them.
-  const row = publishedOnly
-    ? (await db`SELECT public_article_get(${idOrSlug}) AS article`)[0] as { article: Record<string, unknown> | null } | undefined
-    : (await db`${articleSelect(db)} WHERE (a.id = ${idOrSlug} OR a.slug = ${idOrSlug}) GROUP BY a.id, cover.cover_media LIMIT 1`)[0] as Record<string, unknown> | undefined;
-  const parsed = publishedOnly ? (row as { article: Record<string, unknown> | null } | undefined)?.article : row;
-  return parsed ? parseArticle(parsed) : null;
+export async function getArticle(db: Db, idOrSlug: string): Promise<Article | null> {
+  const rows = await db`${articleSelect(db)} WHERE (a.id = ${idOrSlug} OR a.slug = ${idOrSlug}) GROUP BY a.id, cover.cover_media LIMIT 1`;
+  return rows.length ? parseArticle(rows[0] as Record<string, unknown>) : null;
 }
 
-export async function listArticles(db: Db, collectionId: string, publishedOnly = true): Promise<Article[]> {
-  if (publishedOnly) {
-    const rows = await db`SELECT public_article_list(${collectionId}) AS articles`;
-    return ((rows[0] as { articles: unknown[] } | undefined)?.articles ?? []).map((row) => parseArticle(row as Record<string, unknown>));
-  }
+export async function listArticles(db: Db, collectionId: string): Promise<Article[]> {
   const rows = await db`${articleSelect(db)} WHERE a.game_id = ${collectionId} GROUP BY a.id, cover.cover_media ORDER BY a.created_at DESC`;
   return rows.map((row) => parseArticle(row as Record<string, unknown>));
+}
+
+// Public article reads serve the materialized sanitized surface
+// (public_article_records), never raw article rows. The table is written at
+// publish time from toSafeArticle() by the runtime role.
+export async function getPublicArticle(db: Db, idOrSlug: string): Promise<SafeArticle | null> {
+  const rows = await db`SELECT public_public_article_get(${idOrSlug}) AS article`;
+  return (rows[0] as { article: SafeArticle | null } | undefined)?.article ?? null;
+}
+
+export async function listPublicArticles(db: Db, collectionId: string): Promise<SafeArticle[]> {
+  const rows = await db`SELECT public_public_article_list(${collectionId}) AS articles`;
+  return (rows[0] as { articles: SafeArticle[] } | undefined)?.articles ?? [];
+}
+
+export async function materializePublicArticle(db: Db, article: Article): Promise<void> {
+  const safe = toSafeArticle(article);
+  if (!safe) throw new Error("Cannot materialize a non-public article");
+  const now = new Date().toISOString();
+  await db`
+    INSERT INTO public_article_records (
+      article_id, collection_id, slug, title, seo_title, description, body, status, citations, cover_media, published_at, updated_at
+    ) VALUES (
+      ${safe.id}, ${safe.collectionId}, ${safe.slug}, ${safe.title}, ${safe.seoTitle}, ${safe.description},
+      ${db.json(safe.body)}, ${safe.status}, ${db.json(safe.citations)}, ${safe.coverMedia ? db.json(safe.coverMedia) : null},
+      ${safe.publishedAt ?? now}, ${safe.updatedAt ?? now}
+    )
+    ON CONFLICT (article_id) DO UPDATE SET
+      collection_id = excluded.collection_id, slug = excluded.slug, title = excluded.title, seo_title = excluded.seo_title,
+      description = excluded.description, body = excluded.body, status = excluded.status, citations = excluded.citations,
+      cover_media = excluded.cover_media, published_at = excluded.published_at, updated_at = excluded.updated_at
+  `;
 }
 
 async function lockArticle(db: Db, articleId: string): Promise<Record<string, unknown>> {
@@ -981,6 +1004,13 @@ async function refreshArticleEvidenceState(db: Db, articleId: string): Promise<A
         ELSE 'draft'
       END
     WHERE id = ${articleId}
+  `;
+  // A demoted article is no longer part of the public surface; its
+  // materialized sanitized record must not outlive it.
+  await db`
+    DELETE FROM public_article_records
+    WHERE article_id = ${articleId}
+      AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.id = ${articleId} AND a.status IN ('published', 'updated'))
   `;
   return evidence;
 }
@@ -1183,7 +1213,7 @@ export async function approveArticle(db: Db, articleId: string, approver: string
 }
 
 export async function markPublished(db: Db, articleId: string, operator: string): Promise<Article> {
-  await inTransaction(db, async (transaction) => {
+  return inTransaction(db, async (transaction) => {
     const article = await lockArticle(transaction, articleId);
     if (article.status !== "approved") throw new Error("Only approved articles can be published");
     await assertPublicationRequirements(transaction, articleId);
@@ -1198,8 +1228,13 @@ export async function markPublished(db: Db, articleId: string, operator: string)
     }
     await transaction`UPDATE articles SET status = 'published', published_at = now(), updated_at = now() WHERE id = ${articleId}`;
     await audit(transaction, operator, "article.published", "article", articleId, "Published sanitized artifact");
+    // Materialize the sanitized public surface in the same transaction; the
+    // public role can only ever read this record, never the article row.
+    const published = await getArticle(transaction, articleId);
+    if (!published) throw new Error("Published article not found");
+    await materializePublicArticle(transaction, published);
+    return published;
   });
-  return (await getArticle(db, articleId, true))!;
 }
 
 export async function purgeExpiredSourceContent(db: Db, options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {
@@ -1262,6 +1297,12 @@ export async function createQuarantinedSubmission(db: Db, input: {
   if (Object.values(limits).some((limit) => !Number.isInteger(limit) || limit < 1)) {
     throw new Error("Submission rate limits must be positive integers");
   }
+  // Rate limits are trusted database configuration inside
+  // public_submission_submit; a compromised public client cannot supply
+  // custom limits.
+  if (JSON.stringify(limits) !== JSON.stringify(defaultPublicSubmissionRateLimits)) {
+    throw new Error("Custom submission rate limits are not supported by the PostgreSQL backend");
+  }
   const contentHash = publicSubmissionFingerprint(submission);
 
   return inTransaction(db, async (transaction) => {
@@ -1284,8 +1325,7 @@ export async function createQuarantinedSubmission(db: Db, input: {
         SELECT public_submission_submit(
           ${submission.collectionId}, ${accountId}, ${input.submitterSessionHash}, ${input.submitterIpHash},
           ${submission.title ?? null}, ${submission.report}, ${transaction.json(submission.urls)}, ${transaction.json(submission.mediaRefs)},
-          ${contentHash}, ${retentionDays}, ${limits.perIpPerMinute}, ${limits.perSessionPerMinute},
-          ${limits.perAccountPerDay}, ${limits.globalPerMinute}
+          ${contentHash}, ${retentionDays}
         ) AS result
       `;
       const submitted = result[0]?.result as { id: string; duplicate: boolean } | undefined;
@@ -1505,7 +1545,7 @@ export async function audit(db: Db, actor: string, action: string, targetType: s
 }
 
 export async function publicArticles(db: Db, collectionId: string): Promise<unknown[]> {
-  return (await listArticles(db, collectionId, true)).map(toSafeArticle).filter(Boolean);
+  return listPublicArticles(db, collectionId);
 }
 
 export async function closeDb(db: Db): Promise<void> {

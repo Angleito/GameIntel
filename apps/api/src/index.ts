@@ -6,7 +6,6 @@ import {
   PublicSubmissionReviewDecisionSchema,
   PublicSubmissionSchema,
   PublicSubmissionStateSchema,
-  toSafeArticle,
 } from "@gameintel/core";
 import { SubmissionRateLimitError } from "@gameintel/contracts";
 import { loadCollectionProfile, loadProjectConfig, loadSourceRegistry, profilePath, sourceRegistryPath } from "@gameintel/config";
@@ -125,16 +124,15 @@ app.get("/v1/data/:profileId", async (c) => {
   return c.json(createPublicOutputArtifact({ schemaVersion: "1.0", projectId: project.id, profileId: profile.id, records: await publicRuntime.persistence.publicArticles(profile.id) }));
 });
 app.get("/v1/articles/:id", async (c) => {
-  const article = await publicRuntime.persistence.getArticle(c.req.param("id"), true);
-  const safe = article ? toSafeArticle(article) : null;
-  return safe ? c.json(safe) : c.json({ error: "Article not found" }, 404);
+  const article = await publicRuntime.persistence.getPublicArticle(c.req.param("id"));
+  return article ? c.json(article) : c.json({ error: "Article not found" }, 404);
 });
 app.get("/v1/search", async (c) => {
   const query = (c.req.query("q") ?? "").slice(0, 200).toLowerCase().trim();
   const gameId = c.req.query("game_id") ?? profile.id;
   if (gameId !== profile.id) return c.json({ error: "Game not found" }, 404);
-  const articles = await publicRuntime.persistence.listArticles(profile.id, true);
-  return c.json(articles.map(toSafeArticle).filter((article) => article && (!query || `${article.title} ${article.description}`.toLowerCase().includes(query))).slice(0, 100));
+  const articles = await publicRuntime.persistence.listPublicArticles(profile.id);
+  return c.json(articles.filter((article) => !query || `${article.title} ${article.description}`.toLowerCase().includes(query)).slice(0, 100));
 });
 
 app.post("/v1/submissions", async (c) => {
@@ -179,7 +177,7 @@ app.use("/internal/operator/*", async (c, next) => {
   if (!(await operatorAuthorized(c.req.raw))) return c.json({ error: "Operator authentication required" }, 401);
   await next();
 });
-app.get("/internal/operator/articles", async (c) => c.json(await operatorRuntime.persistence.listArticles(profile.id, false)));
+app.get("/internal/operator/articles", async (c) => c.json(await operatorRuntime.persistence.listArticles(profile.id)));
 app.get("/internal/operator/jobs", async (c) => c.json({
   queue: await operatorRuntime.jobQueue.getIngestionQueueStatus(),
   workers: await operatorRuntime.jobQueue.listIngestionWorkerHeartbeats(),

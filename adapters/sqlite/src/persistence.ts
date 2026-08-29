@@ -36,6 +36,7 @@ import {
   type GameProfile,
   type NormalizedSourceItem,
   type PublicSubmission,
+  type SafeArticle,
   type SourcePolicy,
   type SourceStrength,
 } from "@gameintel/core";
@@ -698,8 +699,8 @@ export class SQLitePersistence implements GameIntelPersistence {
     }
     this.run("UPDATE articles SET status = 'published', published_at = ?, updated_at = ? WHERE id = ?", isoNow(), isoNow(), articleId);
     await this.audit(operator, "article.published", "article", articleId, "Published sanitized artifact");
-    const published = await this.getArticle(articleId, true);
-    if (!published) throw new Error("Published article not found");
+const published = await this.getArticle(articleId);
+    if (!published) throw new Error("Published article is not readable");
     return published;
   }
 
@@ -775,23 +776,34 @@ export class SQLitePersistence implements GameIntelPersistence {
       FROM articles a ${where}`;
   }
 
-  async getArticle(idOrSlug: string, publishedOnly = false): Promise<Article | null> {
-    const where = publishedOnly
-      ? "WHERE (a.id = ? OR a.slug = ?) AND a.status IN ('published', 'updated') ORDER BY a.created_at DESC LIMIT 1"
-      : "WHERE (a.id = ? OR a.slug = ?) LIMIT 1";
-    const row = this.get<Record<string, unknown>>(this.articleSelectSql(where), idOrSlug, idOrSlug);
+  async getArticle(idOrSlug: string): Promise<Article | null> {
+    const row = this.get<Record<string, unknown>>(this.articleSelectSql("WHERE (a.id = ? OR a.slug = ?) LIMIT 1"), idOrSlug, idOrSlug);
     return row ? this.articleSelect(row) : null;
   }
 
-  async listArticles(collectionId: string, publishedOnly = true): Promise<Article[]> {
-    const where = publishedOnly
-      ? "WHERE a.game_id = ? AND a.status IN ('published', 'updated') ORDER BY COALESCE(a.published_at, a.created_at) DESC"
-      : "WHERE a.game_id = ? ORDER BY a.created_at DESC";
-    return this.all<Record<string, unknown>>(this.articleSelectSql(where), collectionId).map((row) => this.articleSelect(row));
+  async listArticles(collectionId: string): Promise<Article[]> {
+    return this.all<Record<string, unknown>>(this.articleSelectSql("WHERE a.game_id = ? ORDER BY a.created_at DESC"), collectionId).map((row) => this.articleSelect(row));
+  }
+
+  // The public article surface is the sanitized SafeArticle projection;
+  // single-process adapters compute it from their own articles, which is the
+  // same guarantee the PostgreSQL adapter enforces at the storage layer.
+  async getPublicArticle(idOrSlug: string): Promise<SafeArticle | null> {
+    const article = await this.getArticle(idOrSlug);
+    if (!article || (article.status !== "published" && article.status !== "updated")) return null;
+    return toSafeArticle(article);
+  }
+
+  async listPublicArticles(collectionId: string): Promise<SafeArticle[]> {
+    const rows = this.all<Record<string, unknown>>(
+      this.articleSelectSql("WHERE a.game_id = ? AND a.status IN ('published', 'updated') ORDER BY COALESCE(a.published_at, a.created_at) DESC"),
+      collectionId,
+    );
+    return rows.map((row) => this.articleSelect(row)).map((article) => toSafeArticle(article)).filter((safe): safe is SafeArticle => safe !== null);
   }
 
   async publicArticles(collectionId: string): Promise<unknown[]> {
-    return (await this.listArticles(collectionId, true)).map(toSafeArticle).filter(Boolean);
+    return this.listPublicArticles(collectionId);
   }
 
   async purgeExpiredSourceContent(options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {

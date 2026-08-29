@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, listArticles, closeDb, createDb, type Db } from "./index.ts";
+import { hashText } from "@gameintel/core";
+import { createArticleDraft, createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, getPublicArticle, insertClaim, insertSourceItem, listArticles, listPublicArticles, materializePublicArticle, setCoverMedia, closeDb, createDb, type Db } from "./index.ts";
 
 // Privilege-boundary tests for the local reference deployment. They assert
 // that the capability roles enforce the plan's hard rule: a public-facing
@@ -45,11 +46,24 @@ describe("PostgreSQL capability role privileges", () => {
           DELETE FROM audit_log
           WHERE target_type = 'public_submission' AND target_id IN (SELECT id FROM public_submissions WHERE collection_id = 'privilege-test')
             OR (target_type = 'source' AND target_id = 'privilege-source')
+            OR (target_type = 'article' AND target_id IN (SELECT id FROM articles WHERE game_id = 'privilege-test'))
         `;
         await transaction`DELETE FROM submission_moderation_actions WHERE submission_id IN (SELECT id FROM public_submissions WHERE collection_id = 'privilege-test')`;
         await transaction`DELETE FROM public_submissions WHERE collection_id = 'privilege-test'`;
         await transaction`DELETE FROM jobs WHERE payload::text LIKE '%privilege-test%'`;
         await transaction`DELETE FROM source_policy_reviews WHERE source_id = 'privilege-source'`;
+        await transaction`DELETE FROM public_article_records WHERE collection_id = 'privilege-test'`;
+        await transaction`DELETE FROM article_media WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'privilege-test')`;
+        await transaction`DELETE FROM article_sources WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'privilege-test')`;
+        await transaction`DELETE FROM article_revisions WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'privilege-test')`;
+        await transaction`DELETE FROM articles WHERE game_id = 'privilege-test'`;
+        await transaction`DELETE FROM evidence WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
+        await transaction`DELETE FROM claims WHERE game_id = 'privilege-test'`;
+        await transaction`DELETE FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
+        await transaction`DELETE FROM source_item_provenance WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
+        await transaction`DELETE FROM provenance_families WHERE collection_id = 'privilege-test'`;
+        await transaction`DELETE FROM source_items WHERE game_id = 'privilege-test'`;
+        await transaction`DELETE FROM media_assets WHERE game_id = 'privilege-test'`;
         await transaction`DELETE FROM sources WHERE id = 'privilege-source'`;
         await transaction`DELETE FROM games WHERE id = 'privilege-test'`;
       });
@@ -102,7 +116,7 @@ describe("PostgreSQL capability role privileges", () => {
     }
   });
 
-  test("public role reads only published articles through the public-safe functions", async () => {
+  test("public role reads only the sanitized public surface through the public-safe functions", async () => {
     const db = createDb(publicUrl);
     try {
       await denied(() => db`SELECT title FROM articles LIMIT 1`);
@@ -110,13 +124,123 @@ describe("PostgreSQL capability role privileges", () => {
       await denied(() => db`SELECT id FROM article_sources LIMIT 1`);
       await denied(() => db`SELECT id FROM article_media LIMIT 1`);
       await denied(() => db`SELECT id FROM media_assets LIMIT 1`);
-      const articles = await listArticles(db, "privilege-test", true);
+      await denied(() => db`SELECT id FROM public_article_records LIMIT 1`);
+      const articles = await listPublicArticles(db, "privilege-test");
       expect(Array.isArray(articles)).toBe(true);
-      expect(articles.every((article) => article.status === "published" || article.status === "updated")).toBe(true);
-      const single = await getArticle(db, "privilege-test", true);
+      const single = await getPublicArticle(db, "privilege-test");
       expect(single).toBeNull();
     } finally {
       await closeDb(db);
+    }
+  });
+
+  test("public article functions expose only the sanitized public surface", async () => {
+    await cleanup();
+    await setup();
+    const editor = createDb(runtimeUrl);
+    let articleId = "";
+    try {
+      await ensureSource(editor, {
+        id: "privilege-source",
+        type: "operator-note",
+        canonicalUrl: "urn:gameintelgg:source:privilege-source",
+        publicCitationUrl: null,
+        sourceStrength: "COMMUNITY",
+        publicationMode: "evidence_only",
+        policy: { accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true } },
+        enabled: true,
+      });
+      const surfaceItem = {
+        sourceId: "privilege-source",
+        collectionId: "privilege-test",
+        externalId: "ext-surface",
+        url: "urn:gameintelgg:manual:surface",
+        title: "Surface item",
+        text: "Surface text.",
+        sourceStrength: "COMMUNITY" as const,
+        publicationMode: "discussion_only" as const,
+        discoveredAt: new Date().toISOString(),
+        publishedAt: null,
+        lineageId: null,
+        inputKind: "pasted_text" as const,
+        contentType: "text/plain",
+        language: null,
+        claims: [],
+      };
+      const inserted = await insertSourceItem(editor, surfaceItem, hashText("surface"), "lineage-surface", {
+        accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, termsReviewedAt: null, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
+      }, null);
+      if (!inserted.revisionId) throw new Error("Expected a source revision");
+      const claimId = await insertClaim(editor, surfaceItem, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, {
+        subject: "Subject",
+        predicate: "reports",
+        value: "Value",
+        qualifiers: {},
+        spoilerTags: [],
+        exploitClass: null,
+        evidenceLevel: "suspected",
+        attributionType: "community",
+        statement: null,
+        editorialAssessment: null,
+        stance: "supports",
+        evidenceType: "community_report",
+        excerpt: "Surface excerpt.",
+        startMs: null,
+        endMs: null,
+      }, "lineage-surface");
+      articleId = await createArticleDraft(editor, {
+        collectionId: "privilege-test",
+        title: "Boundary article",
+        description: "Boundary.",
+        body: {
+          summary: "Boundary summary.",
+          sections: [
+            { heading: "Public section", paragraphs: [{ text: "Public text.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] },
+            { heading: "Internal note", paragraphs: [{ text: "Editorial-only detail.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [], editorialAssessment: null }], publicSafe: false, spoilerTags: [] },
+            { heading: "Spoiler section", paragraphs: [{ text: "Spoiler detail.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [], editorialAssessment: null }], publicSafe: true, spoilerTags: ["spoiler"] },
+          ],
+          unknowns: [],
+        },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "privilege-source", claimId, citationLabel: "Privilege source", publicCitationUrl: "https://example.com/privilege-report" }],
+      });
+      await editor`INSERT INTO media_assets (id, game_id, collection, caption, alt_text, tags, spoiler_tags, attribution, source_url, source_page_url, original_key, display_key, public_url, content_type, width, height, checksum, review_status) VALUES ('media-privilege-cover', 'privilege-test', 'c', 'cap', 'alt', '[]', '[]', 'attr', 'https://example.com/src', 'https://example.com/page', 'o', 'd', 'https://media.example.com/cover', 'image/jpeg', 10, 10, 'sum', 'pending')`;
+      await setCoverMedia(editor, articleId, "media-privilege-cover", "automatic");
+      await editor`UPDATE articles SET status = 'published', approved_by = 'operator', approved_at = now(), published_at = now(), source_review_completed = true, editor_review_completed = true, article_sources_complete = true WHERE id = ${articleId}`;
+      const article = await getArticle(editor, articleId);
+      if (!article) throw new Error("Boundary article not found");
+      await materializePublicArticle(editor, article);
+
+      const raw = await editor`SELECT body, approved_by FROM articles WHERE id = ${articleId}`;
+      expect(JSON.stringify(raw[0].body)).toContain("Internal note");
+      expect(raw[0].approved_by).toBe("operator");
+
+      const pub = createDb(publicUrl);
+      try {
+        const rows = await pub`SELECT public_public_article_get(${articleId}) AS article`;
+        const record = rows[0]?.article as Record<string, unknown> | null;
+        expect(record).not.toBeNull();
+        const text = JSON.stringify(record ?? {});
+        expect(text).not.toContain("Internal note");
+        expect(text).not.toContain("Spoiler section");
+        expect(text).not.toContain("approvedBy");
+        expect(text).not.toContain("approved_by");
+        expect(text).not.toContain("privilege-source");
+        expect(record!.coverMedia).toBeNull();
+        expect((record!.citations as Array<{ number: number; label: string; url: string }>)).toEqual([{ number: 1, label: "Privilege source", url: "https://example.com/privilege-report" }]);
+        const viaAdapter = await getPublicArticle(pub, articleId);
+        expect(viaAdapter?.body.sections.map((section) => section.heading)).toEqual(["Public section"]);
+        const listed = await listPublicArticles(pub, "privilege-test");
+        expect(listed).toHaveLength(1);
+        const missing = await pub`SELECT public_public_article_get('no-such-article') AS article`;
+        expect(missing[0].article).toBeNull();
+      } finally {
+        await closeDb(pub);
+      }
+    } finally {
+      await closeDb(editor);
+      await cleanup();
     }
   });
 

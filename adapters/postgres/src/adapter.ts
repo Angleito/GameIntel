@@ -36,6 +36,7 @@ import {
   getArticle,
   getIngestionJob,
   getIngestionQueueStatus,
+  getPublicArticle,
   getPublicSubmissionForModeration,
   getPublicSubmissionForPromotion,
   heartbeatIngestionWorker,
@@ -49,6 +50,7 @@ import {
   listArticles,
   listCoverCandidates,
   listIngestionWorkerHeartbeats,
+  listPublicArticles,
   listPublicSubmissionModerationActions,
   listPublicSubmissionsForModeration,
   listRecentIngestionJobs,
@@ -139,8 +141,10 @@ export class PostgresPersistence implements GameIntelPersistence {
   approveArticle = (articleId: string, approver: string) => approveArticle(this.handle, articleId, approver);
 
   createArticleDraft = (input: Parameters<typeof createArticleDraft>[1]) => createArticleDraft(this.handle, input);
-  getArticle = (idOrSlug: string, publishedOnly?: boolean) => getArticle(this.handle, idOrSlug, publishedOnly);
-  listArticles = (collectionId: string, publishedOnly?: boolean) => listArticles(this.handle, collectionId, publishedOnly);
+  getArticle = (idOrSlug: string) => getArticle(this.handle, idOrSlug);
+  listArticles = (collectionId: string) => listArticles(this.handle, collectionId);
+  getPublicArticle = (idOrSlug: string) => getPublicArticle(this.handle, idOrSlug);
+  listPublicArticles = (collectionId: string) => listPublicArticles(this.handle, collectionId);
   markPublished = (articleId: string, operator: string) => markPublished(this.handle, articleId, operator);
   publicArticles = (collectionId: string) => publicArticles(this.handle, collectionId);
   purgeExpiredSourceContent = (options?: { execute?: boolean }) => purgeExpiredSourceContent(this.handle, options);

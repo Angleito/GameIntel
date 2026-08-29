@@ -26,6 +26,7 @@ function cleanupContractData(db: Db): Promise<void> {
     await transaction`DELETE FROM article_media WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'contract-test')`;
     await transaction`DELETE FROM article_sources WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'contract-test')`;
     await transaction`DELETE FROM article_revisions WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'contract-test')`;
+    await transaction`DELETE FROM public_article_records WHERE collection_id = 'contract-test'`;
     await transaction`DELETE FROM articles WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM events WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM evidence WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'contract-test')`;

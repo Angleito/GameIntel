@@ -143,13 +143,15 @@ bun run dev:api
 ```
 
 The API runs two storage identities: public routes use the `gameintel_public`
-database role, which reads published articles only through published-only
-SECURITY DEFINER functions and writes community intake through a fenced
-submit function (no raw table reads or inserts, and no UPDATE privileges);
-operator routes use the `gameintel_operator` role (jobs and moderation, but no
-evidence review or publication). Approving evidence and publishing content
-require the operator CLI with the editor-only runtime login. Host-side API
-development requires `PUBLIC_DATABASE_URL` and `OPERATOR_DATABASE_URL`.
+database role, which reads a materialized sanitized public-article surface
+(publicSafe/spoiler-safe sections, numbered citations, approved cover media
+only) through SECURITY DEFINER functions and writes community intake through
+a fenced submit function (no raw table reads or inserts, and no UPDATE
+privileges); operator routes use the `gameintel_operator` role (jobs and
+moderation, but no evidence review or publication). Approving evidence and
+publishing content require the operator CLI with the editor-only runtime
+login. Host-side API development requires `PUBLIC_DATABASE_URL` and
+`OPERATOR_DATABASE_URL`.
 
 The Compose API receives only its database, HTTP, profile, and optional
 OpenCode settings. R2 credentials and other host-only integration values from

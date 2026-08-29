@@ -6,6 +6,7 @@ import type {
   PublicSubmission,
   PublicSubmissionReviewDecision,
   PublicSubmissionState,
+  SafeArticle,
   SourcePolicy,
   SourceStrength,
   PublicationMode,
@@ -279,8 +280,16 @@ export interface PublicationRepository {
     confidence: number;
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
   }): Promise<string>;
-  getArticle(idOrSlug: string, publishedOnly?: boolean): Promise<Article | null>;
-  listArticles(collectionId: string, publishedOnly?: boolean): Promise<Article[]>;
+  getArticle(idOrSlug: string): Promise<Article | null>;
+  listArticles(collectionId: string): Promise<Article[]>;
+  // The public article surface: sanitized records (publicSafe + spoiler-safe
+  // body sections, numbered citations, approved cover media only). For the
+  // PostgreSQL adapter these are served from the materialized
+  // public_article_records table via SECURITY DEFINER functions; the raw
+  // article row, including editorial fields and internal sections, is never
+  // readable by a public process.
+  getPublicArticle(idOrSlug: string): Promise<SafeArticle | null>;
+  listPublicArticles(collectionId: string): Promise<SafeArticle[]>;
   markPublished(articleId: string, operator: string): Promise<Article>;
   publicArticles(collectionId: string): Promise<unknown[]>;
   purgeExpiredSourceContent(options?: { execute?: boolean }): Promise<SourceContentPurgeResult>;

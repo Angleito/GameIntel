@@ -115,17 +115,21 @@ other compatible stores.
 
 The reference deployment separates database capabilities by process. The
 public API login (`gameintel_public`) holds no table privileges at all on
-internal knowledge-base, article, moderation, or audit data: published
-articles are read through published-only SECURITY DEFINER functions and
-community intake is fenced in a submit function that always forces the
-initial quarantined state and its fixed system trail. The operator API login
-(`gameintel_operator`) can enqueue jobs and moderate or promote submissions
-but cannot create evidence reviews, article reviews, source policy reviews,
-media approvals, or published articles. Approving evidence and publishing
-content require the editor-only runtime login used by the operator CLI and
-publisher. A public-facing process never possesses storage permissions that
-allow it to approve evidence, publish content, read unpublished material, or
-forge intake/moderation records.
+internal knowledge-base, article, moderation, or audit data. Public articles
+are served from a materialized public-article surface that is sanitized at
+publish time (`toSafeArticle`: publicSafe and spoiler-safe body sections
+only, numbered citations instead of internal source/claim references, and
+approved cover media only) and read through SECURITY DEFINER functions that
+touch only that table; community intake is fenced in a submit function that
+always forces the initial quarantined state and its fixed system trail, with
+rate limits trusted as database configuration rather than caller parameters.
+The operator API login (`gameintel_operator`) can enqueue jobs and moderate
+or promote submissions but cannot create evidence reviews, article reviews,
+source policy reviews, media approvals, or published articles. Approving
+evidence and publishing content require the editor-only runtime login used by
+the operator CLI and publisher. A public-facing process never possesses
+storage permissions that allow it to approve evidence, publish content, read
+unpublished or unsanitized material, or forge intake/moderation records.
 
 ## Versioning
 
