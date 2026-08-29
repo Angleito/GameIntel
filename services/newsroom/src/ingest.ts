@@ -16,7 +16,7 @@ export async function loadRegistry(path: string | URL = sourceRegistryPath()): P
   return loadSourceRegistry(path);
 }
 
-async function sourceFor(entry: RegistryEntry, citationUrl: string | null = null): Promise<SourceInput> {
+export async function sourceFor(entry: RegistryEntry, citationUrl: string | null = null): Promise<SourceInput> {
   const citation = citationUrl ?? entry.public_citation_base ?? null;
   const publicCitationUrl = citation === null ? null : PublicHttpUrlSchema.parse(citation);
   return {

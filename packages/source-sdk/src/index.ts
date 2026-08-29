@@ -1,9 +1,7 @@
 import { NormalizedSourceItemSchema, SourcePolicySchema, type NormalizedSourceItem, type SourcePolicy } from "@gameintel/core";
-import { fetchPermittedUrl } from "./http-policy.ts";
+import { fetchPermittedUrl } from "@gameintel/controlled-fetch";
 export * from "./article-parser.ts";
-export * from "./http-policy.ts";
 export * from "./manual-adapter.ts";
-export * from "./transport.ts";
 export type { ControlledFetchTransport, FetchedResource, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
 export type DiscoveredRef = { externalId: string; url: string; title?: string };
@@ -78,6 +76,20 @@ function xmlText(value: string): string {
   return value.replaceAll(/<!\[CDATA\[|\]\]>/g, "").replaceAll(/<[^>]+>/g, "").replaceAll(/&amp;/g, "&").trim();
 }
 
+// Pure RSS item extraction, shared by RssAdapter and the ingestion worker's
+// discovery jobs. Never performs network access.
+export function parseRssFeed(xml: string): DiscoveredRef[] {
+  const refs: DiscoveredRef[] = [];
+  for (const match of xml.matchAll(/<item\b[\s\S]*?<\/item>/gi)) {
+    const item = match[0];
+    const link = xmlText(item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] ?? "");
+    const title = xmlText(item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "");
+    const externalId = xmlText(item.match(/<guid[^>]*>([\s\S]*?)<\/guid>/i)?.[1] ?? link);
+    if (link && title && externalId) refs.push({ externalId, url: link, title });
+  }
+  return refs;
+}
+
 export class RssAdapter implements SourceAdapter {
   readonly id: string;
   readonly policy: SourcePolicy;
@@ -109,14 +121,7 @@ export class RssAdapter implements SourceAdapter {
   async *discover(): AsyncIterable<DiscoveredRef> {
     if (!this.config.enabled) throw new Error(`Adapter ${this.id} is disabled by source policy`);
     const response = await fetchPermittedUrl(this.config.feedUrl, this.fetchPolicy());
-    const xml = response.text;
-    for (const match of xml.matchAll(/<item\b[\s\S]*?<\/item>/gi)) {
-      const item = match[0];
-      const link = xmlText(item.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] ?? "");
-      const title = xmlText(item.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "");
-      const externalId = xmlText(item.match(/<guid[^>]*>([\s\S]*?)<\/guid>/i)?.[1] ?? link);
-      if (link && title && externalId) yield { externalId, url: link, title };
-    }
+    yield* parseRssFeed(response.text);
   }
 
   async fetch(ref: DiscoveredRef): Promise<NormalizedSourceItem> {

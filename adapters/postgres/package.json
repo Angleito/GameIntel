@@ -1,0 +1,21 @@
+{
+  "name": "@gameintel/postgres",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@gameintel/contracts": "workspace:*",
+    "@gameintel/core": "workspace:*",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@gameintel/adapter-contract-tests": "workspace:*"
+  }
+}

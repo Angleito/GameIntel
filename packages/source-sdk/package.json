@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@gameintel/contracts": "workspace:*",
+    "@gameintel/controlled-fetch": "workspace:*",
     "@gameintel/core": "workspace:*",
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.18.13",

@@ -6,6 +6,7 @@ import type {
   PublicSubmission,
   PublicSubmissionReviewDecision,
   PublicSubmissionState,
+  SafeArticle,
   SourcePolicy,
   SourceStrength,
   PublicationMode,
@@ -79,11 +80,22 @@ export type SourceIngestJobPayload = {
   profileId?: string;
 };
 
+// Discovery jobs are enqueued by the scheduler for discovery sources. The
+// isolated ingestion worker fetches the feed, parses items, and enqueues each
+// item as its own source_ingest job. The feed URL is never ingested as an
+// article.
+export type SourceDiscoverJobPayload = {
+  collectionId: string;
+  sourceId: string;
+  feedUrl: string;
+  profileId?: string;
+};
+
 export type IngestionJob = {
   jobKey: string;
   jobType: string;
   status: string;
-  payload: SourceIngestJobPayload;
+  payload: SourceIngestJobPayload | SourceDiscoverJobPayload;
   attempts: number;
   maxAttempts: number;
   leaseToken: string | null;
@@ -268,8 +280,16 @@ export interface PublicationRepository {
     confidence: number;
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
   }): Promise<string>;
-  getArticle(idOrSlug: string, publishedOnly?: boolean): Promise<Article | null>;
-  listArticles(collectionId: string, publishedOnly?: boolean): Promise<Article[]>;
+  getArticle(idOrSlug: string): Promise<Article | null>;
+  listArticles(collectionId: string): Promise<Article[]>;
+  // The public article surface: sanitized records (publicSafe + spoiler-safe
+  // body sections, numbered citations, approved cover media only). For the
+  // PostgreSQL adapter these are served from the materialized
+  // public_article_records table via SECURITY DEFINER functions; the raw
+  // article row, including editorial fields and internal sections, is never
+  // readable by a public process.
+  getPublicArticle(idOrSlug: string): Promise<SafeArticle | null>;
+  listPublicArticles(collectionId: string): Promise<SafeArticle[]>;
   markPublished(articleId: string, operator: string): Promise<Article>;
   publicArticles(collectionId: string): Promise<unknown[]>;
   purgeExpiredSourceContent(options?: { execute?: boolean }): Promise<SourceContentPurgeResult>;
@@ -338,6 +358,7 @@ export interface GameIntelPersistence extends
 
 export interface JobQueue {
   enqueueSourceIngestJob(input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult>;
+  enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult>;
   claimIngestionJob(workerId: string, jobTypes?: string[], leaseMs?: number): Promise<IngestionJob | null>;
   completeIngestionJob(jobKey: string, leaseToken: string, result: unknown): Promise<void>;
   failIngestionJob(jobKey: string, leaseToken: string, error: unknown, retryable?: boolean): Promise<void>;
@@ -364,6 +385,9 @@ export type SchedulableSource = {
   url: string;
   profileId?: string;
   pollIntervalSeconds: number;
+  // Discovery sources enqueue a source_discover job for url (the feed) on
+  // each due tick; the isolated ingestion worker performs the fetch.
+  discoveryAdapter?: "rss" | null;
 };
 
 export interface SourceScheduler {

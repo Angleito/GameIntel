@@ -9,6 +9,7 @@
     "typecheck": "bun run ../../scripts/prepare-publication.ts && astro check"
   },
   "dependencies": {
+    "@gameintel/config": "workspace:*",
     "@gameintel/output": "workspace:*",
     "astro": "^7.2.9"
   },

@@ -6,7 +6,7 @@ mock.module("node:dns/promises", () => ({
   lookup: async () => [{ address: "93.184.216.34", family: 4 }],
 }));
 
-const { assertRegisteredUrl, assertPublicHost, fetchPermittedUrl, privateIp } = await import("./http-policy.ts");
+const { assertRegisteredUrl, assertPublicHost, fetchPermittedUrl, privateIp } = await import("@gameintel/controlled-fetch");
 
 const tudumSource = (id: string, enabled = true) => ({
   id,

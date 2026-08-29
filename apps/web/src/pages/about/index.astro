@@ -1,4 +1,7 @@
 ---
 import Base from "../../layouts/Base.astro";
+import project from "../../../../../config/project.json";
+import { loadCollectionProfile, profilePath } from "@gameintel/config";
+const profile = await loadCollectionProfile(profilePath(project.defaultProfileId));
 ---
-<Base title="About | GameIntel"><article class="article"><p class="eyebrow">About the project</p><h1>Game intelligence, made accountable.</h1><p class="lede">GameIntel organizes permitted public information into normalized source records, provenance-aware claims, structured data, and readable articles.</p><section><h2>Reference application</h2><p>The repository is designed as reusable TypeScript infrastructure with GTA VI as its first complete profile and showcase.</p></section></article></Base>
+<Base title="About | GameIntel"><article class="article"><p class="eyebrow">About the project</p><h1>Game intelligence, made accountable.</h1><p class="lede">GameIntel organizes permitted public information into normalized source records, provenance-aware claims, structured data, and readable articles.</p><section><h2>Reference application</h2><p>The repository is designed as reusable TypeScript infrastructure with {profile.canonicalName} as its first complete profile and showcase.</p></section></article></Base>

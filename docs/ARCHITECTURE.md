@@ -1,44 +1,101 @@
-# Architecture
+# Reference Local Deployment
 
-## Core Principle
+This is Layer 3 of the documentation: the tools the maintainers actually use.
+The domain model and capability contracts are described in `DOMAIN.md` and
+`CAPABILITIES.md`; most users can understand and extend GameIntel without this
+file.
 
-Ingestion is the primary system. Article publication is one output projection
-of structured source records, claims, evidence, and provenance.
+## Packages and layout
 
 ```text
-adapter -> source item -> claim/evidence graph -> policy decision -> output
+packages/                  reusable domain and capabilities
+  core/                    pure contracts, schemas, deterministic functions
+  contracts/               capability interfaces (types only), adapter versioning
+  config/                  project, profile, and source-registry loading
+  pipeline/                reusable ingestion preparation and disposition
+  source-sdk/              SourceAdapter implementations and parsing
+  ai-runtime/              downstream AI drafting wrapper (optional)
+  output/                  versioned JSON artifacts and output writers
+  adapter-contract-tests/  portable conformance suites
+adapters/                  replaceable infrastructure implementations
+  postgres/                PostgreSQL reference persistence/job/pacing adapter
+  in-memory/               in-memory persistence, queue, pacing, object store
+  local-filesystem/        local filesystem object store
+  controlled-fetch/        HTTP controlled-fetch transport and policy engine
+  r2/                      Cloudflare R2 object-store adapter (SigV4 client)
+profiles/                  game-specific data and tooling
+  gta-vi/                  the first showcase profile (sources, media rules)
+services/
+  newsroom/                ingestion orchestration, editorial CLI, identity
+  worker/                  continuous scheduler and isolated ingestion worker
+  publisher/               static publication artifact generation
+apps/
+  api/                     GameIntel API (public + operator routes)
+  web/                     Astro showcase consumer of generated artifacts
+deployments/
+  local/                   compose.yaml, Dockerfile, Postgres bootstrap, Squid,
+                           Cloudflare Worker (the reference local deployment)
+config/                    project.json, publication.json
 ```
 
-`@gameintel/core` contains pure contracts and deterministic functions. It does
-not fetch URLs, access PostgreSQL, render Astro, or use GameIntel editorial
-copy.
+## Services
 
-`@gameintel/pipeline` validates source items, computes content hashes and
-lineage, scores a configured item, and returns an ingestion disposition. It is
-safe to use without a database or article renderer.
+Compose (`deployments/local/compose.yaml`) runs:
 
-`services/newsroom` supplies GameIntel behavior: profile selection, source
-registry use, editorial wording, human review, and article construction.
+| Service | Role |
+| --- | --- |
+| `postgres` | Shared reference database (pgvector image, stock PostgreSQL) |
+| `migrate` | One-shot DDL service using the DDL-capable principal |
+| `bootstrap-runtime-role` | One-shot creation of the three application logins |
+| `api` | Public routes + token-protected operator routes |
+| `scheduler` | Continuous scheduler (enqueues due sources and discoveries) |
+| `ingest-worker` | Isolated ingestion worker (controlled fetches only) |
+| `egress-proxy` | Squid egress proxy with destination-IP deny rules |
 
-`@gameintel/output` defines the versioned artifact boundary. Consumers may
-render the records as JSON, JSONL, API responses, articles, or static pages.
+The API never fetches remote URLs; it enqueues work for the isolated worker.
+The worker is on internal-only networks and must use the egress proxy. The
+scheduler and worker write heartbeats to PostgreSQL; operators inspect queue
+counts, dead jobs, and stale worker heartbeats through the protected jobs
+endpoint.
 
-## Runtime Boundaries
+## Database capabilities
 
-Compose runs the API and ingestion worker with a separate PostgreSQL runtime
-role. The migration service uses the DDL-capable PostgreSQL principal, creates
-the `gameintel_runtime` group role, and the one-shot bootstrap service grants
-that group role to the configured application login. Application containers do
-not receive migration credentials.
+The migration service uses the DDL-capable PostgreSQL principal. The one-shot
+bootstrap creates three logins, each a member of exactly one group role:
 
-The source ingestion worker writes a heartbeat to PostgreSQL while polling and
-processing work. Operators can inspect queue counts, dead jobs, and stale
-worker heartbeats through the protected jobs endpoint. Set a distinct
-`INGESTION_WORKER_ID` for every replica; Compose defaults a single worker to
-`source-ingest-1` so restarts update the same heartbeat record.
+- `gameintel_runtime` — the ingestion worker, scheduler, publisher, and
+  operator CLI. Broad data role; never used by a public process.
+- `gameintel_operator` — the token-protected operator API surface (jobs,
+  submission moderation and promotion). Cannot create evidence reviews,
+  article reviews, source policy reviews, media approvals, or published
+  articles.
+- `gameintel_public` — the public API surface: a materialized sanitized
+  public-article surface (publicSafe/spoiler-safe sections, numbered
+  citations, approved cover media only) served through SECURITY DEFINER
+  functions, and fenced community intake. No raw table reads or inserts, no
+  UPDATE privileges at all.
 
-## Extension Rule
+The API process runs two runtimes: public routes use the `gameintel_public`
+login and operator routes use the `gameintel_operator` login. A public request
+path cannot approve evidence or publish content even if its handler
+misbehaves. Application containers never receive migration credentials.
+
+## Controlled retrieval
+
+`@gameintel/controlled-fetch` is the behavioral contract: registered domains,
+public-host checks, redirect limits, content-type limits, response-size
+limits, timeouts, rate limits, and source enablement. DNS checks are defense
+in depth, not an egress boundary: the Compose worker is on internal-only
+networks and must use the egress proxy, which applies destination-IP deny
+rules at connection time for loopback, private, link-local, carrier-grade NAT,
+IPv6 local, documentation, multicast, and metadata ranges. This protects
+against DNS rebinding between application-level validation and the outbound
+connection. Production infrastructure must preserve this network segmentation
+and apply equivalent VPC/firewall policy to the proxy itself.
+
+## Extension rule
 
 New domain behavior should enter through configuration, an adapter, a policy,
 or an output implementation. It should not add a new hard-coded profile ID to
-core or the generic pipeline.
+core or the generic pipeline. Game-specific data and tooling live under
+`profiles/<profile-id>/`.

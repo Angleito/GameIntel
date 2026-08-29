@@ -55,7 +55,7 @@ function isPlaceholder(value: string): boolean {
     || /(?:^|[^a-z0-9])(?:change(?:[-_ ]?me)?|replace|placeholder|redacted|example|dummy|sample|your)(?:[^a-z0-9]|$)/i.test(normalized);
 }
 
-const namedSecretAssignment = /(?:^|[\n,])[ \t]*["']?(?:APP_DATABASE_PASSWORD|AWS_SECRET_ACCESS_KEY|CF_API_TOKEN|CLOUDFLARE_API_KEY|CLOUDFLARE_API_TOKEN|DAILY_SHUFFLE_SECRET|DATABASE_PASSWORD|GITHUB_TOKEN|LOCAL_OPERATOR_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|OPENCODE_PASSWORD|POSTGRES_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|SUBMISSION_IDENTITY_SECRET|SUPADATA_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:["']([^"'\r\n]*)["']|([^\s,#}\r\n]+))/gim;
+const namedSecretAssignment = /(?:^|[\n,])[ \t]*["']?(?:APP_DATABASE_PASSWORD|APP_OPERATOR_DATABASE_PASSWORD|APP_PUBLIC_DATABASE_PASSWORD|AWS_SECRET_ACCESS_KEY|CF_API_TOKEN|CLOUDFLARE_API_KEY|CLOUDFLARE_API_TOKEN|DAILY_SHUFFLE_SECRET|DATABASE_PASSWORD|GITHUB_TOKEN|LOCAL_OPERATOR_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|OPENCODE_PASSWORD|POSTGRES_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|SUBMISSION_IDENTITY_SECRET|SUPADATA_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:["']([^"'\r\n]*)["']|([^\s,#}\r\n]+))/gim;
 
 function isConfigurationText(path: string): boolean {
   return /(?:^|\/)(?:\.env(?:\.[^/]+)?|[^/]+\.(?:json|jsonc|yaml|yml))$/i.test(path);
@@ -153,6 +153,30 @@ function isIgnored(path: string): boolean {
   return Bun.spawnSync({ cmd: ["git", "check-ignore", "--no-index", "-q", "--", path], stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 }
 
+// Migration integrity: files must be sequential NNN_ names with no duplicate
+// numbers, so the reference adapter's migration history stays deterministic.
+async function migrationFindings(directory: string): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  let names: string[];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(".sql")).sort();
+  } catch {
+    return [{ path: directory, rule: "migration directory could not be read" }];
+  }
+  let expected = 1;
+  for (const name of names) {
+    const match = /^(\d{3})_(.+)$/.exec(name);
+    if (!match) {
+      findings.push({ path: `${directory}/${name}`, rule: "migration file must use NNN_name.sql naming" });
+      continue;
+    }
+    const number = Number(match[1]);
+    if (number !== expected) findings.push({ path: `${directory}/${name}`, rule: `migration numbering gap or duplicate (expected ${expected})` });
+    expected = number + 1;
+  }
+  return findings;
+}
+
 async function main(): Promise<void> {
   try {
     git(["rev-parse", "--is-inside-work-tree"]);
@@ -168,8 +192,8 @@ async function main(): Promise<void> {
     ".dev.vars",
     ".dev.vars.local",
     ".wrangler/state/v3",
-    "infra/cloudflare/media-worker/.dev.vars",
-    "infra/cloudflare/media-worker/.wrangler/state/v3",
+    "deployments/local/cloudflare/media-worker/.dev.vars",
+    "deployments/local/cloudflare/media-worker/.wrangler/state/v3",
     "tmp/release-check.json",
     "apps/web/dist/index.html",
     "apps/web/src/data/publication.json",
@@ -203,6 +227,7 @@ async function main(): Promise<void> {
     findings.push(...await scanCandidate(path));
   }
   findings.push(...await scanPublicationArtifact("apps/web/src/data/publication.json"));
+  findings.push(...await migrationFindings("adapters/postgres/migrations"));
   if (process.env.GAMEINTEL_RELEASE === "true") {
     findings.push(...await scanGeneratedDirectory("apps/web/dist"));
   }

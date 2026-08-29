@@ -1,5 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
-import { createDb, closeDb } from "@gameintel/db";
+import { createDb, closeDb } from "@gameintel/postgres";
 
 function checksum(value: string): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
@@ -11,7 +11,7 @@ try {
   await db`CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(), filename text, checksum text)`;
   await db`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS filename text`;
   await db`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum text`;
-  const directory = new URL("../packages/db/migrations/", import.meta.url);
+  const directory = new URL("../adapters/postgres/migrations/", import.meta.url);
   const files = (await readdir(directory)).filter((file) => file.endsWith(".sql")).sort();
   const versions = new Set<string>();
   for (const file of files) {

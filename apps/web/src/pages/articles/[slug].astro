@@ -1,5 +1,6 @@
 ---
 import Base from "../../layouts/Base.astro";
+import { loadCollectionProfile, profilePath } from "@gameintel/config";
 import publication from "../../data/publication";
 type EvidenceLevel = "suspected" | "corroborated" | "confirmed" | "disputed";
 type AttributionType = "official" | "trusted_secondary" | "community" | "reviewed_leak_reporting";
@@ -24,6 +25,7 @@ type PublicArticle = {
   slug: string;
   title: string;
   description: string;
+  collectionId: string;
   publishedAt: string | null;
   body: {
     sections: Array<{ heading: string; paragraphs: PublicFact[] }>;
@@ -43,16 +45,17 @@ export function getStaticPaths() {
 const { article } = Astro.props as { article: PublicArticle };
 const citationsByNumber = new Map(article.citations.map((citation) => [citation.number, citation]));
 const coverMedia = article.coverMedia ?? null;
+const profile = await loadCollectionProfile(profilePath(article.collectionId));
 ---
-<Base title={`${article.title} | Game Intelligence`} description={article.description} collectionId="gta-vi">
+<Base title={`${article.title} | Game Intelligence`} description={article.description} collectionId={article.collectionId}>
   <article class="article">
-    <p class="eyebrow">Grand Theft Auto VI · Published</p>
+    <p class="eyebrow">{profile.canonicalName} · Published</p>
     <h1>{article.title}</h1>
     <p class="lede">{article.description}</p>
     <p class="meta">Published{article.publishedAt && ` · ${new Date(article.publishedAt).toLocaleDateString()}`}</p>
     {coverMedia && <figure class="article-cover">
       <img src={coverMedia.publicUrl} alt={coverMedia.altText} loading="eager" fetchpriority="high" />
-      <figcaption><span>Grand Theft Auto VI / {coverMedia.collection} / {coverMedia.caption}</span><a href={coverMedia.sourceUrl} rel="noopener" target="_blank">Official source: {coverMedia.attribution}</a></figcaption>
+      <figcaption><span>{profile.canonicalName} / {coverMedia.collection} / {coverMedia.caption}</span><a href={coverMedia.sourceUrl} rel="noopener" target="_blank">Official source: {coverMedia.attribution}</a></figcaption>
     </figure>}
     {article.body.sections.map((section) => <section><h2>{section.heading}</h2>{section.paragraphs.map((fact) => <>
       <p class="fact"><span class={`evidence-label evidence-${fact.evidenceLevel}`} aria-label={`Evidence level: ${evidenceLabels[fact.evidenceLevel]}`}>{evidenceLabels[fact.evidenceLevel]}</span>{fact.text}{fact.citations.length > 0 && <sup class="citations" aria-label="Citations">{fact.citations.map((number) => {

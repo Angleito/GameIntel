@@ -1,0 +1,62 @@
+sources:
+  # Enabling a source is ingestion configuration, not evidence approval.
+  # Optional access metadata: terms_reviewed_at, retain_raw_text_days,
+  # may_store_full_text. Collection never requires an editorial review record.
+  # poll_interval_seconds is the scheduler cadence; poll_url is the exact
+  # endpoint the scheduler polls and must belong to a registered domain.
+  # Actual request pacing is governed separately by rpm.
+  - id: rockstar-official
+    domains: [rockstargames.com]
+    access: permitted_scrape
+    rpm: 2
+    userAgent: gameintelgg/0.1
+    poll_interval_seconds: 300
+    poll_url: https://www.rockstargames.com/VI
+    source_strength: PRIMARY
+    publication_mode: normal
+    public_citation_base: https://www.rockstargames.com/VI
+    enabled: false
+  - id: netflix-tudum
+    domains: [netflix.com]
+    access: permitted_scrape
+    rpm: 2
+    userAgent: gameintelgg/0.1
+    poll_interval_seconds: 300
+    poll_url: https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look
+    source_strength: TRUSTED_SECONDARY
+    publication_mode: normal
+    public_citation_base: https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look
+    enabled: false
+  # Discovery sources: the scheduler enqueues a source_discover job for
+  # poll_url (the feed) on each cadence; the isolated ingestion worker fetches
+  # the feed, parses the items, and enqueues each item as its own ingestion
+  # job. The feed itself is never parsed as an article and the scheduler never
+  # fetches. RSS sources require discovery configuration.
+  - id: rockstar-news-feed
+    domains: [rockstargames.com]
+    access: rss
+    rpm: 2
+    userAgent: gameintelgg/0.1
+    poll_interval_seconds: 300
+    poll_url: https://www.rockstargames.com/newswire/feed
+    discovery:
+      adapter: rss
+      enabled: true
+    source_strength: TRUSTED_SECONDARY
+    publication_mode: normal
+    public_citation_base: https://www.rockstargames.com/newswire
+    enabled: false
+  - id: operator-note
+    domains: []
+    access: manual
+    rpm: 0
+    source_strength: UNVERIFIED
+    publication_mode: discussion_only
+    enabled: true
+  - id: community-submission
+    domains: []
+    access: manual
+    rpm: 0
+    source_strength: COMMUNITY
+    publication_mode: discussion_only
+    enabled: true

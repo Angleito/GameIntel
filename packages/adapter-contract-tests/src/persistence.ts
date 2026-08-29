@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { GameIntelPersistence } from "@gameintel/contracts";
 import { hashText, lineageFor } from "@gameintel/core";
 import { testItem, testPolicy, testProfile, testSourceInput } from "./fixtures.ts";
@@ -93,13 +96,18 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
         description: "A contract test article.",
         body: {
           summary: "A contract test summary.",
-          sections: [{ heading: "Evidence", paragraphs: [{ text: "Verified observation.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [seededResult.claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] }],
+          sections: [
+            { heading: "Evidence", paragraphs: [{ text: "Verified observation.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [seededResult.claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] },
+            { heading: "Internal note", paragraphs: [{ text: "Editorial-only detail.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [], editorialAssessment: null }], publicSafe: false, spoilerTags: [] },
+            { heading: "Spoiler section", paragraphs: [{ text: "Spoiler detail.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [], editorialAssessment: null }], publicSafe: true, spoilerTags: ["spoiler"] },
+          ],
           unknowns: [],
         },
         newsworthiness: 0.5,
         confidence: 0.5,
         sourceRefs: [{ sourceId: "contract-source", claimId: seededResult.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
       });
+      expect(await persistence.getPublicArticle(articleId)).toBeNull();
       const evidence = await persistence.listArticleEvidence(articleId);
       expect(evidence).toHaveLength(1);
       expect(evidence[0].current).toBe(true);
@@ -112,9 +120,75 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(published.status).toBe("published");
       const publicArticles = await persistence.publicArticles("contract-test");
       expect(publicArticles).toHaveLength(1);
-      const safe = publicArticles[0] as { title: string; citations: Array<{ number: number; label: string; url: string }> };
+      const safe = publicArticles[0] as { title: string; citations: Array<{ number: number; label: string; url: string }>; body: { sections: Array<{ heading: string }> } };
       expect(safe.title).toBe("Contract test article");
       expect(safe.citations).toEqual([{ number: 1, label: "Contract source", url: "https://contract.example.com/report" }]);
+      expect(safe.body.sections.map((section) => section.heading)).toEqual(["Evidence"]);
+      const safeSingle = await persistence.getPublicArticle(articleId);
+      expect(safeSingle).not.toBeNull();
+      expect(JSON.stringify(safeSingle)).not.toContain("Internal note");
+      expect(JSON.stringify(safeSingle)).not.toContain("Spoiler section");
+      expect(JSON.stringify(safeSingle)).not.toContain("approvedBy");
+      expect(safeSingle!.citations).toEqual([{ number: 1, label: "Contract source", url: "https://contract.example.com/report" }]);
+      expect(safeSingle!.body.sections.every((section) => section.publicSafe && section.spoilerTags.length === 0)).toBe(true);
+      const raw = await persistence.getArticle(articleId);
+      expect(JSON.stringify(raw?.body)).toContain("Internal note");
+    });
+
+    test("keeps the public surface in sync with post-publication cover changes", async () => {
+      const seededResult = await seeded();
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Cover sync article",
+        description: "Cover sync.",
+        body: {
+          summary: "Cover sync.",
+          sections: [{ heading: "Evidence", paragraphs: [{ text: "Verified observation.", evidenceLevel: "suspected", attributionType: "trusted_secondary", claimIds: [seededResult.claimId], editorialAssessment: null }], publicSafe: true, spoilerTags: [] }],
+          unknowns: [],
+        },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId: seededResult.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      const evidence = await persistence.listArticleEvidence(articleId);
+      await persistence.reviewEvidence(evidence[0].id, "reviewer-a", "approved", "Supports the claim");
+      await persistence.reviewArticle(articleId, "editor", "Review complete");
+      await persistence.approveArticle(articleId, "approver");
+      await persistence.markPublished(articleId, "publisher");
+      expect((await persistence.getPublicArticle(articleId))?.coverMedia).toBeNull();
+
+      const directory = await mkdtemp(join(tmpdir(), "gameintel-cover-"));
+      const catalogPath = join(directory, "catalog.json");
+      await writeFile(catalogPath, JSON.stringify({
+        media: [{
+          id: "media-contract-cover", collectionId: "contract-test", collection: "Screenshots", caption: "Cover", altText: "Cover alt",
+          tags: ["official"], spoilerTags: [], attribution: "Contract", sourceUrl: "https://contract.example.com/src.jpg",
+          sourcePageUrl: "https://contract.example.com/page", originalKey: "originals/x", displayKey: "display/x",
+          publicUrl: "https://media.example.com/x.jpg", contentType: "image/jpeg", width: 10, height: 10, checksum: "a".repeat(64),
+        }],
+      }));
+      try {
+        await persistence.importMediaCatalog(catalogPath);
+        await persistence.approveMediaAsset("media-contract-cover", "editor");
+        await persistence.setCoverMedia(articleId, "media-contract-cover", "editor");
+        await persistence.approveCoverMedia(articleId, "editor");
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia?.id).toBe("media-contract-cover");
+        expect((await persistence.getArticle(articleId))?.coverMedia?.reviewStatus).toBe("approved");
+
+        await persistence.rejectCoverMedia(articleId, "editor");
+        expect((await persistence.getArticle(articleId))?.coverMedia?.reviewStatus).toBe("rejected");
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia).toBeNull();
+
+        await persistence.setCoverMedia(articleId, "media-contract-cover", "editor");
+        await persistence.approveCoverMedia(articleId, "editor");
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia?.id).toBe("media-contract-cover");
+
+        await persistence.clearCoverMedia(articleId);
+        expect((await persistence.getArticle(articleId))?.coverMedia).toBeNull();
+        expect((await persistence.getPublicArticle(articleId))?.coverMedia).toBeNull();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     });
 
     test("blocks publication while any reviewer rejects or disputes evidence", async () => {
@@ -213,7 +287,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       await persistence.ensureGame(testProfile());
       await persistence.ensureSource(testSourceInput());
       await persistence.audit("operator-a", "test.action", "source", "contract-source", "Audit contract check");
-      const articles = await persistence.listArticles("contract-test", false);
+      const articles = await persistence.listArticles("contract-test");
       expect(articles).toHaveLength(0);
       expect(await persistence.getArticle("missing")).toBeNull();
     });

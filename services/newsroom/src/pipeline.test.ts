@@ -9,8 +9,8 @@ import { loadRegistry, promotePublicSubmission } from "./ingest.ts";
 import { processFixture, processNormalizedItem } from "./pipeline.ts";
 
 const fixturePath = fileURLToPath(new URL("../../../fixtures/sources/gta-vi-netflix-tudum.json", import.meta.url));
-const profilePath = fileURLToPath(new URL("../../../config/games/gta-vi/profile.json", import.meta.url));
-const egressAllowlistPath = fileURLToPath(new URL("../../../infra/egress/allowed-domains.acl", import.meta.url));
+const profilePath = fileURLToPath(new URL("../../../profiles/gta-vi/profile.json", import.meta.url));
+const egressAllowlistPath = fileURLToPath(new URL("../../../deployments/local/egress/allowed-domains.acl", import.meta.url));
 const profile = GameProfileSchema.parse(await Bun.file(profilePath).json());
 
 const rollback = new Error("rollback test transaction");

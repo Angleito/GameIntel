@@ -5,10 +5,13 @@
     "": {
       "name": "game-intelligence",
       "dependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+        "@gameintel/config": "workspace:*",
         "@gameintel/core": "workspace:*",
-        "@gameintel/db": "workspace:*",
         "@gameintel/output": "workspace:*",
         "@gameintel/pipeline": "workspace:*",
+        "@gameintel/postgres": "workspace:*",
+        "@gameintel/r2": "workspace:*",
         "@opencode-ai/sdk": "^1.18.23",
         "hono": "^4.7.2",
         "postgres": "^3.4.5",
@@ -20,6 +23,69 @@
         "typescript": "^5.8.2",
       },
     },
+    "adapters/controlled-fetch": {
+      "name": "@gameintel/controlled-fetch",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
+    "adapters/in-memory": {
+      "name": "@gameintel/in-memory",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
+    "adapters/local-filesystem": {
+      "name": "@gameintel/local-filesystem",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
+    "adapters/postgres": {
+      "name": "@gameintel/postgres",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/core": "workspace:*",
+        "postgres": "^3.4.5",
+        "zod": "^3.24.2",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
+    "adapters/r2": {
+      "name": "@gameintel/r2",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+      },
+    },
+    "adapters/sqlite": {
+      "name": "@gameintel/sqlite",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
     "apps/api": {
       "name": "@gameintel/api",
       "version": "0.1.0",
@@ -27,9 +93,9 @@
         "@gameintel/config": "workspace:*",
         "@gameintel/contracts": "workspace:*",
         "@gameintel/core": "workspace:*",
-        "@gameintel/db": "workspace:*",
         "@gameintel/newsroom": "workspace:*",
         "@gameintel/output": "workspace:*",
+        "@gameintel/postgres": "workspace:*",
         "hono": "^4.7.2",
         "zod": "^3.24.2",
       },
@@ -38,6 +104,7 @@
       "name": "@gameintel/web",
       "version": "0.1.0",
       "dependencies": {
+        "@gameintel/config": "workspace:*",
         "@gameintel/output": "workspace:*",
         "astro": "^7.2.9",
       },
@@ -84,40 +151,6 @@
         "zod": "^3.24.2",
       },
     },
-    "packages/db": {
-      "name": "@gameintel/db",
-      "version": "0.1.0",
-      "dependencies": {
-        "@gameintel/contracts": "workspace:*",
-        "@gameintel/core": "workspace:*",
-        "postgres": "^3.4.5",
-        "zod": "^3.24.2",
-      },
-      "devDependencies": {
-        "@gameintel/adapter-contract-tests": "workspace:*",
-      },
-    },
-    "packages/in-memory": {
-      "name": "@gameintel/in-memory",
-      "version": "0.1.0",
-      "dependencies": {
-        "@gameintel/contracts": "workspace:*",
-        "@gameintel/core": "workspace:*",
-      },
-      "devDependencies": {
-        "@gameintel/adapter-contract-tests": "workspace:*",
-      },
-    },
-    "packages/local-filesystem": {
-      "name": "@gameintel/local-filesystem",
-      "version": "0.1.0",
-      "dependencies": {
-        "@gameintel/contracts": "workspace:*",
-      },
-      "devDependencies": {
-        "@gameintel/adapter-contract-tests": "workspace:*",
-      },
-    },
     "packages/output": {
       "name": "@gameintel/output",
       "version": "0.1.0",
@@ -137,6 +170,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@gameintel/contracts": "workspace:*",
+        "@gameintel/controlled-fetch": "workspace:*",
         "@gameintel/core": "workspace:*",
         "@mozilla/readability": "^0.6.0",
         "linkedom": "^0.18.13",
@@ -153,12 +187,14 @@
         "@gameintel/ai-runtime": "workspace:*",
         "@gameintel/config": "workspace:*",
         "@gameintel/contracts": "workspace:*",
+        "@gameintel/controlled-fetch": "workspace:*",
         "@gameintel/core": "workspace:*",
-        "@gameintel/db": "workspace:*",
         "@gameintel/in-memory": "workspace:*",
         "@gameintel/local-filesystem": "workspace:*",
         "@gameintel/pipeline": "workspace:*",
+        "@gameintel/postgres": "workspace:*",
         "@gameintel/source-sdk": "workspace:*",
+        "@gameintel/sqlite": "workspace:*",
         "yaml": "^2.9.0",
         "zod": "^3.24.2",
       },
@@ -169,9 +205,20 @@
       "dependencies": {
         "@gameintel/config": "workspace:*",
         "@gameintel/contracts": "workspace:*",
-        "@gameintel/db": "workspace:*",
         "@gameintel/newsroom": "workspace:*",
         "@gameintel/output": "workspace:*",
+        "@gameintel/postgres": "workspace:*",
+      },
+    },
+    "services/worker": {
+      "name": "@gameintel/worker",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/config": "workspace:*",
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/newsroom": "workspace:*",
+        "@gameintel/postgres": "workspace:*",
+        "@gameintel/source-sdk": "workspace:*",
       },
     },
   },
@@ -328,13 +375,13 @@
 
     "@gameintel/contracts": ["@gameintel/contracts@workspace:packages/contracts"],
 
+    "@gameintel/controlled-fetch": ["@gameintel/controlled-fetch@workspace:adapters/controlled-fetch"],
+
     "@gameintel/core": ["@gameintel/core@workspace:packages/core"],
 
-    "@gameintel/db": ["@gameintel/db@workspace:packages/db"],
+    "@gameintel/in-memory": ["@gameintel/in-memory@workspace:adapters/in-memory"],
 
-    "@gameintel/in-memory": ["@gameintel/in-memory@workspace:packages/in-memory"],
-
-    "@gameintel/local-filesystem": ["@gameintel/local-filesystem@workspace:packages/local-filesystem"],
+    "@gameintel/local-filesystem": ["@gameintel/local-filesystem@workspace:adapters/local-filesystem"],
 
     "@gameintel/newsroom": ["@gameintel/newsroom@workspace:services/newsroom"],
 
@@ -342,11 +389,19 @@
 
     "@gameintel/pipeline": ["@gameintel/pipeline@workspace:packages/pipeline"],
 
+    "@gameintel/postgres": ["@gameintel/postgres@workspace:adapters/postgres"],
+
     "@gameintel/publisher": ["@gameintel/publisher@workspace:services/publisher"],
+
+    "@gameintel/r2": ["@gameintel/r2@workspace:adapters/r2"],
 
     "@gameintel/source-sdk": ["@gameintel/source-sdk@workspace:packages/source-sdk"],
 
+    "@gameintel/sqlite": ["@gameintel/sqlite@workspace:adapters/sqlite"],
+
     "@gameintel/web": ["@gameintel/web@workspace:apps/web"],
+
+    "@gameintel/worker": ["@gameintel/worker@workspace:services/worker"],
 
     "@img/colour": ["@img/colour@1.1.0", "", {}, "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ=="],
 

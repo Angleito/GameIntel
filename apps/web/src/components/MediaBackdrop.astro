@@ -1,19 +1,19 @@
 ---
 import type { FeaturedMediaSet } from "../data/featured-media";
 
-const { media } = Astro.props as { media: FeaturedMediaSet };
-const slideshowUrl = import.meta.env.PUBLIC_MEDIA_SLIDESHOW_URL || "/api/media/gta-vi/slideshow";
+const { media, creditName = "GameIntel", slideshowUrl } = Astro.props as { media: FeaturedMediaSet; creditName?: string; slideshowUrl?: string };
+const resolvedSlideshowUrl = slideshowUrl || import.meta.env.PUBLIC_MEDIA_SLIDESHOW_URL;
 const firstSlide = media.slides[0];
 ---
 
-<div class="media-backdrop" data-media-backdrop data-media-feed-url={slideshowUrl} data-media-slides={JSON.stringify(media.slides)}>
+<div class="media-backdrop" data-media-backdrop data-media-feed-url={resolvedSlideshowUrl} data-media-credit={creditName} data-media-slides={JSON.stringify(media.slides)}>
   <div class="media-backdrop__images" aria-hidden="true">
     <img class="media-backdrop__slide is-active" data-media-slide src={firstSlide.url} alt="" loading="eager" fetchpriority="high" style={`object-position: ${firstSlide.focalPoint}; --slide-accent: ${firstSlide.accent};`} />
     <img class="media-backdrop__slide" data-media-slide alt="" aria-hidden="true" />
   </div>
   <div class="media-backdrop__veil" aria-hidden="true"></div>
   <div class="media-backdrop__credit">
-    <p class="media-backdrop__caption" data-media-caption>Grand Theft Auto VI / {firstSlide.collection} / {firstSlide.caption}</p>
+    <p class="media-backdrop__caption" data-media-caption>{creditName} / {firstSlide.collection} / {firstSlide.caption}</p>
     <a data-media-source href={firstSlide.sourceUrl} rel="noopener" target="_blank">Official source: {firstSlide.attribution}</a>
   </div>
 </div>
@@ -82,7 +82,8 @@ const firstSlide = media.slides[0];
 
     const updateCredit = () => {
       const slide = slides[activeIndex];
-      if (caption) caption.textContent = `Grand Theft Auto VI / ${slide.collection} / ${slide.caption}`;
+      const creditName = backdrop.dataset.mediaCredit || "GameIntel";
+      if (caption) caption.textContent = `${creditName} / ${slide.collection} / ${slide.caption}`;
       if (source) {
         source.href = slide.sourceUrl;
         source.textContent = `Official source: ${slide.attribution}`;
