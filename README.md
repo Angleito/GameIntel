@@ -134,12 +134,16 @@ bun run operator ingest-text \
   --text-file ./article.txt
 ```
 
-Sources are disabled by default until their access terms are reviewed. Raw
-source material and unapproved drafts are excluded from public artifacts.
+Sources are registered in the active profile's source registry and are
+disabled by default until explicitly enabled. Enabling a source is ingestion
+configuration, not evidence approval: collection may then run continuously
+without any editorial review. Raw source material and unpublished drafts are
+excluded from public artifacts.
 
-`review-source` records source-policy approval only. Each evidence record must
-be reviewed independently before editorial and publication approval can proceed.
-Public community submissions remain disabled unless
+`review-source` records source access metadata (for example terms review notes)
+and is never required before collecting from an enabled source. Each evidence
+record must be reviewed independently before editorial and publication approval
+can proceed. Public community submissions remain disabled unless
 `PUBLIC_SUBMISSIONS_ENABLED=true` is configured behind a trusted proxy and
 submission identity hashing is configured.
 

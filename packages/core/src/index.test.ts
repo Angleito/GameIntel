@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   canPublish,
   calculateConfidence,
+  deriveClaimState,
   dispositionFor,
   effectivePublicationMode,
+  evidenceReviewGate,
   PublicSubmissionReviewDecisionSchema,
   PublicSubmissionSchema,
   PublicSubmissionStateSchema,
@@ -61,6 +63,39 @@ describe("editorial rules", () => {
     expect(effectivePublicationMode("COMMUNITY", "normal")).toBe("discussion_only");
     expect(effectivePublicationMode("UNVERIFIED", "normal")).toBe("discussion_only");
     expect(effectivePublicationMode("PRIMARY", "blocked")).toBe("blocked");
+  });
+
+  test("derives claim states from evidence and revision currency", () => {
+    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", hasCurrentEvidence: false })).toBe("unverified");
+    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "COMMUNITY", hasCurrentEvidence: true })).toBe("supported");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("confirmed");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 1, strongestStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("contested");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: true, retracted: true })).toBe("retracted");
+  });
+
+  test("blocks evidence from publication while any reviewer disputes or rejects it", () => {
+    const vote = (reviewerId: string, decision: "approved" | "rejected" | "disputed", createdAt = 1) => ({ reviewerId, decision, createdAt });
+    const policy = { minimumApprovals: 1 };
+
+    expect(evidenceReviewGate([vote("a", "approved")], policy)).toEqual({ eligible: true, approvedCount: 1, blockedBy: null });
+    expect(evidenceReviewGate([vote("a", "approved"), vote("b", "disputed")], policy)).toEqual({ eligible: false, approvedCount: 1, blockedBy: "disputed" });
+    expect(evidenceReviewGate([vote("a", "approved"), vote("b", "rejected")], policy)).toEqual({ eligible: false, approvedCount: 1, blockedBy: "rejected" });
+
+    const resolved = evidenceReviewGate([
+      vote("a", "approved", 1),
+      vote("b", "disputed", 2),
+      vote("b", "approved", 3),
+    ], policy);
+    expect(resolved).toEqual({ eligible: true, approvedCount: 2, blockedBy: null });
+
+    const rescinded = evidenceReviewGate([
+      vote("a", "approved", 1),
+      vote("b", "approved", 2),
+      vote("b", "rejected", 3),
+    ], { minimumApprovals: 2 });
+    expect(rescinded).toEqual({ eligible: false, approvedCount: 1, blockedBy: "rejected" });
   });
 
   test("rejects public attempts to set trust or publication fields", () => {

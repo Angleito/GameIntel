@@ -9,6 +9,7 @@ import {
   type NormalizedSourceItem,
 } from "@gameintel/core";
 import {
+  assertIngestionJobLeaseHeld,
   createArticleDraft,
   calculateClaimConfidence,
   createEvent,
@@ -18,6 +19,7 @@ import {
   insertSourceItem,
   invalidateEvidenceApprovalsForSourceItem,
   recommendArticleCover,
+  refreshClaimStatesForSourceItem,
   type Db,
 } from "@gameintel/db";
 import { OpenCodeRuntime, type ArticleDraft } from "@gameintel/ai-runtime";
@@ -66,10 +68,12 @@ function citationLabel(type: AttributionType, sourceType: string): string {
   return "Source report";
 }
 
+export type LeaseFence = { jobKey: string; leaseToken: string };
+
 export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, source: {
   id: string; type: string; canonicalUrl: string; publicCitationUrl: string | null;
   sourceStrength: string; publicationMode: string; policy: unknown; enabled?: boolean;
-}, options: { submittedBy?: string | null } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
+}, options: { submittedBy?: string | null; leaseFence?: LeaseFence | null } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
   if (!source.enabled) throw new Error(`Source ${source.id} is disabled by source policy`);
   if (item.sourceId !== source.id) throw new Error("Source item does not match its source policy");
   const sourceStrength = SourceStrengthSchema.parse(source.sourceStrength);
@@ -90,6 +94,7 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
   };
 
   return inTransaction(db, async (transaction) => {
+  if (options.leaseFence) await assertIngestionJobLeaseHeld(transaction, options.leaseFence.jobKey, options.leaseFence.leaseToken);
   await ensureSource(transaction, source);
   const prepared = prepareIngestion(item, {
     sourceAuthority: authority[item.sourceStrength],
@@ -115,10 +120,14 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
    for (const claim of item.claims) {
      claimIds.push(await insertClaim(transaction, item, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, claim, lineageId));
    }
+   await refreshClaimStatesForSourceItem(transaction, inserted.id);
 
-  if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal") {
-    return { sourceItemId: inserted.id, eventId, articleId: null, disposition, duplicate: false, warnings: ["Source policy or public citation does not permit article output"] };
-  }
+  if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal" || claimIds.length === 0) {
+     const warning = claimIds.length === 0
+       ? "No claims were extracted from the source item"
+       : "Source policy or public citation does not permit article output";
+     return { sourceItemId: inserted.id, eventId, articleId: null, disposition, duplicate: false, warnings: [warning] };
+   }
 
    const claimConfidences: number[] = [];
    for (const claimId of claimIds) claimConfidences.push(await calculateClaimConfidence(transaction, claimId));
