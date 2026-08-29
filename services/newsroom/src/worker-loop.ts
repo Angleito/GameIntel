@@ -1,4 +1,4 @@
-import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/db";
+import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/contracts";
 
 export type WorkerLeaseDeps = {
   claim: (workerId: string) => Promise<IngestionJob | null>;

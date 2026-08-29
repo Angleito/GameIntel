@@ -1,16 +1,6 @@
-import {
-  claimIngestionJob,
-  closeDb,
-  completeIngestionJob,
-  createDb,
-  failIngestionJob,
-  heartbeatIngestionWorker,
-  IngestionLeaseLostError,
-  renewIngestionJobLease,
-  type IngestionJob,
-  type SourceIngestJobPayload,
-} from "@gameintel/db";
+import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/contracts";
 import { ingestUrl } from "./ingest.ts";
+import { createServiceRuntime } from "./runtime.ts";
 import { runWorkerLoop, retryableWorkerError } from "./worker-loop.ts";
 
 function workerId(): string {
@@ -22,7 +12,7 @@ function pollInterval(): number {
   return Number.isInteger(value) && value >= 100 && value <= 10_000 ? value : 500;
 }
 
-function sourceIngestPayload(value: unknown): SourceIngestJobPayload {
+function sourceIngestPayload(value: unknown): Parameters<typeof ingestUrl>[1] {
   if (!value || typeof value !== "object") throw new Error("Source ingestion job payload is invalid");
   const payload = value as Record<string, unknown>;
   if (typeof payload.collectionId !== "string" || typeof payload.sourceId !== "string" || typeof payload.url !== "string") {
@@ -45,40 +35,40 @@ if (!process.env.SOURCE_FETCH_PROXY_URL) {
 }
 process.env.GAMEINTEL_FETCH_WORKER = "true";
 
-const db = createDb();
+const runtime = createServiceRuntime();
 const id = workerId();
 let stopping = false;
 process.on("SIGTERM", () => { stopping = true; });
 process.on("SIGINT", () => { stopping = true; });
 
 try {
-  await heartbeatIngestionWorker(db, { workerId: id, workerType: "source_ingest", currentJobKey: null, lastError: null });
+  await runtime.jobQueue.heartbeatIngestionWorker({ workerId: id, workerType: "source_ingest", currentJobKey: null, lastError: null });
   await runWorkerLoop({
     workerId: id,
     pollMs: pollInterval(),
     leaseMs: 60_000,
     isStopping: () => stopping,
     deps: {
-      claim: (workerId) => claimIngestionJob(db, workerId, ["source_ingest"], 60_000),
-      heartbeat: (currentJobKey, lastError) => heartbeatIngestionWorker(db, {
+      claim: (workerId) => runtime.jobQueue.claimIngestionJob(workerId, ["source_ingest"], 60_000),
+      heartbeat: (currentJobKey, lastError) => runtime.jobQueue.heartbeatIngestionWorker({
         workerId: id,
         workerType: "source_ingest",
         currentJobKey,
         lastError: lastError === undefined ? null : lastError,
       }),
-      renewLease: (job) => renewIngestionJobLease(db, job.jobKey, job.leaseToken ?? "", 60_000),
-      complete: (job, result) => completeIngestionJob(db, job.jobKey, job.leaseToken ?? "", result),
-      fail: (job, error, retryable) => failIngestionJob(db, job.jobKey, job.leaseToken ?? "", error, retryable),
+      renewLease: (job) => runtime.jobQueue.renewIngestionJobLease(job.jobKey, job.leaseToken ?? "", 60_000),
+      complete: (job, result) => runtime.jobQueue.completeIngestionJob(job.jobKey, job.leaseToken ?? "", result),
+      fail: (job, error, retryable) => runtime.jobQueue.failIngestionJob(job.jobKey, job.leaseToken ?? "", error, retryable),
     },
     processJob: async (job: IngestionJob, isLeaseLost: () => boolean) => {
       if (job.jobType !== "source_ingest") throw new Error("Unsupported ingestion job");
       if (isLeaseLost()) throw new IngestionLeaseLostError(job.jobKey);
       const payload = sourceIngestPayload(job.payload);
-      return ingestUrl(db, payload, { jobKey: job.jobKey, leaseToken: job.leaseToken ?? "" });
+      return ingestUrl(runtime, payload, { jobKey: job.jobKey, leaseToken: job.leaseToken ?? "" });
     },
   });
 } finally {
-  await closeDb(db);
+  await runtime.close();
 }
 
 export { retryableWorkerError };

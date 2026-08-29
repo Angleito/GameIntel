@@ -1,25 +1,9 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourcePolicy } from "@gameintel/core";
+import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
-export type RegisteredSource = {
-  id: string;
-  domains: string[];
-  access: "rss" | "permitted_scrape" | "official_api" | "manual";
-  rpm: number;
-  userAgent?: string;
-  enabled: boolean;
-};
-
-export type FetchPolicy = {
-  source: RegisteredSource;
-  sourcePolicy: SourcePolicy;
-  proxyUrl?: string;
-  timeoutMs?: number;
-  maxBytes?: number;
-  maxRedirects?: number;
-  userAgent?: string;
-};
+export type { DnsResolver, FetchPolicy, RegisteredSource };
 
 const privateV4 = (ip: string): boolean => {
   const parts = ip.split(".").map(Number);
@@ -63,9 +47,11 @@ export function privateIp(ip: string): boolean {
     || (mappedV4 !== undefined && privateV4(mappedV4));
 }
 
-export async function assertPublicHost(hostname: string): Promise<void> {
+const defaultResolver: DnsResolver = (hostname) => lookup(hostname, { all: true });
+
+export async function assertPublicHost(hostname: string, resolver: DnsResolver = defaultResolver): Promise<void> {
   if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) throw new Error("Private hostnames are not permitted");
-  const records = await lookup(hostname, { all: true });
+  const records = await resolver(hostname);
   if (!records.length || records.some((record) => privateIp(record.address))) throw new Error("Private or link-local address is not permitted");
 }
 
@@ -104,7 +90,7 @@ function limiterFor(sourceId: string): RateLimiter {
   return current;
 }
 
-export async function fetchPermittedUrl(value: string, policy: FetchPolicy): Promise<{ url: string; contentType: string; status: number; text: string }> {
+export async function fetchPermittedUrl(value: string, policy: FetchPolicy, resolver: DnsResolver = defaultResolver): Promise<{ url: string; contentType: string; status: number; text: string }> {
   if (!policy.source.enabled) throw new Error(`Source ${policy.source.id} is disabled`);
   if (policy.sourcePolicy.accessMode !== "rss" && policy.sourcePolicy.accessMode !== "permitted_scrape" && policy.sourcePolicy.accessMode !== "official_api") throw new Error("Source policy does not permit network fetching");
   const proxyUrl = policy.proxyUrl ?? process.env.SOURCE_FETCH_PROXY_URL;
@@ -121,7 +107,7 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy): Pro
   let url = assertRegisteredUrl(value, policy.source);
   let redirects = 0;
   while (true) {
-    await assertPublicHost(url.hostname);
+    await assertPublicHost(url.hostname, resolver);
     await limiterFor(policy.source.id).wait(policy.sourcePolicy.requestsPerMinute);
     const response = await fetch(url, {
       redirect: "manual",

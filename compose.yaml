@@ -95,6 +95,31 @@ services:
     mem_limit: 512m
     restart: unless-stopped
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: infra/docker/api.Dockerfile
+    command: ["bun", "run", "services/newsroom/src/scheduler.ts"]
+    environment:
+      DATABASE_URL: "postgres://${APP_DATABASE_USER:-gameintel_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
+      GAMEINTEL_PROFILE: ${GAMEINTEL_PROFILE:-gta-vi}
+      SCHEDULER_POLL_MS: ${SCHEDULER_POLL_MS:-10000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bootstrap-runtime-role:
+        condition: service_completed_successfully
+    networks: [database]
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    pids_limit: 128
+    mem_limit: 256m
+    restart: unless-stopped
+
   ingest-worker:
     build:
       context: .

@@ -19,12 +19,16 @@ source adapters -> normalized source items -> claims/evidence/provenance
 | Package or app | Responsibility |
 | --- | --- |
 | `@gameintel/core` | Shared schemas, lineage, safety, scoring, and publication contracts |
+| `@gameintel/contracts` | Capability interfaces (persistence, jobs, scheduling, controlled fetch, object storage, identity) and adapter versioning |
 | `@gameintel/config` | Project, profile, and source-registry loading |
 | `@gameintel/pipeline` | Reusable ingestion preparation and disposition logic |
-| `@gameintel/source-sdk` | Source adapters, parsing, and network safety policy |
-| `@gameintel/db` | PostgreSQL persistence and GameIntel review workflow |
+| `@gameintel/source-sdk` | Source adapters, parsing, and the controlled-fetch transport |
+| `@gameintel/db` | PostgreSQL reference persistence/job/pacing adapter |
+| `@gameintel/in-memory` | In-memory persistence, job queue, pacing, object store, and scheduler (zero-dependency development and tests) |
+| `@gameintel/local-filesystem` | Local filesystem object store adapter |
+| `@gameintel/adapter-contract-tests` | Portable conformance suites for persistence, queues, fetch transports, and object stores |
 | `@gameintel/output` | Versioned JSON artifacts and output writers |
-| `@gameintel/newsroom` | GameIntel ingestion, editorial policy, and article generation |
+| `@gameintel/newsroom` | GameIntel ingestion, editorial policy, article generation, and the continuous scheduler |
 | `@gameintel/api` | GameIntel API and structured-data reference endpoints |
 | `@gameintel/web` | Astro showcase consumer of generated output artifacts |
 
@@ -149,11 +153,38 @@ submission identity hashing is configured.
 
 ## Development
 
+GameIntel is infrastructure-agnostic. Services select a storage backend with
+`GAMEINTEL_STORAGE`:
+
 ```bash
-bun test
+bun test                 # runs entirely in memory; no Docker or database needed
 bun run typecheck
 bun run build
 ```
+
+The in-memory adapter (`@gameintel/in-memory`) implements the same capability
+contracts as the PostgreSQL reference adapter and runs the same conformance
+suites (`@gameintel/adapter-contract-tests`). It is intentionally
+single-process/test-only: each in-memory runtime owns its own store, queue,
+and lease registry, so API, worker, scheduler, and publisher processes cannot
+share state through it. Those multi-process services therefore require the
+PostgreSQL backend (`GAMEINTEL_STORAGE=memory` fails fast with a clear error),
+while `bun run operator` CLI tools and scripts may use memory for local
+experiments. To run the PostgreSQL conformance suite against a migrated
+reference deployment:
+
+```bash
+GAMEINTEL_TEST_POSTGRES=true bun test packages/db/src/adapter.test.ts
+```
+
+The continuous scheduler enqueues due registered sources
+(`services/newsroom/src/scheduler.ts`). Source cadence is
+`poll_interval_seconds` and the exact polling endpoint is `poll_url` in the
+profile registry (validated against the registered domains; distinct from
+`public_citation_base`, which is what readers may cite). The scheduler only
+enqueues; the isolated ingestion worker performs controlled fetches through
+the injected fetch transport, and the pacing layer (`rpm`) governs when
+requests are actually allowed.
 
 See `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, and
 `docs/SOURCE_ADAPTERS.md` for extension guidance.

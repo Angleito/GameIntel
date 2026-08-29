@@ -3,6 +3,14 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "typecheck": "bunx tsc --noEmit -p tsconfig.json" },
-  "dependencies": { "@gameintel/config": "workspace:*", "@gameintel/db": "workspace:*", "@gameintel/output": "workspace:*" }
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@gameintel/config": "workspace:*",
+    "@gameintel/db": "workspace:*",
+    "@gameintel/output": "workspace:*",
+    "@gameintel/contracts": "workspace:*",
+    "@gameintel/newsroom": "workspace:*"
+  }
 }

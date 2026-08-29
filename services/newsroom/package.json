@@ -3,16 +3,24 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "exports": { ".": "./src/ingest.ts" },
-  "scripts": { "typecheck": "bunx tsc --noEmit -p tsconfig.json" },
+  "exports": {
+    ".": "./src/ingest.ts",
+    "./runtime": "./src/runtime.ts"
+  },
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
   "dependencies": {
     "@gameintel/ai-runtime": "workspace:*",
     "@gameintel/config": "workspace:*",
+    "@gameintel/contracts": "workspace:*",
     "@gameintel/core": "workspace:*",
     "@gameintel/db": "workspace:*",
+    "@gameintel/in-memory": "workspace:*",
     "@gameintel/pipeline": "workspace:*",
     "@gameintel/source-sdk": "workspace:*",
     "yaml": "^2.9.0",
-    "zod": "^3.24.2"
+    "zod": "^3.24.2",
+    "@gameintel/local-filesystem": "workspace:*"
   }
 }

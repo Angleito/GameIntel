@@ -9,32 +9,16 @@ import {
   PublicSubmissionStateSchema,
   toSafeArticle,
 } from "@gameintel/core";
+import { SubmissionRateLimitError } from "@gameintel/contracts";
 import { loadCollectionProfile, loadProjectConfig, profilePath } from "@gameintel/config";
-import {
-  closeDb,
-  createDb,
-  createQuarantinedSubmission,
-  enqueueSourceIngestJob,
-  getArticle,
-  getIngestionJob,
-  getIngestionQueueStatus,
-  getPublicSubmissionForModeration,
-  listArticles,
-  listIngestionWorkerHeartbeats,
-  listRecentIngestionJobs,
-  listPublicSubmissionModerationActions,
-  listPublicSubmissionsForModeration,
-  publicArticles,
-  reviewPublicSubmission,
-  SubmissionRateLimitError,
-} from "@gameintel/db";
 import { ingestText, promotePublicSubmission } from "@gameintel/newsroom";
+import { createServiceRuntime } from "@gameintel/newsroom/runtime";
 import { createPublicOutputArtifact } from "@gameintel/output";
 import { z } from "zod";
 
 const project = await loadProjectConfig(new URL("../../../config/project.json", import.meta.url));
 const profile = await loadCollectionProfile(profilePath());
-const db = createDb();
+const runtime = createServiceRuntime();
 const app = new Hono();
 const UrlIngestSchema = z.object({ gameId: z.string().min(1).max(64), sourceId: z.string().min(1).max(128), url: PublicHttpUrlSchema });
 const TextIngestSchema = z.object({
@@ -149,14 +133,14 @@ app.get("/v1/games", (c) => c.json([{ id: profile.id, canonicalName: profile.can
 app.get("/v1/games/:gameId", (c) => c.json(c.req.param("gameId") === profile.id ? profile : { error: "Game not found" }, c.req.param("gameId") === profile.id ? 200 : 404));
 app.get("/v1/games/:gameId/articles", async (c) => {
   if (c.req.param("gameId") !== profile.id) return c.json({ error: "Game not found" }, 404);
-  return c.json(await publicArticles(db, profile.id));
+  return c.json(await runtime.persistence.publicArticles(profile.id));
 });
 app.get("/v1/data/:profileId", async (c) => {
   if (c.req.param("profileId") !== profile.id) return c.json({ error: "Profile not found" }, 404);
-  return c.json(createPublicOutputArtifact({ schemaVersion: "1.0", projectId: project.id, profileId: profile.id, records: await publicArticles(db, profile.id) }));
+  return c.json(createPublicOutputArtifact({ schemaVersion: "1.0", projectId: project.id, profileId: profile.id, records: await runtime.persistence.publicArticles(profile.id) }));
 });
 app.get("/v1/articles/:id", async (c) => {
-  const article = await getArticle(db, c.req.param("id"), true);
+  const article = await runtime.persistence.getArticle(c.req.param("id"), true);
   const safe = article ? toSafeArticle(article) : null;
   return safe ? c.json(safe) : c.json({ error: "Article not found" }, 404);
 });
@@ -164,7 +148,7 @@ app.get("/v1/search", async (c) => {
   const query = (c.req.query("q") ?? "").slice(0, 200).toLowerCase().trim();
   const gameId = c.req.query("game_id") ?? profile.id;
   if (gameId !== profile.id) return c.json({ error: "Game not found" }, 404);
-  const articles = await listArticles(db, profile.id, true);
+  const articles = await runtime.persistence.listArticles(profile.id, true);
   return c.json(articles.map(toSafeArticle).filter((article) => article && (!query || `${article.title} ${article.description}`.toLowerCase().includes(query))).slice(0, 100));
 });
 
@@ -183,7 +167,7 @@ app.post("/v1/submissions", async (c) => {
   if (parsed.data.collectionId !== profile.id) return c.json({ error: "Collection not found" }, 404);
   try {
     const identity = submissionIdentity(c.req.raw);
-    const result = await createQuarantinedSubmission(db, {
+    const result = await runtime.persistence.createQuarantinedSubmission({
       submission: parsed.data,
       submitterSessionHash: identity.sessionHash,
       submitterIpHash: identity.ipHash,
@@ -209,11 +193,11 @@ app.use("/internal/operator/*", async (c, next) => {
   if (!operatorAuthorized(c.req.raw)) return c.json({ error: "Operator authentication required" }, 401);
   await next();
 });
-app.get("/internal/operator/articles", async (c) => c.json(await listArticles(db, profile.id, false)));
+app.get("/internal/operator/articles", async (c) => c.json(await runtime.persistence.listArticles(profile.id, false)));
 app.get("/internal/operator/jobs", async (c) => c.json({
-  queue: await getIngestionQueueStatus(db),
-  workers: await listIngestionWorkerHeartbeats(db),
-  jobs: await listRecentIngestionJobs(db),
+  queue: await runtime.jobQueue.getIngestionQueueStatus(),
+  workers: await runtime.jobQueue.listIngestionWorkerHeartbeats(),
+  jobs: await runtime.jobQueue.listRecentIngestionJobs(),
 }));
 app.get("/internal/operator/submissions", async (c) => {
   const rawState = c.req.query("state");
@@ -224,14 +208,14 @@ app.get("/internal/operator/submissions", async (c) => {
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 200)) {
     return c.json({ error: "limit must be an integer between 1 and 200" }, 400);
   }
-  return c.json(await listPublicSubmissionsForModeration(db, profile.id, { state: state?.success ? state.data : undefined, limit }));
+  return c.json(await runtime.persistence.listPublicSubmissionsForModeration(profile.id, { state: state?.success ? state.data : undefined, limit }));
 });
 app.get("/internal/operator/submissions/:submissionId", async (c) => {
-  const submission = await getPublicSubmissionForModeration(db, c.req.param("submissionId"));
+  const submission = await runtime.persistence.getPublicSubmissionForModeration(c.req.param("submissionId"));
   if (!submission || submission.collectionId !== profile.id) return c.json({ error: "Submission not found" }, 404);
   return c.json({
     submission,
-    actions: await listPublicSubmissionModerationActions(db, submission.id),
+    actions: await runtime.persistence.listPublicSubmissionModerationActions(submission.id),
   });
 });
 app.post("/internal/operator/submissions/:submissionId/review", async (c) => {
@@ -245,9 +229,9 @@ app.post("/internal/operator/submissions/:submissionId/review", async (c) => {
   const parsed = SubmissionReviewSchema.safeParse(payload);
   if (!parsed.success) return c.json({ error: "A valid moderation decision is required" }, 400);
   try {
-    const submission = await getPublicSubmissionForModeration(db, c.req.param("submissionId"));
+    const submission = await runtime.persistence.getPublicSubmissionForModeration(c.req.param("submissionId"));
     if (!submission || submission.collectionId !== profile.id) return c.json({ error: "Submission not found" }, 404);
-    return c.json(await reviewPublicSubmission(db, {
+    return c.json(await runtime.persistence.reviewPublicSubmission({
       submissionId: submission.id,
       actorId: currentOperatorId,
       decision: parsed.data.decision,
@@ -268,7 +252,7 @@ app.post("/internal/operator/submissions/:submissionId/promote", async (c) => {
   const parsed = SubmissionPromotionSchema.safeParse(payload);
   if (!parsed.success) return c.json({ error: "Promotion notes must be valid" }, 400);
   try {
-    const result = await promotePublicSubmission(db, {
+    const result = await promotePublicSubmission(runtime, {
       submissionId: c.req.param("submissionId"),
       actorId: currentOperatorId,
       notes: parsed.data.notes,
@@ -280,7 +264,7 @@ app.post("/internal/operator/submissions/:submissionId/promote", async (c) => {
   }
 });
 app.get("/internal/operator/jobs/:jobKey", async (c) => {
-  const job = await getIngestionJob(db, c.req.param("jobKey"));
+  const job = await runtime.jobQueue.getIngestionJob(c.req.param("jobKey"));
   return job ? c.json(job) : c.json({ error: "Job not found" }, 404);
 });
 app.post("/internal/operator/ingest/url", async (c) => {
@@ -296,7 +280,7 @@ app.post("/internal/operator/ingest/url", async (c) => {
   const body = parsed.data;
   if (body.gameId !== profile.id) return c.json({ error: "Game not found" }, 404);
   try {
-    const job = await enqueueSourceIngestJob(db, { collectionId: body.gameId, sourceId: body.sourceId, url: body.url, profileId: profile.id });
+    const job = await runtime.jobQueue.enqueueSourceIngestJob({ collectionId: body.gameId, sourceId: body.sourceId, url: body.url, profileId: profile.id });
     return c.json({ jobId: job.jobKey, dedupeKey: job.dedupeKey, status: job.status, duplicate: job.duplicate }, job.duplicate ? 200 : 202);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Ingestion failed" }, 400);
@@ -315,7 +299,7 @@ app.post("/internal/operator/ingest/text", async (c) => {
   const body = parsed.data;
   if (body.gameId !== profile.id) return c.json({ error: "Game not found" }, 404);
   try {
-    return c.json(await ingestText(db, {
+    return c.json(await ingestText(runtime.persistence, {
       collectionId: body.gameId,
       sourceId: body.sourceId ?? "operator-note",
       title: body.title,
@@ -335,6 +319,6 @@ const server = Bun.serve({ port, fetch: app.fetch });
 console.log(`GameIntel API listening on http://localhost:${server.port}`);
 
 process.on("SIGTERM", async () => {
-  await closeDb(db);
+  await runtime.close();
   process.exit(0);
 });
