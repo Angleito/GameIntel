@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { JobQueue, SchedulableSource, SourceScheduler } from "@gameintel/contracts";
-import { processDueSources } from "./scheduler-loop.ts";
+import { processDueSources, type DiscoveryRunner } from "./scheduler-loop.ts";
 
 function fakeClock(initial = 1_000_000): { now: () => number; nowIso: () => string } {
   let now = initial;
@@ -93,5 +93,40 @@ describe("scheduler loop tick", () => {
     await processDueSources({ due: [source("broken"), source("ok")], jobQueue: queue, clock: fakeClock(), scheduler });
     expect(queue.enqueued).toEqual(["ok"]);
     expect(scheduler.scheduled).toEqual(["ok"]);
+  });
+
+  test("enqueues discovered references from a discovery source after its poll", async () => {
+    const queue = fakeQueue();
+    const scheduler = fakeScheduler();
+    const discovery = new Map<string, DiscoveryRunner>([
+      ["rss-feed", async function* () {
+        yield { externalId: "item-1", url: "https://example.com/rss-feed/item-1", title: "Item 1" };
+        yield { externalId: "item-2", url: "https://example.com/rss-feed/item-2", title: "Item 2" };
+      }],
+    ]);
+    const rssSource = { ...source("rss-feed"), discoveryAdapter: "rss" as const };
+    await processDueSources({ due: [rssSource], jobQueue: queue, clock: fakeClock(), scheduler, discovery });
+    expect(queue.enqueued).toEqual(["rss-feed", "rss-feed", "rss-feed"]);
+    expect(scheduler.scheduled).toEqual(["rss-feed"]);
+  });
+
+  test("marks the source scheduled even when discovery yields nothing or fails", async () => {
+    const queue = fakeQueue();
+    const scheduler = fakeScheduler();
+    const discovery = new Map<string, DiscoveryRunner>([
+      ["empty-feed", async function* () {}],
+      ["broken-feed", async function* () {
+        throw new Error("feed unavailable");
+      }],
+    ]);
+    await processDueSources({
+      due: [{ ...source("empty-feed"), discoveryAdapter: "rss" }, { ...source("broken-feed"), discoveryAdapter: "rss" }],
+      jobQueue: queue,
+      clock: fakeClock(),
+      scheduler,
+      discovery,
+    });
+    expect(queue.enqueued).toEqual(["empty-feed", "broken-feed"]);
+    expect(scheduler.scheduled).toEqual(["empty-feed", "broken-feed"]);
   });
 });

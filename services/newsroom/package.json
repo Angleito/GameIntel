@@ -5,22 +5,25 @@
   "type": "module",
   "exports": {
     ".": "./src/ingest.ts",
-    "./runtime": "./src/runtime.ts"
+    "./runtime": "./src/runtime.ts",
+    "./identity": "./src/identity.ts"
   },
   "scripts": {
     "typecheck": "bunx tsc --noEmit -p tsconfig.json"
   },
-  "dependencies": {
+"dependencies": {
     "@gameintel/ai-runtime": "workspace:*",
     "@gameintel/config": "workspace:*",
     "@gameintel/contracts": "workspace:*",
+    "@gameintel/controlled-fetch": "workspace:*",
     "@gameintel/core": "workspace:*",
-    "@gameintel/db": "workspace:*",
     "@gameintel/in-memory": "workspace:*",
+    "@gameintel/local-filesystem": "workspace:*",
     "@gameintel/pipeline": "workspace:*",
+    "@gameintel/postgres": "workspace:*",
     "@gameintel/source-sdk": "workspace:*",
+    "@gameintel/sqlite": "workspace:*",
     "yaml": "^2.9.0",
-    "zod": "^3.24.2",
-    "@gameintel/local-filesystem": "workspace:*"
+    "zod": "^3.24.2"
   }
 }

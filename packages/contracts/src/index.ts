@@ -364,6 +364,9 @@ export type SchedulableSource = {
   url: string;
   profileId?: string;
   pollIntervalSeconds: number;
+  // Discovery adapter run against url (the feed) on each due tick; discovered
+  // references are enqueued as individual ingestion jobs.
+  discoveryAdapter?: "rss" | null;
 };
 
 export interface SourceScheduler {

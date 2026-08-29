@@ -1,0 +1,20 @@
+{
+  "name": "@gameintel/worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/worker.ts",
+    "./scheduler": "./src/scheduler.ts"
+  },
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@gameintel/config": "workspace:*",
+    "@gameintel/contracts": "workspace:*",
+    "@gameintel/newsroom": "workspace:*",
+    "@gameintel/postgres": "workspace:*",
+    "@gameintel/source-sdk": "workspace:*"
+  }
+}

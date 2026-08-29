@@ -8,7 +8,7 @@
   },
   "dependencies": {
     "@gameintel/config": "workspace:*",
-    "@gameintel/db": "workspace:*",
+    "@gameintel/postgres": "workspace:*",
     "@gameintel/output": "workspace:*",
     "@gameintel/contracts": "workspace:*",
     "@gameintel/newsroom": "workspace:*"

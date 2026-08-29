@@ -1250,7 +1250,10 @@ export async function createQuarantinedSubmission(db: Db, input: {
   const contentHash = publicSubmissionFingerprint(submission);
 
   return inTransaction(db, async (transaction) => {
-    const collection = await transaction`SELECT id FROM games WHERE id = ${submission.collectionId} FOR KEY SHARE`;
+    // A plain membership check keeps the public intake role free of UPDATE
+    // privileges on games (FOR KEY SHARE would require them). Games are
+    // never deleted in this system, so no lock is needed here.
+    const collection = await transaction`SELECT id FROM games WHERE id = ${submission.collectionId}`;
     if (!collection.length) throw new Error("Collection not found");
     const minuteBucket = Math.floor(Date.now() / 60_000);
     await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`public-submission:global:${minuteBucket}`}, 0))`;

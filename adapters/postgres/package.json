@@ -1,5 +1,5 @@
 {
-  "name": "@gameintel/source-sdk",
+  "name": "@gameintel/postgres",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -11,11 +11,9 @@
   },
   "dependencies": {
     "@gameintel/contracts": "workspace:*",
-    "@gameintel/controlled-fetch": "workspace:*",
     "@gameintel/core": "workspace:*",
-    "@mozilla/readability": "^0.6.0",
-    "linkedom": "^0.18.13",
-    "yaml": "^2.9.0"
+    "postgres": "^3.4.5",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@gameintel/adapter-contract-tests": "workspace:*"

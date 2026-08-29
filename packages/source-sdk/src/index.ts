@@ -1,9 +1,7 @@
 import { NormalizedSourceItemSchema, SourcePolicySchema, type NormalizedSourceItem, type SourcePolicy } from "@gameintel/core";
-import { fetchPermittedUrl } from "./http-policy.ts";
+import { fetchPermittedUrl } from "@gameintel/controlled-fetch";
 export * from "./article-parser.ts";
-export * from "./http-policy.ts";
 export * from "./manual-adapter.ts";
-export * from "./transport.ts";
 export type { ControlledFetchTransport, FetchedResource, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
 export type DiscoveredRef = { externalId: string; url: string; title?: string };

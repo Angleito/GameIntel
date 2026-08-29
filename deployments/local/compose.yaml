@@ -1,3 +1,5 @@
+name: gameintelgg
+
 services:
   postgres:
     image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
@@ -18,8 +20,8 @@ services:
 
   migrate:
     build:
-      context: .
-      dockerfile: infra/docker/api.Dockerfile
+      context: ../..
+      dockerfile: deployments/local/docker/api.Dockerfile
     command: ["bun", "run", "scripts/migrate.ts"]
     environment:
       MIGRATION_DATABASE_URL: "postgres://${POSTGRES_USER:-gameintel}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
@@ -36,9 +38,13 @@ services:
       - -ec
       - >-
         test "$$APP_DATABASE_USER" != "$$POSTGRES_USER";
+        test "$$APP_OPERATOR_DATABASE_USER" != "$$POSTGRES_USER";
+        test "$$APP_PUBLIC_DATABASE_USER" != "$$POSTGRES_USER";
         until pg_isready -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"; do sleep 1; done;
         psql -v ON_ERROR_STOP=1 -h postgres -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
         -v app_user="$$APP_DATABASE_USER" -v app_password="$$APP_DATABASE_PASSWORD"
+        -v operator_user="$$APP_OPERATOR_DATABASE_USER" -v operator_password="$$APP_OPERATOR_DATABASE_PASSWORD"
+        -v public_user="$$APP_PUBLIC_DATABASE_USER" -v public_password="$$APP_PUBLIC_DATABASE_PASSWORD"
         -f /bootstrap/bootstrap-runtime-role.sql
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -46,8 +52,12 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-gameintel}
       APP_DATABASE_USER: ${APP_DATABASE_USER:-gameintel_app}
       APP_DATABASE_PASSWORD: ${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}
+      APP_OPERATOR_DATABASE_USER: ${APP_OPERATOR_DATABASE_USER:-gameintel_operator_app}
+      APP_OPERATOR_DATABASE_PASSWORD: ${APP_OPERATOR_DATABASE_PASSWORD:?Set APP_OPERATOR_DATABASE_PASSWORD in .env}
+      APP_PUBLIC_DATABASE_USER: ${APP_PUBLIC_DATABASE_USER:-gameintel_public_app}
+      APP_PUBLIC_DATABASE_PASSWORD: ${APP_PUBLIC_DATABASE_PASSWORD:?Set APP_PUBLIC_DATABASE_PASSWORD in .env}
     volumes:
-      - ./infra/postgres/bootstrap-runtime-role.sql:/bootstrap/bootstrap-runtime-role.sql:ro
+      - ./postgres/bootstrap-runtime-role.sql:/bootstrap/bootstrap-runtime-role.sql:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -58,11 +68,12 @@ services:
 
   api:
     build:
-      context: .
-      dockerfile: infra/docker/api.Dockerfile
+      context: ../..
+      dockerfile: deployments/local/docker/api.Dockerfile
     environment:
       API_PORT: ${API_PORT:-3000}
-      DATABASE_URL: "postgres://${APP_DATABASE_USER:-gameintel_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
+      PUBLIC_DATABASE_URL: "postgres://${APP_PUBLIC_DATABASE_USER:-gameintel_public_app}:${APP_PUBLIC_DATABASE_PASSWORD:?Set APP_PUBLIC_DATABASE_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
+      OPERATOR_DATABASE_URL: "postgres://${APP_OPERATOR_DATABASE_USER:-gameintel_operator_app}:${APP_OPERATOR_DATABASE_PASSWORD:?Set APP_OPERATOR_DATABASE_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
       GAMEINTEL_PROFILE: ${GAMEINTEL_PROFILE:-gta-vi}
       LOCAL_OPERATOR_TOKEN: ${LOCAL_OPERATOR_TOKEN:?Set LOCAL_OPERATOR_TOKEN in .env}
       OPERATOR_ID: ${OPERATOR_ID:-local-operator}
@@ -97,9 +108,9 @@ services:
 
   scheduler:
     build:
-      context: .
-      dockerfile: infra/docker/api.Dockerfile
-    command: ["bun", "run", "services/newsroom/src/scheduler.ts"]
+      context: ../..
+      dockerfile: deployments/local/docker/api.Dockerfile
+    command: ["bun", "run", "services/worker/src/scheduler.ts"]
     environment:
       DATABASE_URL: "postgres://${APP_DATABASE_USER:-gameintel_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
       GAMEINTEL_PROFILE: ${GAMEINTEL_PROFILE:-gta-vi}
@@ -122,9 +133,9 @@ services:
 
   ingest-worker:
     build:
-      context: .
-      dockerfile: infra/docker/api.Dockerfile
-    command: ["bun", "run", "services/newsroom/src/worker.ts"]
+      context: ../..
+      dockerfile: deployments/local/docker/api.Dockerfile
+    command: ["bun", "run", "services/worker/src/worker.ts"]
     environment:
       DATABASE_URL: "postgres://${APP_DATABASE_USER:-gameintel_app}:${APP_DATABASE_PASSWORD:?Set APP_DATABASE_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-gameintel}"
       GAMEINTEL_PROFILE: ${GAMEINTEL_PROFILE:-gta-vi}
@@ -154,9 +165,9 @@ services:
   egress-proxy:
     image: ubuntu/squid:6.6-24.04_beta@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
     volumes:
-      - ./infra/egress/squid.conf:/etc/squid/squid.conf:ro
-      - ./infra/egress/allowed-domains.acl:/etc/squid/allowed-domains.acl:ro
-      - ./infra/egress/blocked-destinations.acl:/etc/squid/blocked-destinations.acl:ro
+      - ./egress/squid.conf:/etc/squid/squid.conf:ro
+      - ./egress/allowed-domains.acl:/etc/squid/allowed-domains.acl:ro
+      - ./egress/blocked-destinations.acl:/etc/squid/blocked-destinations.acl:ro
     networks: [ingestion, outbound]
     security_opt:
       - no-new-privileges:true

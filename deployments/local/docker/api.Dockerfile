@@ -3,7 +3,9 @@ WORKDIR /app
 COPY --chown=bun:bun package.json bun.lock* ./
 COPY --chown=bun:bun apps ./apps
 COPY --chown=bun:bun packages ./packages
+COPY --chown=bun:bun adapters ./adapters
 COPY --chown=bun:bun services ./services
+COPY --chown=bun:bun profiles ./profiles
 COPY --chown=bun:bun scripts ./scripts
 COPY --chown=bun:bun config ./config
 RUN chown bun:bun /app

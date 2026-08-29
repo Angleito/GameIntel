@@ -1,6 +1,6 @@
 import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/contracts";
-import { ingestUrl } from "./ingest.ts";
-import { createServiceRuntime } from "./runtime.ts";
+import { ingestUrl } from "@gameintel/newsroom";
+import { createServiceRuntime } from "@gameintel/newsroom/runtime";
 import { runWorkerLoop, retryableWorkerError } from "./worker-loop.ts";
 
 function workerId(): string {
