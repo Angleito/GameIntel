@@ -2254,7 +2254,11 @@ suites, and a full Compose stack smoke:
   sections only, numbered citations, approved cover media only — and the read
   functions serve only that table; submission rate limits are trusted
   database configuration, not caller parameters; the bootstrap login guard
-  runs before any role creation), the bootstrap revokes
+  runs before any role creation), with post-publication synchronization:
+  refreshPublicArticleRecord keeps the materialized record consistent after
+  cover selection/approval/rejection/clearing and media import/approval
+  (transactionally), the public list is deterministically ordered, and
+  gameintel_runtime receives DELETE on public_article_records only, the bootstrap revokes
   stray memberships before granting exactly one capability group per login,
   and the tests prove the operator cannot publish, the public role cannot read
   internal tables or submission identity columns, and each login belongs to
