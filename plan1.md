@@ -2244,11 +2244,17 @@ suites, and a full Compose stack smoke:
   hardening: 018 revokes all article writes from the operator role, 019 narrows
   public reads to the published article surface with community intake routed
   through SECURITY DEFINER functions (no direct submission-table reads, no
-  automatic future-table reads), 020 completes the boundary (public articles
-  are readable only through published-only SECURITY DEFINER functions with no
-  raw article-table SELECT; intake writes are fenced in the submit function so
-  the public role holds no INSERT on intake, moderation, or audit tables;
-  application logins cannot use capability group role names), the bootstrap revokes
+  automatic future-table reads), 020 completes the raw boundary (public
+  articles are readable only through published-only SECURITY DEFINER functions
+  with no raw article-table SELECT; intake writes are fenced in the submit
+  function so the public role holds no INSERT on intake, moderation, or audit
+  tables; application logins cannot use capability group role names), 021
+  makes the public surface itself sanitized (public_article_records is
+  materialized from toSafeArticle at publish time — publicSafe/spoiler-safe
+  sections only, numbered citations, approved cover media only — and the read
+  functions serve only that table; submission rate limits are trusted
+  database configuration, not caller parameters; the bootstrap login guard
+  runs before any role creation), the bootstrap revokes
   stray memberships before granting exactly one capability group per login,
   and the tests prove the operator cannot publish, the public role cannot read
   internal tables or submission identity columns, and each login belongs to
