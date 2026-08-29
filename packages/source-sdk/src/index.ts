@@ -3,6 +3,8 @@ import { fetchPermittedUrl } from "./http-policy.ts";
 export * from "./article-parser.ts";
 export * from "./http-policy.ts";
 export * from "./manual-adapter.ts";
+export * from "./transport.ts";
+export type { ControlledFetchTransport, FetchedResource, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
 export type DiscoveredRef = { externalId: string; url: string; title?: string };
 export type AdapterHealth = { adapterId: string; enabled: boolean; message?: string };

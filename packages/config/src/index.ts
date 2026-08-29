@@ -32,6 +32,13 @@ export const SourceRegistryEntrySchema = z.object({
   access: z.enum(["rss", "permitted_scrape", "official_api", "manual"]),
   rpm: z.number().nonnegative(),
   userAgent: z.string().optional(),
+  // The scheduler revisits enabled network sources on this cadence. Pacing
+  // (how often a request is actually allowed) is separate and governed by rpm.
+  poll_interval_seconds: z.number().int().positive().optional(),
+  // The exact endpoint the scheduler polls. Distinct from
+  // public_citation_base, which is what readers may cite. Must belong to a
+  // registered domain; network sources without this field cannot be polled.
+  poll_url: PublicHttpUrlSchema.optional(),
   source_strength: SourceStrengthSchema,
   publication_mode: PublicationModeSchema,
   evidence_review: EvidenceReviewPolicySchema.optional(),
@@ -43,6 +50,30 @@ export const SourceRegistryEntrySchema = z.object({
 }).superRefine((entry, context) => {
   if (entry.access !== "manual" && entry.domains.length === 0) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["domains"], message: "Network sources require at least one registered domain" });
+  }
+  if (entry.access === "manual" && entry.poll_interval_seconds !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["poll_interval_seconds"], message: "Manual sources are event-driven and cannot be polled" });
+  }
+  if (entry.access === "manual" && entry.poll_url !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["poll_url"], message: "Manual sources are event-driven and cannot be polled" });
+  }
+  if (entry.poll_interval_seconds !== undefined && entry.poll_url === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["poll_url"], message: "Pollable sources require an explicit poll_url" });
+  }
+  if (entry.poll_url !== undefined && entry.access !== "manual") {
+    let hostname: string;
+    try {
+      hostname = new URL(entry.poll_url).hostname.toLowerCase();
+    } catch {
+      hostname = "";
+    }
+    const allowed = entry.domains.some((domain) => {
+      const registered = domain.toLowerCase();
+      return registered.includes(".") && (hostname === registered || hostname.endsWith(`.${registered}`));
+    });
+    if (!allowed) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["poll_url"], message: "poll_url must belong to a registered domain" });
+    }
   }
 });
 export type SourceRegistryEntry = z.infer<typeof SourceRegistryEntrySchema>;

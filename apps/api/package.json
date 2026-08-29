@@ -3,6 +3,18 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "scripts": { "typecheck": "bunx tsc --noEmit -p tsconfig.json", "dev": "bun --watch src/index.ts" },
-  "dependencies": { "@gameintel/config": "workspace:*", "@gameintel/core": "workspace:*", "@gameintel/db": "workspace:*", "@gameintel/newsroom": "workspace:*", "@gameintel/output": "workspace:*", "hono": "^4.7.2", "zod": "^3.24.2" }
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "dev": "bun --watch src/index.ts"
+  },
+  "dependencies": {
+    "@gameintel/config": "workspace:*",
+    "@gameintel/core": "workspace:*",
+    "@gameintel/db": "workspace:*",
+    "@gameintel/newsroom": "workspace:*",
+    "@gameintel/output": "workspace:*",
+    "hono": "^4.7.2",
+    "zod": "^3.24.2",
+    "@gameintel/contracts": "workspace:*"
+  }
 }

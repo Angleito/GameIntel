@@ -1,68 +1,21 @@
 import { readFile } from "node:fs/promises";
-import { z } from "zod";
-import { PublicHttpUrlSchema } from "@gameintel/core";
+import { assertUniqueMedia, MediaCatalogSchema, mediaCoverScore, type CatalogMedia } from "@gameintel/core";
+import type { CoverMediaCandidate } from "@gameintel/contracts";
 import type { Db } from "./index.ts";
 
-const CatalogMediaSchema = z.object({
-  id: z.string().min(1),
-  collectionId: z.string().min(1),
-  collection: z.string().min(1),
-  caption: z.string().min(1),
-  altText: z.string().min(1),
-  tags: z.array(z.string().min(1)),
-  spoilerTags: z.array(z.string().min(1)),
-  attribution: z.string().min(1),
-  sourceUrl: PublicHttpUrlSchema,
-  sourcePageUrl: PublicHttpUrlSchema,
-  originalKey: z.string().min(1),
-  displayKey: z.string().min(1),
-  publicUrl: PublicHttpUrlSchema,
-  contentType: z.string().regex(/^image\/[a-z0-9.+-]+$/i, "Expected an image content type"),
-  width: z.number().int().positive(),
-  height: z.number().int().positive(),
-  checksum: z.string().regex(/^[a-f0-9]{64}$/i, "Expected a SHA-256 checksum"),
-});
-
-const MediaCatalogSchema = z.object({ media: z.array(CatalogMediaSchema) }).passthrough();
-type CatalogMedia = z.infer<typeof CatalogMediaSchema>;
-
-export type CoverMediaCandidate = Pick<CatalogMedia, "id" | "collection" | "caption" | "altText" | "tags" | "spoilerTags" | "attribution" | "sourceUrl" | "publicUrl">;
+export type { CoverMediaCandidate };
 
 function jsonArray(value: unknown): string[] {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
   return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
 }
 
+function candidateScore(candidate: CoverMediaCandidate, articleText: string): number {
+  return mediaCoverScore(candidate, articleText);
+}
+
 function normalized(value: string): string {
   return value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
-}
-
-function containsPhrase(text: string, phrase: string): boolean {
-  return phrase.length > 0 && ` ${text} `.includes(` ${phrase} `);
-}
-
-function candidateScore(candidate: CoverMediaCandidate, articleText: string): number {
-  const phrases = [candidate.caption, candidate.collection];
-  let score = 0;
-  for (const tag of candidate.tags) {
-    const phrase = normalized(tag);
-    if (containsPhrase(articleText, phrase)) score += 10_000 + phrase.split(" ").length;
-  }
-  for (const phraseValue of phrases) {
-    const phrase = normalized(phraseValue);
-    if (phrase.split(" ").length > 1 && containsPhrase(articleText, phrase)) score += 100 + phrase.split(" ").length;
-  }
-  return score;
-}
-
-function assertUnique(media: CatalogMedia[]): void {
-  for (const key of ["id", "checksum", "displayKey"] as const) {
-    const values = new Set<string>();
-    for (const item of media) {
-      if (values.has(item[key])) throw new Error(`Invalid media catalog: duplicate ${key} '${item[key]}'`);
-      values.add(item[key]);
-    }
-  }
 }
 
 export async function importMediaCatalog(db: Db, catalogPath: string): Promise<{ imported: number; collectionIds: string[] }> {
@@ -74,7 +27,7 @@ export async function importMediaCatalog(db: Db, catalogPath: string): Promise<{
   }
   const catalog = MediaCatalogSchema.safeParse(parsed);
   if (!catalog.success) throw new Error(`Invalid media catalog: ${catalog.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
-  assertUnique(catalog.data.media);
+  assertUniqueMedia(catalog.data.media);
 
   for (const item of catalog.data.media) {
     await db`

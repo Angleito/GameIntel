@@ -1,5 +1,24 @@
 import postgres, { type Sql } from "postgres";
 import {
+  IngestionLeaseLostError,
+  SubmissionRateLimitError,
+  defaultPublicSubmissionRateLimits,
+} from "@gameintel/contracts";
+import type {
+  ArticleEvidenceForReview,
+  CoverMediaCandidate,
+  IngestionJob,
+  IngestionQueueStatus,
+  IngestionWorkerHeartbeat,
+  PublicSubmissionForModeration,
+  PublicSubmissionModerationAction,
+  PublicSubmissionPurgeResult,
+  PublicSubmissionRateLimits,
+  SourceContentPurgeResult,
+  SourceIngestEnqueueResult,
+  SourceIngestJobPayload,
+} from "@gameintel/contracts";
+import {
   ArticleBodySchema,
   ArticleSchema,
   type Article,
@@ -48,10 +67,40 @@ export {
   recommendArticleCover,
   rejectCoverMedia,
   setCoverMedia,
-  type CoverMediaCandidate,
 } from "./media.ts";
 
+// Shared capability types and errors live in @gameintel/contracts. These
+// re-exports keep the legacy function-based surface source-compatible while
+// the adapter classes take over.
+export {
+  ADAPTER_API_VERSION,
+  IngestionLeaseLostError,
+  SubmissionRateLimitError,
+  defaultPublicSubmissionRateLimits,
+} from "@gameintel/contracts";
+export type {
+  ArticleEvidenceForReview,
+  CoverMediaCandidate,
+  IngestionJob,
+  IngestionQueueStatus,
+  IngestionWorkerHeartbeat,
+  PublicSubmissionForModeration,
+  PublicSubmissionModerationAction,
+  PublicSubmissionPurgeResult,
+  PublicSubmissionRateLimits,
+  SourceContentPurgeResult,
+  SourceIngestEnqueueResult,
+  SourceIngestJobPayload,
+} from "@gameintel/contracts";
+
 export type Db = Sql<{}>;
+
+export {
+  PostgresJobQueue,
+  PostgresPacingStore,
+  PostgresPersistence,
+  createPostgresRuntime,
+} from "./adapter.ts";
 
 type TransactionRunner = {
   begin?: (callback: (transaction: unknown) => Promise<unknown>) => Promise<unknown>;
@@ -358,44 +407,6 @@ export async function linkSourceItemProvenance(db: Db, input: {
   });
 }
 
-export type SourceIngestJobPayload = {
-  collectionId: string;
-  sourceId: string;
-  url: string;
-  profileId?: string;
-};
-
-export type IngestionJob = {
-  jobKey: string;
-  jobType: string;
-  status: string;
-  payload: SourceIngestJobPayload;
-  attempts: number;
-  maxAttempts: number;
-  leaseToken: string | null;
-  leaseExpiresAt: string | null;
-  lastError: string | null;
-  result: unknown;
-};
-
-export type IngestionWorkerHeartbeat = {
-  workerId: string;
-  workerType: "source_ingest";
-  currentJobKey: string | null;
-  lastError: string | null;
-  lastSeenAt: string;
-};
-
-export type IngestionQueueStatus = {
-  queued: number;
-  running: number;
-  completed: number;
-  dead: number;
-  oldestQueuedAt: string | null;
-  activeWorkers: number;
-  staleWorkers: number;
-};
-
 function parseJob(row: Record<string, unknown>): IngestionJob {
   const json = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(value) as T : value as T;
   return {
@@ -503,13 +514,6 @@ export async function listRecentIngestionJobs(db: Db, limit = 25): Promise<Inges
   return rows.map((row) => parseJob(row as Record<string, unknown>));
 }
 
-export type SourceIngestEnqueueResult = {
-  jobKey: string;
-  dedupeKey: string;
-  duplicate: boolean;
-  status: string;
-};
-
 export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult> {
   const collectionId = input.collectionId.trim();
   const sourceId = input.sourceId.trim();
@@ -576,13 +580,6 @@ export async function claimIngestionJob(
     `;
     return parseJob(leased[0] as Record<string, unknown>);
   });
-}
-
-export class IngestionLeaseLostError extends Error {
-  constructor(jobKey: string) {
-    super(`Ingestion job ${jobKey} lease is no longer held`);
-    this.name = "IngestionLeaseLostError";
-  }
 }
 
 // Fences an ingestion transaction against lease loss. The job row is locked
@@ -1099,16 +1096,6 @@ export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceIte
   }
 }
 
-export type ArticleEvidenceForReview = {
-  id: string;
-  claimId: string;
-  sourceItemId: string;
-  sourceItemRevisionId: string | null;
-  excerpt: string;
-  evidenceType: string;
-  current: boolean;
-};
-
 export async function listArticleEvidence(db: Db, articleId: string): Promise<ArticleEvidenceForReview[]> {
   const rows = await db`
     SELECT DISTINCT e.id, e.claim_id, e.source_item_id, e.source_item_revision_id, e.excerpt, e.evidence_type,
@@ -1183,14 +1170,6 @@ export async function markPublished(db: Db, articleId: string, operator: string)
   return (await getArticle(db, articleId, true))!;
 }
 
-export type SourceContentPurgeResult = {
-  eligibleSourceItems: number;
-  purgedSourceItems: number;
-  purgedRevisions: number;
-  purgedEvidence: number;
-  dryRun: boolean;
-};
-
 export async function purgeExpiredSourceContent(db: Db, options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {
   return inTransaction(db, async (transaction) => {
     const candidates = await transaction`
@@ -1226,30 +1205,6 @@ export async function purgeExpiredSourceContent(db: Db, options: { execute?: boo
   });
 }
 
-export type PublicSubmissionRateLimits = {
-  perIpPerMinute: number;
-  perSessionPerMinute: number;
-  perAccountPerDay: number;
-  globalPerMinute: number;
-};
-
-export const defaultPublicSubmissionRateLimits: PublicSubmissionRateLimits = {
-  perIpPerMinute: 5,
-  perSessionPerMinute: 3,
-  perAccountPerDay: 20,
-  globalPerMinute: 300,
-};
-
-export class SubmissionRateLimitError extends Error {
-  constructor() {
-    super("Submission rate limit exceeded");
-  }
-}
-
-function validIdentityHash(value: string): boolean {
-  return /^[a-f0-9]{64}$/i.test(value);
-}
-
 async function submissionCount(db: Db, condition: "ip" | "session" | "account" | "global", identity?: string): Promise<number> {
   if (condition === "ip") {
     const rows = await db`SELECT count(*)::int AS count FROM public_submissions WHERE submitter_ip_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
@@ -1265,6 +1220,10 @@ async function submissionCount(db: Db, condition: "ip" | "session" | "account" |
   }
   const rows = await db`SELECT count(*)::int AS count FROM public_submissions WHERE created_at >= now() - interval '1 minute'`;
   return Number(rows[0]?.count ?? 0);
+}
+
+function validIdentityHash(value: string): boolean {
+  return /^[a-f0-9]{64}$/i.test(value);
 }
 
 export async function createQuarantinedSubmission(db: Db, input: {
@@ -1336,28 +1295,6 @@ export async function createQuarantinedSubmission(db: Db, input: {
     return { id: submissionId, duplicate: false };
   });
 }
-
-export type PublicSubmissionForModeration = {
-  id: string;
-  collectionId: string;
-  state: PublicSubmissionState;
-  title: string | null;
-  report: string;
-  urls: PublicSubmission["urls"];
-  mediaRefs: PublicSubmission["mediaRefs"];
-  promotedSourceItemId: string | null;
-  retentionUntil: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type PublicSubmissionModerationAction = {
-  id: string;
-  actorId: string;
-  action: string;
-  notes: string;
-  createdAt: string;
-};
 
 function parseStoredJson<T>(value: unknown): T {
   return typeof value === "string" ? JSON.parse(value) as T : value as T;
@@ -1538,12 +1475,6 @@ export async function recordSubmissionModerationAction(
     await audit(transaction, actorId, `submission.${action.slice(0, 100)}`, "public_submission", submissionId, notes.slice(0, 2_000));
   });
 }
-
-export type PublicSubmissionPurgeResult = {
-  eligibleSubmissions: number;
-  purgedSubmissions: number;
-  dryRun: boolean;
-};
 
 export async function purgeExpiredPublicSubmissions(db: Db, options: { execute?: boolean } = {}): Promise<PublicSubmissionPurgeResult> {
   return inTransaction(db, async (transaction) => {

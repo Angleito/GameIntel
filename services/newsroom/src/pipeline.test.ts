@@ -1,45 +1,9 @@
 import { fileURLToPath } from "node:url";
 import { rm } from "node:fs/promises";
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import { GameProfileSchema } from "@gameintel/core";
-import {
-  approveArticle,
-  approveCoverMedia,
-  approveMediaAsset,
-  approveMediaCollection,
-claimIngestionJob,
-  closeDb,
-  completeIngestionJob,
-  createDb,
-  createQuarantinedSubmission,
-  enqueueSourceIngestJob,
-  ensureGame,
-  failIngestionJob,
-  getArticle,
-  getIngestionJob,
-  getIngestionQueueStatus,
-  getPublicSubmissionForModeration,
-  heartbeatIngestionWorker,
-  importMediaCatalog,
-  IngestionLeaseLostError,
-  linkSourceItemProvenance,
-  listArticleEvidence,
-  listCoverCandidates,
-  listIngestionWorkerHeartbeats,
-  listRecentIngestionJobs,
-  listPublicSubmissionModerationActions,
-  listPublicSubmissionsForModeration,
-  markPublished,
-  publicArticles,
-  purgeExpiredPublicSubmissions,
-  renewIngestionJobLease,
-  reviewArticle,
-   reviewEvidence,
-   reviewPublicSubmission,
-   reviewSource,
-  setCoverMedia,
-} from "@gameintel/db";
-import type { Db } from "@gameintel/db";
+import { IngestionLeaseLostError, type GameIntelPersistence } from "@gameintel/contracts";
+import { createInMemoryRuntime, InMemoryJobQueue, InMemoryPersistence, type InMemoryRuntime, type MemoryStore } from "@gameintel/in-memory";
 import { loadFixture } from "./fixture.ts";
 import { loadRegistry, promotePublicSubmission } from "./ingest.ts";
 import { processFixture, processNormalizedItem } from "./pipeline.ts";
@@ -51,6 +15,12 @@ const profile = GameProfileSchema.parse(await Bun.file(profilePath).json());
 
 const rollback = new Error("rollback test transaction");
 
+let runtime: InMemoryRuntime;
+
+beforeEach(() => {
+  runtime = createInMemoryRuntime();
+});
+
 async function testFixture() {
   const fixture = await loadFixture(fixturePath);
   fixture.source.enabled = true;
@@ -60,16 +30,49 @@ async function testFixture() {
   return fixture;
 }
 
-async function inRolledBackTransaction(callback: (transaction: Db) => Promise<void>): Promise<void> {
-  const db = createDb();
-  try {
-    await expect(db.begin(async (transaction) => {
-      await callback(transaction as unknown as Db);
-      throw rollback;
-    })).rejects.toThrow(rollback.message);
-  } finally {
-    await closeDb(db);
-  }
+async function inRolledBackTransaction(callback: (transaction: GameIntelPersistence) => Promise<void>): Promise<void> {
+  await expect(runtime.persistence.transaction(async (transaction) => {
+    await callback(transaction);
+    throw rollback;
+  })).rejects.toThrow(rollback.message);
+}
+
+function storeOf(persistence: GameIntelPersistence): MemoryStore {
+  return (persistence as InMemoryPersistence).store;
+}
+
+function sourceItemRecord(persistence: GameIntelPersistence, id: string) {
+  const record = storeOf(persistence).sourceItems.get(id);
+  if (!record) throw new Error(`Missing source item ${id}`);
+  return record;
+}
+
+function claimsWithEvidence(persistence: GameIntelPersistence, sourceItemId: string): Array<Record<string, unknown>> {
+  const store = storeOf(persistence);
+  return [...store.claims.values()]
+    .filter((claim) => claim.sourceItemId === sourceItemId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .map((claim) => {
+      const evidence = [...store.evidence.values()].find((record) => record.claimId === claim.id);
+      return {
+        subject: claim.subject,
+        predicate: claim.predicate,
+        value: claim.value,
+        evidence_level: claim.evidenceLevel,
+        attribution_type: claim.attributionType,
+        statement: claim.statement,
+        excerpt: evidence?.excerpt,
+        evidence_type: evidence?.evidenceType,
+        lineage_id: evidence?.lineageId,
+      };
+    });
+}
+
+function claimStates(persistence: GameIntelPersistence, sourceItemId: string): string[] {
+  const store = storeOf(persistence);
+  return [...store.claims.values()]
+    .filter((claim) => claim.sourceItemId === sourceItemId)
+    .map((claim) => claim.state);
 }
 
 describe("Tudum newsroom pipeline", () => {
@@ -79,6 +82,8 @@ describe("Tudum newsroom pipeline", () => {
     expect(source).toMatchObject({
       domains: ["netflix.com"],
       access: "permitted_scrape",
+      poll_interval_seconds: 300,
+      poll_url: "https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look",
       source_strength: "TRUSTED_SECONDARY",
       publication_mode: "normal",
       public_citation_base: "https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look",
@@ -98,24 +103,25 @@ describe("Tudum newsroom pipeline", () => {
   });
 
   test("stores claims with lineage and deduplicates the fixture", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
 
-      const first = await processFixture(db, fixture, { allowFixture: true });
+      const first = await processFixture(persistence, fixture, { allowFixture: true });
       expect(first.articleId).not.toBeNull();
       expect(first.duplicate).toBe(false);
 
-      const sourceItems = await db`SELECT source_id, external_id, lineage_id, input_kind, content_type, language FROM source_items WHERE id = ${first.sourceItemId}`;
-      expect(sourceItems).toHaveLength(1);
-      expect(sourceItems[0].source_id).toBe("netflix-tudum");
-      expect(sourceItems[0].external_id).toContain("grand-theft-auto-6-extended-first-look");
-      expect(sourceItems[0].lineage_id).toBe("fixture-lineage-gta-vi-netflix-tudum");
-      expect(sourceItems[0].input_kind).toBe("manual_fixture");
-      expect(sourceItems[0].content_type).toBe("text/html");
-      expect(sourceItems[0].language).toBe("en");
+      const item = sourceItemRecord(persistence, first.sourceItemId);
+      expect(item).toMatchObject({
+        sourceId: "netflix-tudum",
+        inputKind: "manual_fixture",
+        contentType: "text/html",
+        language: "en",
+      });
+      expect(item.externalId).toContain("grand-theft-auto-6-extended-first-look");
+      expect(item.lineageId).toBe("fixture-lineage-gta-vi-netflix-tudum");
 
-      const claims = await db`SELECT c.subject, c.predicate, c.value, c.evidence_level, c.attribution_type, c.statement, e.excerpt, e.lineage_id FROM claims c JOIN evidence e ON e.claim_id = c.id WHERE c.source_item_id = ${first.sourceItemId} ORDER BY c.created_at`;
+      const claims = claimsWithEvidence(persistence, first.sourceItemId);
       expect(claims).toHaveLength(6);
       expect(claims.map((claim) => claim.lineage_id)).toEqual(Array(6).fill("fixture-lineage-gta-vi-netflix-tudum"));
       expect(claims.map((claim) => claim.value)).toContain("November 19");
@@ -123,40 +129,40 @@ describe("Tudum newsroom pipeline", () => {
       expect(claims.map((claim) => claim.evidence_level)).toEqual(Array(6).fill("confirmed"));
       expect(claims.map((claim) => claim.attribution_type)).toEqual(Array(6).fill("trusted_secondary"));
 
-      const second = await processFixture(db, fixture, { allowFixture: true });
+      const second = await processFixture(persistence, fixture, { allowFixture: true });
       expect(second.duplicate).toBe(true);
       expect(second.articleId).toBeNull();
     });
   });
 
   test("requires human review before exposing the article publicly", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
-      const result = await processFixture(db, fixture, { allowFixture: true });
+      const result = await processFixture(persistence, fixture, { allowFixture: true });
       const articleId = result.articleId!;
-      const existingPublicCount = (await publicArticles(db, "gta-vi")).length;
+      const existingPublicCount = (await persistence.publicArticles("gta-vi")).length;
 
-       await expect(approveArticle(db, articleId, "test-approver")).rejects.toThrow("current editorial review");
-      expect(await publicArticles(db, "gta-vi")).toHaveLength(existingPublicCount);
+      await expect(persistence.approveArticle(articleId, "test-approver")).rejects.toThrow("current editorial review");
+      expect(await persistence.publicArticles("gta-vi")).toHaveLength(existingPublicCount);
 
-       await reviewSource(db, fixture.source.id, "test-source-reviewer", "Tudum source policy reviewed");
-       await expect(reviewArticle(db, articleId, "test-editor", "Draft checked against the source"))
-         .rejects.toThrow("current evidence approval");
-       const evidence = await listArticleEvidence(db, articleId);
-       expect(evidence).toHaveLength(6);
-       for (const item of evidence) await reviewEvidence(db, item.id, "test-evidence-reviewer", "approved", "Evidence supports the claim");
-       await reviewArticle(db, articleId, "test-editor", "Draft checked against the source");
-      await approveArticle(db, articleId, "test-approver");
-      if ((await getArticle(db, articleId))?.coverMedia) await approveCoverMedia(db, articleId, "test-media-reviewer");
-      const published = await markPublished(db, articleId, "test-publisher");
+      await persistence.reviewSource(fixture.source.id, "test-source-reviewer", "Tudum source policy reviewed");
+      await expect(persistence.reviewArticle(articleId, "test-editor", "Draft checked against the source"))
+        .rejects.toThrow("current evidence approval");
+      const evidence = await persistence.listArticleEvidence(articleId);
+      expect(evidence).toHaveLength(6);
+      for (const item of evidence) await persistence.reviewEvidence(item.id, "test-evidence-reviewer", "approved", "Evidence supports the claim");
+      await persistence.reviewArticle(articleId, "test-editor", "Draft checked against the source");
+      await persistence.approveArticle(articleId, "test-approver");
+      if ((await persistence.getArticle(articleId))?.coverMedia) await persistence.approveCoverMedia(articleId, "test-media-reviewer");
+      const published = await persistence.markPublished(articleId, "test-publisher");
 
       expect(published.status).toBe("published");
       expect(published.sourceReviewCompleted).toBe(true);
       expect(published.editorReviewCompleted).toBe(true);
       expect(published.approvedBy).toBe("test-approver");
 
-      const publicSnapshot = await publicArticles(db, "gta-vi");
+      const publicSnapshot = await persistence.publicArticles("gta-vi");
       expect(publicSnapshot).toHaveLength(existingPublicCount + 1);
       const article = publicSnapshot[0] as { title: string; citations: Array<{ url: string }>; body: { sections: Array<{ paragraphs: Array<{ text: string; evidenceLevel: string; citations: number[] }> }> } };
       expect(article.title).toBe(fixture.item.title);
@@ -170,225 +176,203 @@ describe("Tudum newsroom pipeline", () => {
   });
 
   test("requires fresh evidence review after a source item materially changes", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
-      const first = await processFixture(db, fixture, { allowFixture: true });
+      const first = await processFixture(persistence, fixture, { allowFixture: true });
       const articleId = first.articleId!;
-      for (const evidence of await listArticleEvidence(db, articleId)) {
-        await reviewEvidence(db, evidence.id, "first-evidence-reviewer", "approved", "Initial evidence review");
+      for (const evidence of await persistence.listArticleEvidence(articleId)) {
+        await persistence.reviewEvidence(evidence.id, "first-evidence-reviewer", "approved", "Initial evidence review");
       }
-      await reviewArticle(db, articleId, "first-editor", "Initial editorial review");
-      await approveArticle(db, articleId, "first-approver");
+      await persistence.reviewArticle(articleId, "first-editor", "Initial editorial review");
+      await persistence.approveArticle(articleId, "first-approver");
 
       fixture.item.text = `${fixture.item.text} This source item was materially revised.`;
-      const revised = await processFixture(db, fixture, { allowFixture: true });
+      const revised = await processFixture(persistence, fixture, { allowFixture: true });
       expect(revised.duplicate).toBe(false);
 
-      const invalidated = await getArticle(db, articleId);
+      const invalidated = await persistence.getArticle(articleId);
       expect(invalidated).toMatchObject({
         status: "draft",
         sourceReviewCompleted: false,
         editorReviewCompleted: false,
         approvedBy: null,
       });
-      const evidence = await listArticleEvidence(db, articleId);
+      const evidence = await persistence.listArticleEvidence(articleId);
       expect(evidence.some((item) => !item.current)).toBe(true);
       expect(evidence.some((item) => item.current)).toBe(true);
-      const claimStates = await db`
-        SELECT c.state
-        FROM claims c
-        WHERE c.source_item_id = ${first.sourceItemId}
-      `;
-      expect(claimStates.length).toBeGreaterThan(0);
-      expect(claimStates.every((claim) => ["supported", "confirmed", "contested"].includes(claim.state))).toBe(true);
-      await expect(reviewEvidence(db, evidence.find((item) => !item.current)!.id, "second-evidence-reviewer"))
+      const states = claimStates(persistence, first.sourceItemId);
+      expect(states.length).toBeGreaterThan(0);
+      expect(states.every((state) => ["supported", "confirmed", "contested"].includes(state))).toBe(true);
+      await expect(persistence.reviewEvidence(evidence.find((item) => !item.current)!.id, "second-evidence-reviewer"))
         .rejects.toThrow("current source revision");
-      await expect(reviewArticle(db, articleId, "second-editor", "Cannot review stale evidence"))
+      await expect(persistence.reviewArticle(articleId, "second-editor", "Cannot review stale evidence"))
         .rejects.toThrow("current evidence approval");
     });
   });
 
   test("derives claim state from current source revisions only", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
-      const first = await processFixture(db, fixture, { allowFixture: true });
-      const states = async (sourceItemId: string) => {
-        const rows = await db`SELECT DISTINCT state FROM claims WHERE source_item_id = ${sourceItemId}`;
-        return rows.map((row) => row.state as string);
-      };
+      const first = await processFixture(persistence, fixture, { allowFixture: true });
+      const states = async (sourceItemId: string) => [...new Set(claimStates(persistence, sourceItemId))];
       expect(await states(first.sourceItemId)).toEqual(["supported"]);
 
       fixture.source.sourceStrength = "PRIMARY";
       fixture.item.sourceStrength = "PRIMARY";
       fixture.item.text = `${fixture.item.text} Official confirmation added.`;
-      const primary = await processFixture(db, fixture, { allowFixture: true });
+      const primary = await processFixture(persistence, fixture, { allowFixture: true });
       expect(primary.duplicate).toBe(false);
       expect(await states(primary.sourceItemId)).toEqual(["confirmed"]);
 
       fixture.source.sourceStrength = "COMMUNITY";
       fixture.item.sourceStrength = "COMMUNITY";
       fixture.item.text = `${fixture.item.text} Community follow-up report.`;
-      const community = await processFixture(db, fixture, { allowFixture: true });
+      const community = await processFixture(persistence, fixture, { allowFixture: true });
       expect(community.duplicate).toBe(false);
       expect(await states(community.sourceItemId)).toEqual(["supported"]);
     });
   });
 
   test("marks claims superseded when a material change drops them", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
-      const first = await processFixture(db, fixture, { allowFixture: true });
-      expect((await db`SELECT count(*)::int AS count FROM claims WHERE source_item_id = ${first.sourceItemId}`)[0].count).toBeGreaterThan(0);
+      const first = await processFixture(persistence, fixture, { allowFixture: true });
+      expect(storeOf(persistence).claims.size).toBeGreaterThan(0);
 
       fixture.item.claims = [];
       fixture.item.text = `${fixture.item.text} The claims were removed from this revision.`;
-      const revised = await processFixture(db, fixture, { allowFixture: true });
+      const revised = await processFixture(persistence, fixture, { allowFixture: true });
       expect(revised.duplicate).toBe(false);
 
-      const rows = await db`SELECT DISTINCT state FROM claims WHERE source_item_id = ${first.sourceItemId}`;
-      expect(rows.map((row) => row.state)).toEqual(["superseded"]);
+      expect([...new Set(claimStates(persistence, first.sourceItemId))]).toEqual(["superseded"]);
     });
   });
 
   test("requires independent reviewers when source policy requires two approvals", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
       fixture.source.policy.evidenceReview.minimumApprovals = 2;
-      const result = await processFixture(db, fixture, { allowFixture: true });
-      const evidence = await listArticleEvidence(db, result.articleId!);
+      const result = await processFixture(persistence, fixture, { allowFixture: true });
+      const evidence = await persistence.listArticleEvidence(result.articleId!);
       for (const item of evidence) {
-        await reviewEvidence(db, item.id, "first-reviewer", "approved", "First independent review");
-        await reviewEvidence(db, item.id, "first-reviewer", "approved", "Duplicate approval does not count twice");
+        await persistence.reviewEvidence(item.id, "first-reviewer", "approved", "First independent review");
+        await persistence.reviewEvidence(item.id, "first-reviewer", "approved", "Duplicate approval does not count twice");
       }
-      await expect(reviewArticle(db, result.articleId!, "editor", "One reviewer is insufficient"))
+      await expect(persistence.reviewArticle(result.articleId!, "editor", "One reviewer is insufficient"))
         .rejects.toThrow("current evidence approval");
-      for (const item of evidence) await reviewEvidence(db, item.id, "second-reviewer", "approved", "Second independent review");
-      await reviewArticle(db, result.articleId!, "editor", "Two independent reviews complete");
+      for (const item of evidence) await persistence.reviewEvidence(item.id, "second-reviewer", "approved", "Second independent review");
+      await persistence.reviewArticle(result.articleId!, "editor", "Two independent reviews complete");
     });
   });
 
   test("keeps public submissions quarantined, deduplicated, and purgeable", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const input = {
         submission: {
           collectionId: "gta-vi",
           title: "Rare vehicle report",
           report: "A rare vehicle appeared behind Ocean Hotel around midnight.",
           urls: ["https://example.com/community-report"],
-          mediaRefs: [],
+          mediaRefs: [] as Array<{ uploadId: string }>,
         },
         submitterSessionHash: "a".repeat(64),
         submitterIpHash: "b".repeat(64),
         retentionDays: 1,
       };
-      const existingPublic = await publicArticles(db, "gta-vi");
-      const first = await createQuarantinedSubmission(db, input);
-      const duplicate = await createQuarantinedSubmission(db, input);
+      const existingPublic = await persistence.publicArticles("gta-vi");
+      const first = await persistence.createQuarantinedSubmission(input);
+      const duplicate = await persistence.createQuarantinedSubmission(input);
 
       expect(first.duplicate).toBe(false);
       expect(duplicate).toEqual({ id: first.id, duplicate: true });
-      expect(await publicArticles(db, "gta-vi")).toEqual(existingPublic);
-      const stored = await db`SELECT state, report, content_hash, content_purged_at FROM public_submissions WHERE id = ${first.id}`;
-      expect(stored[0]).toMatchObject({ state: "quarantined", report: input.submission.report, content_purged_at: null });
-      expect(stored[0].content_hash).toHaveLength(64);
+      expect(await persistence.publicArticles("gta-vi")).toEqual(existingPublic);
+      const stored = storeOf(persistence).publicSubmissions.get(first.id);
+      expect(stored).toMatchObject({ state: "quarantined", report: input.submission.report, contentPurgedAt: null });
+      expect(stored!.contentHash).toHaveLength(64);
 
-      await db`UPDATE public_submissions SET retention_until = now() - interval '1 second' WHERE id = ${first.id}`;
-      expect(await purgeExpiredPublicSubmissions(db)).toEqual({ eligibleSubmissions: 1, purgedSubmissions: 0, dryRun: true });
-      expect(await purgeExpiredPublicSubmissions(db, { execute: true })).toEqual({ eligibleSubmissions: 1, purgedSubmissions: 1, dryRun: false });
-      const purged = await db`SELECT state, title, report, urls, media_refs, content_purged_at FROM public_submissions WHERE id = ${first.id}`;
-      expect(purged[0].state).toBe("expired");
-      expect(purged[0].title).toBeNull();
-      expect(purged[0].report).toBe("");
-      expect(purged[0].content_purged_at).not.toBeNull();
+      (persistence as InMemoryPersistence).expireSubmissionRetentionForTest(first.id);
+      expect(await persistence.purgeExpiredPublicSubmissions()).toEqual({ eligibleSubmissions: 1, purgedSubmissions: 0, dryRun: true });
+      expect(await persistence.purgeExpiredPublicSubmissions({ execute: true })).toEqual({ eligibleSubmissions: 1, purgedSubmissions: 1, dryRun: false });
+      const purged = storeOf(persistence).publicSubmissions.get(first.id);
+      expect(purged!.state).toBe("expired");
+      expect(purged!.title).toBeNull();
+      expect(purged!.report).toBe("");
+      expect(purged!.contentPurgedAt).not.toBeNull();
     });
   });
 
   test("promotes only reviewed submissions as non-publishable community evidence", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
-      const existingPublic = await publicArticles(db, "gta-vi");
-      const submitted = await createQuarantinedSubmission(db, {
-        submission: {
-          collectionId: "gta-vi",
-          title: "Night-time vehicle report",
-          report: "A vehicle appeared behind Ocean Hotel around midnight. The report is not independently verified.",
-          urls: ["https://example.com/community-report"],
-          mediaRefs: [],
-        },
-        submitterSessionHash: "c".repeat(64),
-        submitterIpHash: "d".repeat(64),
-      });
-
-      await expect(promotePublicSubmission(db, {
-        submissionId: submitted.id,
-        actorId: "moderator-one",
-        profileId: "gta-vi",
-      })).rejects.toThrow("must be under review");
-      const listed = await listPublicSubmissionsForModeration(db, "gta-vi");
-      const listedSubmission = listed.find((submission) => submission.id === submitted.id);
-      expect(listedSubmission).toBeDefined();
-      expect(JSON.stringify(listedSubmission)).not.toContain("c".repeat(64));
-      expect(await getPublicSubmissionForModeration(db, submitted.id)).toMatchObject({ state: "quarantined" });
-
-      await reviewPublicSubmission(db, {
-        submissionId: submitted.id,
-        actorId: "moderator-one",
-        decision: "under_review",
-        notes: "Report is ready for attribution-only evidence intake.",
-      });
-      const promoted = await promotePublicSubmission(db, {
-        submissionId: submitted.id,
-        actorId: "moderator-two",
-        notes: "Promoted as unverified community evidence only.",
-        profileId: "gta-vi",
-      });
-      const stored = await db`
-        SELECT state, promoted_source_item_id
-        FROM public_submissions
-        WHERE id = ${submitted.id}
-      `;
-      expect(stored[0]).toMatchObject({ state: "promoted", promoted_source_item_id: promoted.sourceItemId });
-      const sourceItem = await db`
-        SELECT source_strength, publication_mode, url
-        FROM source_items
-        WHERE id = ${promoted.sourceItemId}
-      `;
-      expect(sourceItem[0]).toMatchObject({ source_strength: "COMMUNITY", publication_mode: "discussion_only" });
-      expect(sourceItem[0].url).toStartWith("urn:gameintelgg:manual:");
-      const evidence = await db`
-        SELECT c.attribution_type, e.evidence_type, e.id AS evidence_id, source_item.submitted_by
-        FROM claims c
-        JOIN evidence e ON e.claim_id = c.id
-        JOIN source_items source_item ON source_item.id = e.source_item_id
-        WHERE c.source_item_id = ${promoted.sourceItemId}
-      `;
-      expect(evidence).toHaveLength(1);
-      expect(evidence[0]).toMatchObject({
-        attribution_type: "community",
-        evidence_type: "community_report",
-        submitted_by: "moderator-two",
-      });
-      await expect(reviewEvidence(db, evidence[0].evidence_id as string, "moderator-two", "approved"))
-        .rejects.toThrow("Submitters cannot approve their own evidence");
-      expect(await publicArticles(db, "gta-vi")).toEqual(existingPublic);
-      expect((await listPublicSubmissionModerationActions(db, submitted.id)).map((action) => action.action))
-        .toEqual(["submitted", "state:under_review", "promoted"]);
-      await expect(reviewPublicSubmission(db, {
-        submissionId: submitted.id,
-        actorId: "moderator-one",
-        decision: "rejected",
-      })).rejects.toThrow("no longer available");
+    const persistence = runtime.persistence;
+    await persistence.ensureGame(profile);
+    const existingPublic = await persistence.publicArticles("gta-vi");
+    const submitted = await persistence.createQuarantinedSubmission({
+      submission: {
+        collectionId: "gta-vi",
+        title: "Night-time vehicle report",
+        report: "A vehicle appeared behind Ocean Hotel around midnight. The report is not independently verified.",
+        urls: ["https://example.com/community-report"],
+        mediaRefs: [],
+      },
+      submitterSessionHash: "c".repeat(64),
+      submitterIpHash: "d".repeat(64),
     });
+
+    await expect(promotePublicSubmission(runtime, {
+      submissionId: submitted.id,
+      actorId: "moderator-one",
+      profileId: "gta-vi",
+    })).rejects.toThrow("must be under review");
+    const listed = await persistence.listPublicSubmissionsForModeration("gta-vi");
+    const listedSubmission = listed.find((submission) => submission.id === submitted.id);
+    expect(listedSubmission).toBeDefined();
+    expect(JSON.stringify(listedSubmission)).not.toContain("c".repeat(64));
+    expect(await persistence.getPublicSubmissionForModeration(submitted.id)).toMatchObject({ state: "quarantined" });
+
+    await persistence.reviewPublicSubmission({
+      submissionId: submitted.id,
+      actorId: "moderator-one",
+      decision: "under_review",
+      notes: "Report is ready for attribution-only evidence intake.",
+    });
+    const promoted = await promotePublicSubmission(runtime, {
+      submissionId: submitted.id,
+      actorId: "moderator-two",
+      notes: "Promoted as unverified community evidence only.",
+      profileId: "gta-vi",
+    });
+    const stored = storeOf(persistence).publicSubmissions.get(submitted.id);
+    expect(stored).toMatchObject({ state: "promoted", promotedSourceItemId: promoted.sourceItemId });
+    const sourceItem = sourceItemRecord(persistence, promoted.sourceItemId);
+    expect(sourceItem).toMatchObject({ sourceStrength: "COMMUNITY", publicationMode: "discussion_only" });
+    expect(sourceItem.url).toStartWith("urn:gameintelgg:manual:");
+    const evidence = claimsWithEvidence(persistence, promoted.sourceItemId);
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]).toMatchObject({
+      attribution_type: "community",
+      evidence_type: "community_report",
+    });
+    expect(sourceItem.submittedBy).toBe("moderator-two");
+    const evidenceRecord = [...storeOf(persistence).evidence.values()].find((record) => record.claimId === [...storeOf(persistence).claims.values()].find((claim) => claim.sourceItemId === promoted.sourceItemId)?.id);
+    await expect(persistence.reviewEvidence(evidenceRecord!.id, "moderator-two", "approved"))
+      .rejects.toThrow("Submitters cannot approve their own evidence");
+    expect(await persistence.publicArticles("gta-vi")).toEqual(existingPublic);
+    expect((await persistence.listPublicSubmissionModerationActions(submitted.id)).map((action) => action.action))
+      .toEqual(["submitted", "state:under_review", "promoted"]);
+    await expect(persistence.reviewPublicSubmission({
+      submissionId: submitted.id,
+      actorId: "moderator-one",
+      decision: "rejected",
+    })).rejects.toThrow("no longer available");
   });
 
   test("groups copied reports into one provenance family without merging independent evidence", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const original = await testFixture();
       const copied = await testFixture();
       copied.source.id = `copy-source-${crypto.randomUUID()}`;
@@ -401,29 +385,26 @@ describe("Tudum newsroom pipeline", () => {
       independent.source.publicCitationUrl = `https://${independent.source.id}.example.com/report`;
       independent.item.lineageId = `independent-lineage-${crypto.randomUUID()}`;
 
-      const originalResult = await processFixture(db, original, { allowFixture: true });
-      const copiedResult = await processFixture(db, copied, { allowFixture: true });
-      const independentResult = await processFixture(db, independent, { allowFixture: true });
-      await linkSourceItemProvenance(db, {
+      const originalResult = await processFixture(persistence, original, { allowFixture: true });
+      const copiedResult = await processFixture(persistence, copied, { allowFixture: true });
+      const independentResult = await processFixture(persistence, independent, { allowFixture: true });
+      await persistence.linkSourceItemProvenance({
         sourceItemId: copiedResult.sourceItemId,
         relatedSourceItemId: originalResult.sourceItemId,
         relationship: "copied_from",
         reviewerId: "provenance-reviewer",
         notes: "The report cites the original article.",
       });
-      await linkSourceItemProvenance(db, {
+      await persistence.linkSourceItemProvenance({
         sourceItemId: independentResult.sourceItemId,
         relatedSourceItemId: originalResult.sourceItemId,
         relationship: "independent_reproduction",
         reviewerId: "provenance-reviewer",
         notes: "Separate player reproduction.",
       });
-      const evidence = await db`
-        SELECT source_item_id, provenance_family_id
-        FROM evidence
-        WHERE source_item_id = ANY(${db.array([originalResult.sourceItemId, copiedResult.sourceItemId, independentResult.sourceItemId])})
-      `;
-      const familyFor = (sourceItemId: string) => evidence.find((item) => item.source_item_id === sourceItemId)?.provenance_family_id;
+      const evidence = [...storeOf(persistence).evidence.values()]
+        .filter((record) => [originalResult.sourceItemId, copiedResult.sourceItemId, independentResult.sourceItemId].includes(record.sourceItemId));
+      const familyFor = (sourceItemId: string) => evidence.find((record) => record.sourceItemId === sourceItemId)?.provenanceFamilyId;
 
       expect(familyFor(copiedResult.sourceItemId)).toBe(familyFor(originalResult.sourceItemId));
       expect(familyFor(independentResult.sourceItemId)).not.toBe(familyFor(originalResult.sourceItemId));
@@ -456,37 +437,37 @@ describe("Tudum newsroom pipeline", () => {
           checksum: "c".repeat(64),
         },
       ] }));
-      await inRolledBackTransaction(async (db) => {
-        await ensureGame(db, profile);
-        expect(await importMediaCatalog(db, catalogPath)).toMatchObject({ imported: 3, collectionIds: ["gta-vi"] });
-        expect((await db`SELECT review_status FROM media_assets WHERE id = ${safeMediaId}`)[0].review_status).toBe("pending");
-        expect(await listCoverCandidates(db, "missing-article")).toEqual([]);
+      await inRolledBackTransaction(async (persistence) => {
+        await persistence.ensureGame(profile);
+        expect(await persistence.importMediaCatalog(catalogPath)).toMatchObject({ imported: 3, collectionIds: ["gta-vi"] });
+        expect(storeOf(persistence).mediaAssets.get(safeMediaId)?.reviewStatus).toBe("pending");
+        expect(await persistence.listCoverCandidates("missing-article")).toEqual([]);
 
-        await approveMediaAsset(db, safeMediaId, "test-media-reviewer");
+        await persistence.approveMediaAsset(safeMediaId, "test-media-reviewer");
         const fixture = await testFixture();
-        const result = await processFixture(db, fixture, { allowFixture: true });
-        const automaticCover = (await getArticle(db, result.articleId!))?.coverMedia;
+        const result = await processFixture(persistence, fixture, { allowFixture: true });
+        const automaticCover = (await persistence.getArticle(result.articleId!))?.coverMedia;
         expect(automaticCover).toMatchObject({ id: safeMediaId, selectionSource: "automatic", reviewStatus: "pending" });
-        expect(await listCoverCandidates(db, result.articleId!)).toHaveLength(1);
+        expect(await persistence.listCoverCandidates(result.articleId!)).toHaveLength(1);
 
-        await setCoverMedia(db, result.articleId!, pendingMediaId, "editor");
-        await expect(approveCoverMedia(db, result.articleId!, "test-media-reviewer")).rejects.toThrow("Cover media asset must be approved");
-        await setCoverMedia(db, result.articleId!, safeMediaId, "editor");
-        expect((await getArticle(db, result.articleId!))?.coverMedia).toMatchObject({ selectionSource: "editor", reviewStatus: "pending" });
-         await reviewSource(db, fixture.source.id, "test-source-reviewer", "Tudum source policy reviewed");
-         for (const evidence of await listArticleEvidence(db, result.articleId!)) {
-           await reviewEvidence(db, evidence.id, "test-evidence-reviewer", "approved", "Evidence supports the claim");
-         }
-         await reviewArticle(db, result.articleId!, "test-editor", "Draft checked against the source");
-        await approveArticle(db, result.articleId!, "test-approver");
-        await expect(markPublished(db, result.articleId!, "test-publisher")).rejects.toThrow("Selected cover media must be approved");
+        await persistence.setCoverMedia(result.articleId!, pendingMediaId, "editor");
+        await expect(persistence.approveCoverMedia(result.articleId!, "test-media-reviewer")).rejects.toThrow("Cover media asset must be approved");
+        await persistence.setCoverMedia(result.articleId!, safeMediaId, "editor");
+        expect((await persistence.getArticle(result.articleId!))?.coverMedia).toMatchObject({ selectionSource: "editor", reviewStatus: "pending" });
+        await persistence.reviewSource(fixture.source.id, "test-source-reviewer", "Tudum source policy reviewed");
+        for (const evidence of await persistence.listArticleEvidence(result.articleId!)) {
+          await persistence.reviewEvidence(evidence.id, "test-evidence-reviewer", "approved", "Evidence supports the claim");
+        }
+        await persistence.reviewArticle(result.articleId!, "test-editor", "Draft checked against the source");
+        await persistence.approveArticle(result.articleId!, "test-approver");
+        await expect(persistence.markPublished(result.articleId!, "test-publisher")).rejects.toThrow("Selected cover media must be approved");
 
-        await approveCoverMedia(db, result.articleId!, "test-media-reviewer");
-        await markPublished(db, result.articleId!, "test-publisher");
-        const publicArticle = (await publicArticles(db, "gta-vi")).find((article) => (article as { id: string }).id === result.articleId!) as { coverMedia: { id: string } | null };
+        await persistence.approveCoverMedia(result.articleId!, "test-media-reviewer");
+        await persistence.markPublished(result.articleId!, "test-publisher");
+        const publicArticle = (await persistence.publicArticles("gta-vi")).find((article) => (article as { id: string }).id === result.articleId!) as { coverMedia: { id: string } | null };
         expect(publicArticle.coverMedia).toMatchObject({ id: safeMediaId });
-        expect(await approveMediaCollection(db, "gta-vi", "test-media-reviewer")).toBe(1);
-        expect(await approveMediaCollection(db, "gta-vi", "test-media-reviewer")).toBe(0);
+        expect(await persistence.approveMediaCollection("gta-vi", "test-media-reviewer")).toBe(1);
+        expect(await persistence.approveMediaCollection("gta-vi", "test-media-reviewer")).toBe(0);
       });
     } finally {
       await rm(catalogPath, { force: true });
@@ -494,17 +475,13 @@ describe("Tudum newsroom pipeline", () => {
   });
 
   test("derives claim attribution and evidence type from source strength", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
       fixture.item.claims[0].attributionType = "community";
       fixture.item.claims[0].evidenceType = "community_report";
-      const result = await processFixture(db, fixture, { allowFixture: true });
-      const claims = await db`
-        SELECT c.attribution_type, e.evidence_type
-        FROM claims c JOIN evidence e ON e.claim_id = c.id
-        WHERE c.source_item_id = ${result.sourceItemId}
-      `;
+      const result = await processFixture(persistence, fixture, { allowFixture: true });
+      const claims = claimsWithEvidence(persistence, result.sourceItemId);
 
       expect(claims).toHaveLength(6);
       expect(claims.map((claim) => claim.attribution_type)).toEqual(Array(6).fill("trusted_secondary"));
@@ -513,8 +490,8 @@ describe("Tudum newsroom pipeline", () => {
   });
 
   test("never creates an article directly from a community source", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
       fixture.source.sourceStrength = "COMMUNITY";
       fixture.source.publicationMode = "normal";
@@ -522,12 +499,8 @@ describe("Tudum newsroom pipeline", () => {
       fixture.item.publicationMode = "normal";
       fixture.item.claims[0].attributionType = "trusted_secondary";
       fixture.item.claims[0].evidenceType = "trusted_reporting";
-      const result = await processFixture(db, fixture, { allowFixture: true });
-      const claims = await db`
-        SELECT c.attribution_type, e.evidence_type
-        FROM claims c JOIN evidence e ON e.claim_id = c.id
-        WHERE c.source_item_id = ${result.sourceItemId}
-      `;
+      const result = await processFixture(persistence, fixture, { allowFixture: true });
+      const claims = claimsWithEvidence(persistence, result.sourceItemId);
 
       expect(result.articleId).toBeNull();
       expect(claims.map((claim) => claim.attribution_type)).toEqual(Array(6).fill("community"));
@@ -536,270 +509,251 @@ describe("Tudum newsroom pipeline", () => {
   });
 
   test("leases source-ingestion jobs once and records terminal outcomes", async () => {
-    await inRolledBackTransaction(async (db) => {
-      const first = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/queued-report?utm_source=test",
-        profileId: "gta-vi",
-      });
-      const duplicate = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/queued-report",
-        profileId: "gta-vi",
-      });
-      expect(duplicate).toMatchObject({ jobKey: first.jobKey, duplicate: true, status: "queued" });
-
-      const leased = await claimIngestionJob(db, "worker-one");
-      expect(leased).toMatchObject({
-        jobKey: first.jobKey,
-        status: "running",
-        attempts: 1,
-        payload: { collectionId: "gta-vi", sourceId: "netflix-tudum", url: "https://www.netflix.com/tudum/articles/queued-report", profileId: "gta-vi" },
-      });
-      expect(await claimIngestionJob(db, "worker-two")).toBeNull();
-      await heartbeatIngestionWorker(db, {
-        workerId: "worker-one",
-        workerType: "source_ingest",
-        currentJobKey: first.jobKey,
-        lastError: null,
-      });
-      expect((await listIngestionWorkerHeartbeats(db)).find((worker) => worker.workerId === "worker-one"))
-        .toMatchObject({ currentJobKey: first.jobKey, lastError: null });
-      const queueStatus = await getIngestionQueueStatus(db);
-      expect(queueStatus.running).toBeGreaterThanOrEqual(1);
-      expect(queueStatus.activeWorkers).toBeGreaterThanOrEqual(1);
-      expect((await listRecentIngestionJobs(db)).some((job) => job.jobKey === first.jobKey)).toBe(true);
-      await completeIngestionJob(db, leased!.jobKey, leased!.leaseToken!, { disposition: "research_new_article" });
-      await heartbeatIngestionWorker(db, { workerId: "worker-one", workerType: "source_ingest", currentJobKey: null, lastError: null });
-      expect(await getIngestionJob(db, first.jobKey)).toMatchObject({
-        status: "completed",
-        attempts: 1,
-        leaseToken: null,
-        result: { disposition: "research_new_article" },
-      });
-
-      const terminal = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/invalid-source",
-      });
-      const terminalLease = await claimIngestionJob(db, "worker-one");
-      await failIngestionJob(db, terminalLease!.jobKey, terminalLease!.leaseToken!, new Error("Source is disabled"), false);
-      expect(await getIngestionJob(db, terminal.jobKey)).toMatchObject({ status: "dead", attempts: 1, lastError: "Source is disabled" });
+    const first = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/queued-report?utm_source=test",
+      profileId: "gta-vi",
     });
+    const duplicate = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/queued-report",
+      profileId: "gta-vi",
+    });
+    expect(duplicate).toMatchObject({ jobKey: first.jobKey, duplicate: true, status: "queued" });
+
+    const leased = await runtime.jobQueue.claimIngestionJob("worker-one");
+    expect(leased).toMatchObject({
+      jobKey: first.jobKey,
+      status: "running",
+      attempts: 1,
+      payload: { collectionId: "gta-vi", sourceId: "netflix-tudum", url: "https://www.netflix.com/tudum/articles/queued-report", profileId: "gta-vi" },
+    });
+    expect(await runtime.jobQueue.claimIngestionJob("worker-two")).toBeNull();
+    await runtime.jobQueue.heartbeatIngestionWorker({
+      workerId: "worker-one",
+      workerType: "source_ingest",
+      currentJobKey: first.jobKey,
+      lastError: null,
+    });
+    expect((await runtime.jobQueue.listIngestionWorkerHeartbeats()).find((worker) => worker.workerId === "worker-one"))
+      .toMatchObject({ currentJobKey: first.jobKey, lastError: null });
+    const queueStatus = await runtime.jobQueue.getIngestionQueueStatus();
+    expect(queueStatus.running).toBeGreaterThanOrEqual(1);
+    expect(queueStatus.activeWorkers).toBeGreaterThanOrEqual(1);
+    expect((await runtime.jobQueue.listRecentIngestionJobs()).some((job) => job.jobKey === first.jobKey)).toBe(true);
+    await runtime.jobQueue.completeIngestionJob(leased!.jobKey, leased!.leaseToken!, { disposition: "research_new_article" });
+    await runtime.jobQueue.heartbeatIngestionWorker({ workerId: "worker-one", workerType: "source_ingest", currentJobKey: null, lastError: null });
+    expect(await runtime.jobQueue.getIngestionJob(first.jobKey)).toMatchObject({
+      status: "completed",
+      attempts: 1,
+      leaseToken: null,
+      result: { disposition: "research_new_article" },
+    });
+
+    const terminal = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/invalid-source",
+    });
+    const terminalLease = await runtime.jobQueue.claimIngestionJob("worker-one");
+    await runtime.jobQueue.failIngestionJob(terminalLease!.jobKey, terminalLease!.leaseToken!, new Error("Source is disabled"), false);
+    expect(await runtime.jobQueue.getIngestionJob(terminal.jobKey)).toMatchObject({ status: "dead", attempts: 1, lastError: "Source is disabled" });
   });
 
   test("schedules a completed URL again as a fresh execution", async () => {
-    await inRolledBackTransaction(async (db) => {
-      const input = {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/repeat-report",
-        profileId: "gta-vi",
-      };
-      const first = await enqueueSourceIngestJob(db, input);
-      const leased = await claimIngestionJob(db, "worker-one");
-      expect(leased).not.toBeNull();
-      await completeIngestionJob(db, leased!.jobKey, leased!.leaseToken!, { disposition: "research_new_article" });
-      expect(await getIngestionJob(db, first.jobKey)).toMatchObject({ status: "completed" });
+    const input = {
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/repeat-report",
+      profileId: "gta-vi",
+    };
+    const first = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    const leased = await runtime.jobQueue.claimIngestionJob("worker-one");
+    expect(leased).not.toBeNull();
+    await runtime.jobQueue.completeIngestionJob(leased!.jobKey, leased!.leaseToken!, { disposition: "research_new_article" });
+    expect(await runtime.jobQueue.getIngestionJob(first.jobKey)).toMatchObject({ status: "completed" });
 
-      const second = await enqueueSourceIngestJob(db, input);
-      expect(second.duplicate).toBe(false);
-      expect(second.jobKey).not.toBe(first.jobKey);
-      expect(second.dedupeKey).toBe(first.dedupeKey);
-      expect(second.status).toBe("queued");
+    const second = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    expect(second.duplicate).toBe(false);
+    expect(second.jobKey).not.toBe(first.jobKey);
+    expect(second.dedupeKey).toBe(first.dedupeKey);
+    expect(second.status).toBe("queued");
 
-      const refresh = await claimIngestionJob(db, "worker-one");
-      expect(refresh?.jobKey).toBe(second.jobKey);
-    });
+    const refresh = await runtime.jobQueue.claimIngestionJob("worker-one");
+    expect(refresh?.jobKey).toBe(second.jobKey);
   });
 
   test("retries a dead URL later as a fresh execution", async () => {
-    await inRolledBackTransaction(async (db) => {
-      const input = {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/retry-report",
-        profileId: "gta-vi",
-      };
-      const first = await enqueueSourceIngestJob(db, input);
-      const leased = await claimIngestionJob(db, "worker-one");
-      await failIngestionJob(db, leased!.jobKey, leased!.leaseToken!, new Error("Source terms no longer permit collection"), false);
-      expect(await getIngestionJob(db, first.jobKey)).toMatchObject({ status: "dead", attempts: 1 });
+    const input = {
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/retry-report",
+      profileId: "gta-vi",
+    };
+    const first = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    const leased = await runtime.jobQueue.claimIngestionJob("worker-one");
+    await runtime.jobQueue.failIngestionJob(leased!.jobKey, leased!.leaseToken!, new Error("Source terms no longer permit collection"), false);
+    expect(await runtime.jobQueue.getIngestionJob(first.jobKey)).toMatchObject({ status: "dead", attempts: 1 });
 
-      const retry = await enqueueSourceIngestJob(db, input);
-      expect(retry.duplicate).toBe(false);
-      expect(retry.jobKey).not.toBe(first.jobKey);
+    const retry = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    expect(retry.duplicate).toBe(false);
+    expect(retry.jobKey).not.toBe(first.jobKey);
 
-      const claimed = await claimIngestionJob(db, "worker-one");
-      expect(claimed?.jobKey).toBe(retry.jobKey);
-    });
+    const claimed = await runtime.jobQueue.claimIngestionJob("worker-one");
+    expect(claimed?.jobKey).toBe(retry.jobKey);
   });
 
   test("prevents concurrent duplicate executions without blocking future refreshes", async () => {
-    await inRolledBackTransaction(async (db) => {
-      const input = {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/active-report",
-        profileId: "gta-vi",
-      };
-      const first = await enqueueSourceIngestJob(db, input);
-      const claimed = await claimIngestionJob(db, "worker-one");
-      const running = await enqueueSourceIngestJob(db, input);
-      expect(running).toMatchObject({ jobKey: first.jobKey, duplicate: true, status: "running" });
-      expect(await claimIngestionJob(db, "worker-two")).toBeNull();
-      await completeIngestionJob(db, claimed!.jobKey, claimed!.leaseToken!, { disposition: "duplicate" });
+    const input = {
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/active-report",
+      profileId: "gta-vi",
+    };
+    const first = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    const claimed = await runtime.jobQueue.claimIngestionJob("worker-one");
+    const running = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    expect(running).toMatchObject({ jobKey: first.jobKey, duplicate: true, status: "running" });
+    expect(await runtime.jobQueue.claimIngestionJob("worker-two")).toBeNull();
+    await runtime.jobQueue.completeIngestionJob(claimed!.jobKey, claimed!.leaseToken!, { disposition: "duplicate" });
 
-      const afterCompletion = await enqueueSourceIngestJob(db, input);
-      expect(afterCompletion.duplicate).toBe(false);
-      expect(afterCompletion.jobKey).not.toBe(first.jobKey);
-    });
+    const afterCompletion = await runtime.jobQueue.enqueueSourceIngestJob(input);
+    expect(afterCompletion.duplicate).toBe(false);
+    expect(afterCompletion.jobKey).not.toBe(first.jobKey);
   });
 
   test("blocks publication while any reviewer disputes or rejects evidence", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
-      const result = await processFixture(db, fixture, { allowFixture: true });
+      const result = await processFixture(persistence, fixture, { allowFixture: true });
       const articleId = result.articleId!;
-      const evidence = await listArticleEvidence(db, articleId);
+      const evidence = await persistence.listArticleEvidence(articleId);
       expect(evidence.length).toBeGreaterThan(0);
 
-      for (const item of evidence) await reviewEvidence(db, item.id, "reviewer-one", "approved", "Supports the claim");
-      await reviewArticle(db, articleId, "reviewer-one", "Editorial review");
-      await approveArticle(db, articleId, "reviewer-one");
+      for (const item of evidence) await persistence.reviewEvidence(item.id, "reviewer-one", "approved", "Supports the claim");
+      await persistence.reviewArticle(articleId, "reviewer-one", "Editorial review");
+      await persistence.approveArticle(articleId, "reviewer-one");
 
-      await reviewEvidence(db, evidence[0].id, "reviewer-two", "disputed", "Conflicting conditions observed");
-      const disputedArticle = await getArticle(db, articleId);
+      await persistence.reviewEvidence(evidence[0].id, "reviewer-two", "disputed", "Conflicting conditions observed");
+      const disputedArticle = await persistence.getArticle(articleId);
       expect(disputedArticle).toMatchObject({
         status: "draft",
         sourceReviewCompleted: false,
         editorReviewCompleted: false,
         approvedBy: null,
       });
-      await expect(reviewArticle(db, articleId, "reviewer-one", "Cannot review blocked evidence"))
+      await expect(persistence.reviewArticle(articleId, "reviewer-one", "Cannot review blocked evidence"))
         .rejects.toThrow("current evidence approval");
 
-      await reviewEvidence(db, evidence[0].id, "reviewer-two", "approved", "Dispute resolved after reproduction");
-      for (const item of evidence.slice(1)) await reviewEvidence(db, item.id, "reviewer-two", "approved", "Second independent approval");
-      await reviewArticle(db, articleId, "reviewer-one", "Re-reviewed after dispute resolution");
-      await approveArticle(db, articleId, "reviewer-one");
-      expect((await getArticle(db, articleId))?.status).toBe("approved");
-      expect((await getArticle(db, articleId))?.status).toBe("approved");
+      await persistence.reviewEvidence(evidence[0].id, "reviewer-two", "approved", "Dispute resolved after reproduction");
+      for (const item of evidence.slice(1)) await persistence.reviewEvidence(item.id, "reviewer-two", "approved", "Second independent approval");
+      await persistence.reviewArticle(articleId, "reviewer-one", "Re-reviewed after dispute resolution");
+      await persistence.approveArticle(articleId, "reviewer-one");
+      expect((await persistence.getArticle(articleId))?.status).toBe("approved");
 
-      await reviewEvidence(db, evidence[0].id, "reviewer-three", "rejected", "Stale revision material");
-      expect((await getArticle(db, articleId))?.status).toBe("draft");
+      await persistence.reviewEvidence(evidence[0].id, "reviewer-three", "rejected", "Stale revision material");
+      expect((await persistence.getArticle(articleId))?.status).toBe("draft");
     });
   });
 
   test("renews an ingestion job lease before expiry", async () => {
-    await inRolledBackTransaction(async (db) => {
-      const enqueued = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/lease-renewal",
-        profileId: "gta-vi",
-      });
-      const leased = await claimIngestionJob(db, "worker-one", ["source_ingest"], 60_000);
-      expect(leased?.jobKey).toBe(enqueued.jobKey);
-      await db`UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE job_key = ${leased!.jobKey}`;
-
-      expect(await renewIngestionJobLease(db, leased!.jobKey, leased!.leaseToken!, 60_000)).toBe(true);
-      const afterRenewal = await db`SELECT lease_expires_at FROM jobs WHERE job_key = ${leased!.jobKey}`;
-      expect(new Date(afterRenewal[0].lease_expires_at as string).getTime()).toBeGreaterThan(Date.now());
-      await completeIngestionJob(db, leased!.jobKey, leased!.leaseToken!, { disposition: "duplicate" });
-      expect(await getIngestionJob(db, leased!.jobKey)).toMatchObject({ status: "completed" });
+    const enqueued = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/lease-renewal",
+      profileId: "gta-vi",
     });
+    const leased = await runtime.jobQueue.claimIngestionJob("worker-one", ["source_ingest"], 60_000);
+    expect(leased?.jobKey).toBe(enqueued.jobKey);
+    (runtime.jobQueue as InMemoryJobQueue).expireLeaseForTest(leased!.jobKey);
+
+    expect(await runtime.jobQueue.renewIngestionJobLease(leased!.jobKey, leased!.leaseToken!, 60_000)).toBe(true);
+    const afterRenewal = (runtime.jobQueue as InMemoryJobQueue).jobForTest(leased!.jobKey);
+    expect(afterRenewal!.leaseExpiresAt!).toBeGreaterThan(Date.now());
+    await runtime.jobQueue.completeIngestionJob(leased!.jobKey, leased!.leaseToken!, { disposition: "duplicate" });
+    expect(await runtime.jobQueue.getIngestionJob(leased!.jobKey)).toMatchObject({ status: "completed" });
   });
 
   test("reclaims an expired job and rejects the stale worker's lease", async () => {
-    await inRolledBackTransaction(async (db) => {
-      const enqueued = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/reclaim-report",
-        profileId: "gta-vi",
-      });
-      const crashed = await claimIngestionJob(db, "crashed-worker", ["source_ingest"], 60_000);
-      expect(crashed?.jobKey).toBe(enqueued.jobKey);
-      await db`UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE job_key = ${crashed!.jobKey}`;
-
-      const reclaimed = await claimIngestionJob(db, "replacement-worker");
-      expect(reclaimed).not.toBeNull();
-      expect(reclaimed!.jobKey).toBe(enqueued.jobKey);
-      expect(reclaimed!.leaseToken).not.toBe(crashed!.leaseToken);
-      expect(reclaimed!.attempts).toBe(2);
-
-      expect(await renewIngestionJobLease(db, crashed!.jobKey, crashed!.leaseToken!, 60_000)).toBe(false);
-      await expect(completeIngestionJob(db, crashed!.jobKey, crashed!.leaseToken!, { ok: true }))
-        .rejects.toThrow("lease is no longer held");
-      await expect(failIngestionJob(db, crashed!.jobKey, crashed!.leaseToken!, new Error("Stale failure"), true))
-        .rejects.toThrow("lease is no longer held");
-
-      await completeIngestionJob(db, reclaimed!.jobKey, reclaimed!.leaseToken!, { disposition: "duplicate" });
-      expect(await getIngestionJob(db, enqueued.jobKey)).toMatchObject({ status: "completed" });
+    const enqueued = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/reclaim-report",
+      profileId: "gta-vi",
     });
+    const crashed = await runtime.jobQueue.claimIngestionJob("crashed-worker", ["source_ingest"], 60_000);
+    expect(crashed?.jobKey).toBe(enqueued.jobKey);
+    (runtime.jobQueue as InMemoryJobQueue).expireLeaseForTest(crashed!.jobKey);
+
+    const reclaimed = await runtime.jobQueue.claimIngestionJob("replacement-worker");
+    expect(reclaimed).not.toBeNull();
+    expect(reclaimed!.jobKey).toBe(enqueued.jobKey);
+    expect(reclaimed!.leaseToken).not.toBe(crashed!.leaseToken);
+    expect(reclaimed!.attempts).toBe(2);
+
+    expect(await runtime.jobQueue.renewIngestionJobLease(crashed!.jobKey, crashed!.leaseToken!, 60_000)).toBe(false);
+    await expect(runtime.jobQueue.completeIngestionJob(crashed!.jobKey, crashed!.leaseToken!, { ok: true }))
+      .rejects.toThrow("lease is no longer held");
+    await expect(runtime.jobQueue.failIngestionJob(crashed!.jobKey, crashed!.leaseToken!, new Error("Stale failure"), true))
+      .rejects.toThrow("lease is no longer held");
+
+    await runtime.jobQueue.completeIngestionJob(reclaimed!.jobKey, reclaimed!.leaseToken!, { disposition: "duplicate" });
+    expect(await runtime.jobQueue.getIngestionJob(enqueued.jobKey)).toMatchObject({ status: "completed" });
   });
 
   test("fences ingestion transactions against a reclaimed lease", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
-      const fixture = await testFixture();
-      const enqueued = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/fenced-report",
-        profileId: "gta-vi",
-      });
-      const stalled = await claimIngestionJob(db, "stalled-worker", ["source_ingest"], 60_000);
-      await db`UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE job_key = ${stalled!.jobKey}`;
-      const reclaimed = await claimIngestionJob(db, "replacement-worker");
-      expect(reclaimed?.jobKey).toBe(enqueued.jobKey);
-
-      await expect(processNormalizedItem(db, { ...fixture.item, sourceId: fixture.source.id }, fixture.source, {
-        leaseFence: { jobKey: enqueued.jobKey, leaseToken: stalled!.leaseToken! },
-      })).rejects.toThrow(IngestionLeaseLostError);
-      expect((await db`SELECT count(*)::int AS count FROM source_items WHERE source_id = ${fixture.source.id} AND external_id = ${fixture.item.externalId}`)[0].count).toBe(0);
-      expect((await db`
-        SELECT count(*)::int AS count
-        FROM claims claim
-        JOIN source_items item ON item.id = claim.source_item_id
-        WHERE item.external_id = ${fixture.item.externalId}
-      `)[0].count).toBe(0);
-      expect(await getIngestionJob(db, enqueued.jobKey)).toMatchObject({ status: "running", lastError: null });
+    await runtime.persistence.ensureGame(profile);
+    const fixture = await testFixture();
+    const enqueued = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/fenced-report",
+      profileId: "gta-vi",
     });
+    const stalled = await runtime.jobQueue.claimIngestionJob("stalled-worker", ["source_ingest"], 60_000);
+    (runtime.jobQueue as InMemoryJobQueue).expireLeaseForTest(stalled!.jobKey);
+    const reclaimed = await runtime.jobQueue.claimIngestionJob("replacement-worker");
+    expect(reclaimed?.jobKey).toBe(enqueued.jobKey);
+
+    await expect(processNormalizedItem(runtime.persistence, { ...fixture.item, sourceId: fixture.source.id }, fixture.source, {
+      leaseFence: { jobKey: enqueued.jobKey, leaseToken: stalled!.leaseToken! },
+    })).rejects.toThrow(IngestionLeaseLostError);
+    expect([...storeOf(runtime.persistence).sourceItems.values()].filter((item) => item.sourceId === fixture.source.id && item.externalId === fixture.item.externalId)).toHaveLength(0);
+    expect([...storeOf(runtime.persistence).claims.values()].filter((claim) => {
+      const item = storeOf(runtime.persistence).sourceItems.get(claim.sourceItemId);
+      return item?.externalId === fixture.item.externalId;
+    })).toHaveLength(0);
+    expect(await runtime.jobQueue.getIngestionJob(enqueued.jobKey)).toMatchObject({ status: "running", lastError: null });
   });
 
   test("allows ingestion while the fence lease is still held", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
-      const fixture = await testFixture();
-      const enqueued = await enqueueSourceIngestJob(db, {
-        collectionId: "gta-vi",
-        sourceId: "netflix-tudum",
-        url: "https://www.netflix.com/tudum/articles/fenced-success",
-        profileId: "gta-vi",
-      });
-      const leased = await claimIngestionJob(db, "worker-a", ["source_ingest"], 60_000);
-      const result = await processNormalizedItem(db, { ...fixture.item, sourceId: fixture.source.id }, fixture.source, {
-        leaseFence: { jobKey: enqueued.jobKey, leaseToken: leased!.leaseToken! },
-      });
-      expect(result.duplicate).toBe(false);
-      expect(result.articleId).not.toBeNull();
-      await completeIngestionJob(db, leased!.jobKey, leased!.leaseToken!, { disposition: result.disposition });
-      expect(await getIngestionJob(db, enqueued.jobKey)).toMatchObject({ status: "completed" });
+    await runtime.persistence.ensureGame(profile);
+    const fixture = await testFixture();
+    const enqueued = await runtime.jobQueue.enqueueSourceIngestJob({
+      collectionId: "gta-vi",
+      sourceId: "netflix-tudum",
+      url: "https://www.netflix.com/tudum/articles/fenced-success",
+      profileId: "gta-vi",
     });
+    const leased = await runtime.jobQueue.claimIngestionJob("worker-a", ["source_ingest"], 60_000);
+    const result = await processNormalizedItem(runtime.persistence, { ...fixture.item, sourceId: fixture.source.id }, fixture.source, {
+      leaseFence: { jobKey: enqueued.jobKey, leaseToken: leased!.leaseToken! },
+    });
+    expect(result.duplicate).toBe(false);
+    expect(result.articleId).not.toBeNull();
+    await runtime.jobQueue.completeIngestionJob(leased!.jobKey, leased!.leaseToken!, { disposition: result.disposition });
+    expect(await runtime.jobQueue.getIngestionJob(enqueued.jobKey)).toMatchObject({ status: "completed" });
   });
 
   test("can read the draft by its generated article id", async () => {
-    await inRolledBackTransaction(async (db) => {
-      await ensureGame(db, profile);
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
       const fixture = await testFixture();
-      const result = await processFixture(db, fixture, { allowFixture: true });
-      const article = await getArticle(db, result.articleId!);
+      const result = await processFixture(persistence, fixture, { allowFixture: true });
+      const article = await persistence.getArticle(result.articleId!);
 
       expect(article?.collectionId).toBe("gta-vi");
       expect(article?.status).toBe("draft");

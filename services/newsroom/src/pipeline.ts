@@ -8,20 +8,7 @@ import {
   type EvidenceLevel,
   type NormalizedSourceItem,
 } from "@gameintel/core";
-import {
-  assertIngestionJobLeaseHeld,
-  createArticleDraft,
-  calculateClaimConfidence,
-  createEvent,
-  ensureSource,
-  inTransaction,
-  insertClaim,
-  insertSourceItem,
-  invalidateEvidenceApprovalsForSourceItem,
-  recommendArticleCover,
-  refreshClaimStatesForSourceItem,
-  type Db,
-} from "@gameintel/db";
+import type { GameIntelPersistence, SourceInput } from "@gameintel/contracts";
 import { OpenCodeRuntime, type ArticleDraft } from "@gameintel/ai-runtime";
 import { prepareIngestion } from "@gameintel/pipeline";
 import type { Fixture } from "@gameintel/source-sdk";
@@ -70,10 +57,7 @@ function citationLabel(type: AttributionType, sourceType: string): string {
 
 export type LeaseFence = { jobKey: string; leaseToken: string };
 
-export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, source: {
-  id: string; type: string; canonicalUrl: string; publicCitationUrl: string | null;
-  sourceStrength: string; publicationMode: string; policy: unknown; enabled?: boolean;
-}, options: { submittedBy?: string | null; leaseFence?: LeaseFence | null } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
+export async function processNormalizedItem(persistence: GameIntelPersistence, item: NormalizedSourceItem, source: SourceInput, options: { submittedBy?: string | null; leaseFence?: LeaseFence | null } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
   if (!source.enabled) throw new Error(`Source ${source.id} is disabled by source policy`);
   if (item.sourceId !== source.id) throw new Error("Source item does not match its source policy");
   const sourceStrength = SourceStrengthSchema.parse(source.sourceStrength);
@@ -93,9 +77,9 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
     })),
   };
 
-  return inTransaction(db, async (transaction) => {
-  if (options.leaseFence) await assertIngestionJobLeaseHeld(transaction, options.leaseFence.jobKey, options.leaseFence.leaseToken);
-  await ensureSource(transaction, source);
+  return persistence.transaction(async (transaction) => {
+  if (options.leaseFence) await transaction.assertIngestionJobLeaseHeld(options.leaseFence.jobKey, options.leaseFence.leaseToken);
+  await transaction.ensureSource(source);
   const prepared = prepareIngestion(item, {
     sourceAuthority: authority[item.sourceStrength],
     novelty: 0.9,
@@ -108,19 +92,19 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
   });
    item = prepared.item;
    const { lineageId } = prepared;
-    const inserted = await insertSourceItem(transaction, item, prepared.rawHash, lineageId, policy, options.submittedBy ?? null);
+    const inserted = await transaction.insertSourceItem(item, prepared.rawHash, lineageId, policy, options.submittedBy ?? null);
    if (inserted.duplicate) return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: ["Source content was already ingested"] };
    if (!inserted.revisionId) throw new Error("Changed source item did not create an evidence revision");
-   if (inserted.materialChange) await invalidateEvidenceApprovalsForSourceItem(transaction, inserted.id);
+   if (inserted.materialChange) await transaction.invalidateEvidenceApprovalsForSourceItem(inserted.id);
 
    const score = prepared.newsworthiness;
    const disposition = prepared.disposition;
-   const eventId = await createEvent(transaction, { collectionId: item.collectionId, sourceItemId: inserted.id, newsworthiness: score, disposition });
+   const eventId = await transaction.createEvent({ collectionId: item.collectionId, sourceItemId: inserted.id, newsworthiness: score, disposition });
    const claimIds: string[] = [];
    for (const claim of item.claims) {
-     claimIds.push(await insertClaim(transaction, item, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, claim, lineageId));
+     claimIds.push(await transaction.insertClaim(item, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, claim, lineageId));
    }
-   await refreshClaimStatesForSourceItem(transaction, inserted.id);
+   await transaction.refreshClaimStatesForSourceItem(inserted.id);
 
   if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal" || claimIds.length === 0) {
      const warning = claimIds.length === 0
@@ -130,7 +114,7 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
    }
 
    const claimConfidences: number[] = [];
-   for (const claimId of claimIds) claimConfidences.push(await calculateClaimConfidence(transaction, claimId));
+   for (const claimId of claimIds) claimConfidences.push(await transaction.calculateClaimConfidence(claimId));
    const confidence = claimConfidences.length
      ? Math.round((claimConfidences.reduce((sum, value) => sum + value, 0) / claimConfidences.length) * 100) / 100
      : 0;
@@ -154,7 +138,7 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
     : [{ sourceId: source.id, claimId: null, citationLabel: citationLabel("trusted_secondary", source.type), publicCitationUrl: source.publicCitationUrl! }];
   const title = aiDraft?.title ?? item.title;
   const description = aiDraft?.description ?? boundedDescription(item.text, 155);
-  const articleId = await createArticleDraft(transaction, {
+  const articleId = await transaction.createArticleDraft({
     collectionId: item.collectionId,
     title,
     description,
@@ -198,7 +182,7 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
     confidence,
     sourceRefs,
   });
-  await recommendArticleCover(transaction, {
+  await transaction.recommendArticleCover({
     articleId,
     title,
     description,
@@ -208,13 +192,13 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
   });
 }
 
-export async function processFixture(db: Db, fixture: Fixture, options: { allowFixture?: boolean } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; duplicate: boolean }> {
+export async function processFixture(persistence: GameIntelPersistence, fixture: Fixture, options: { allowFixture?: boolean } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; duplicate: boolean }> {
   if (!options.allowFixture) throw new Error("Fixture ingestion requires an explicit trusted local invocation");
   if (!fixture.source.enabled) throw new Error(`Fixture source ${fixture.source.id} is disabled by source policy`);
   if (fixture.item.sourceStrength !== fixture.source.sourceStrength || fixture.item.publicationMode !== fixture.source.publicationMode) {
     throw new Error("Fixture item trust metadata must match its source");
   }
   const item = { ...fixture.item, sourceId: fixture.source.id } as NormalizedSourceItem;
-  const result = await processNormalizedItem(db, item, fixture.source);
+  const result = await processNormalizedItem(persistence, item, fixture.source);
   return { sourceItemId: result.sourceItemId, eventId: result.eventId, articleId: result.articleId, duplicate: result.duplicate };
 }

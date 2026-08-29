@@ -199,6 +199,7 @@ export const SourcePolicyReviewDecisionSchema = z.enum(["approved", "rejected", 
 export type SourcePolicyReviewDecision = z.infer<typeof SourcePolicyReviewDecisionSchema>;
 
 export const ProvenanceRelationshipSchema = z.enum([
+  "original",
   "copied_from",
   "quoted_from",
   "derived_from",
@@ -209,7 +210,7 @@ export const ProvenanceRelationshipSchema = z.enum([
 ]);
 export type ProvenanceRelationship = z.infer<typeof ProvenanceRelationshipSchema>;
 
-export const ProvenanceClusteringMethodSchema = z.enum(["automatic_exact", "manual", "declared"]);
+export const ProvenanceClusteringMethodSchema = z.enum(["automatic_exact", "manual", "declared", "lineage"]);
 export type ProvenanceClusteringMethod = z.infer<typeof ProvenanceClusteringMethodSchema>;
 
 const sourceTrustClassifications: Record<SourceStrength, SourceTrustClassification> = {
@@ -373,6 +374,62 @@ export type ArticleStatus = z.infer<typeof ArticleStatusSchema>;
 
 export const MediaReviewStatusSchema = z.enum(["pending", "approved", "rejected"]);
 export type MediaReviewStatus = z.infer<typeof MediaReviewStatusSchema>;
+
+export const MediaCatalogEntrySchema = z.object({
+  id: z.string().min(1),
+  collectionId: z.string().min(1),
+  collection: z.string().min(1),
+  caption: z.string().min(1),
+  altText: z.string().min(1),
+  tags: z.array(z.string().min(1)),
+  spoilerTags: z.array(z.string().min(1)),
+  attribution: z.string().min(1),
+  sourceUrl: PublicHttpUrlSchema,
+  sourcePageUrl: PublicHttpUrlSchema,
+  originalKey: z.string().min(1),
+  displayKey: z.string().min(1),
+  publicUrl: PublicHttpUrlSchema,
+  contentType: z.string().regex(/^image\/[a-z0-9.+-]+$/i, "Expected an image content type"),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  checksum: z.string().regex(/^[a-f0-9]{64}$/i, "Expected a SHA-256 checksum"),
+});
+export type CatalogMedia = z.infer<typeof MediaCatalogEntrySchema>;
+
+export const MediaCatalogSchema = z.object({ media: z.array(MediaCatalogEntrySchema) }).passthrough();
+
+export function assertUniqueMedia(media: CatalogMedia[]): void {
+  for (const key of ["id", "checksum", "displayKey"] as const) {
+    const values = new Set<string>();
+    for (const item of media) {
+      if (values.has(item[key])) throw new Error(`Invalid media catalog: duplicate ${key} '${item[key]}'`);
+      values.add(item[key]);
+    }
+  }
+}
+
+function normalizedText(value: string): string {
+  return value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
+}
+
+function containsPhrase(text: string, phrase: string): boolean {
+  return phrase.length > 0 && ` ${text} `.includes(` ${phrase} `);
+}
+
+// Deterministic cover-candidate scoring used by both reference adapters.
+export function mediaCoverScore(candidate: Pick<CatalogMedia, "caption" | "collection" | "tags">, articleText: string): number {
+  const phrases = [candidate.caption, candidate.collection];
+  let score = 0;
+  for (const tag of candidate.tags) {
+    const phrase = normalizedText(tag);
+    if (containsPhrase(articleText, phrase)) score += 10_000 + phrase.split(" ").length;
+  }
+  for (const phraseValue of phrases) {
+    const phrase = normalizedText(phraseValue);
+    if (phrase.split(" ").length > 1 && containsPhrase(articleText, phrase)) score += 100 + phrase.split(" ").length;
+  }
+  return score;
+}
 
 export const ArticleCoverMediaSchema = z.object({
   id: z.string(),

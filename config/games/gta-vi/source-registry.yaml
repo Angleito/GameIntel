@@ -2,11 +2,16 @@ sources:
   # Enabling a source is ingestion configuration, not evidence approval.
   # Optional access metadata: terms_reviewed_at, retain_raw_text_days,
   # may_store_full_text. Collection never requires an editorial review record.
+  # poll_interval_seconds is the scheduler cadence; poll_url is the exact
+  # endpoint the scheduler polls and must belong to a registered domain.
+  # Actual request pacing is governed separately by rpm.
   - id: rockstar-official
     domains: [rockstargames.com]
     access: permitted_scrape
     rpm: 2
     userAgent: gameintelgg/0.1
+    poll_interval_seconds: 300
+    poll_url: https://www.rockstargames.com/VI
     source_strength: PRIMARY
     publication_mode: normal
     public_citation_base: https://www.rockstargames.com/VI
@@ -16,6 +21,8 @@ sources:
     access: permitted_scrape
     rpm: 2
     userAgent: gameintelgg/0.1
+    poll_interval_seconds: 300
+    poll_url: https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look
     source_strength: TRUSTED_SECONDARY
     publication_mode: normal
     public_citation_base: https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look

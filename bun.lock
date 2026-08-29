@@ -25,6 +25,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@gameintel/config": "workspace:*",
+        "@gameintel/contracts": "workspace:*",
         "@gameintel/core": "workspace:*",
         "@gameintel/db": "workspace:*",
         "@gameintel/newsroom": "workspace:*",
@@ -44,6 +45,14 @@
         "@astrojs/check": "^0.9.10",
       },
     },
+    "packages/adapter-contract-tests": {
+      "name": "@gameintel/adapter-contract-tests",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/core": "workspace:*",
+      },
+    },
     "packages/ai-runtime": {
       "name": "@gameintel/ai-runtime",
       "version": "0.1.0",
@@ -61,6 +70,13 @@
         "zod": "^3.24.2",
       },
     },
+    "packages/contracts": {
+      "name": "@gameintel/contracts",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/core": "workspace:*",
+      },
+    },
     "packages/core": {
       "name": "@gameintel/core",
       "version": "0.1.0",
@@ -72,9 +88,34 @@
       "name": "@gameintel/db",
       "version": "0.1.0",
       "dependencies": {
+        "@gameintel/contracts": "workspace:*",
         "@gameintel/core": "workspace:*",
         "postgres": "^3.4.5",
         "zod": "^3.24.2",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
+    "packages/in-memory": {
+      "name": "@gameintel/in-memory",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+        "@gameintel/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
+      },
+    },
+    "packages/local-filesystem": {
+      "name": "@gameintel/local-filesystem",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gameintel/contracts": "workspace:*",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
       },
     },
     "packages/output": {
@@ -95,10 +136,14 @@
       "name": "@gameintel/source-sdk",
       "version": "0.1.0",
       "dependencies": {
+        "@gameintel/contracts": "workspace:*",
         "@gameintel/core": "workspace:*",
         "@mozilla/readability": "^0.6.0",
         "linkedom": "^0.18.13",
         "yaml": "^2.9.0",
+      },
+      "devDependencies": {
+        "@gameintel/adapter-contract-tests": "workspace:*",
       },
     },
     "services/newsroom": {
@@ -107,8 +152,11 @@
       "dependencies": {
         "@gameintel/ai-runtime": "workspace:*",
         "@gameintel/config": "workspace:*",
+        "@gameintel/contracts": "workspace:*",
         "@gameintel/core": "workspace:*",
         "@gameintel/db": "workspace:*",
+        "@gameintel/in-memory": "workspace:*",
+        "@gameintel/local-filesystem": "workspace:*",
         "@gameintel/pipeline": "workspace:*",
         "@gameintel/source-sdk": "workspace:*",
         "yaml": "^2.9.0",
@@ -120,7 +168,9 @@
       "version": "0.1.0",
       "dependencies": {
         "@gameintel/config": "workspace:*",
+        "@gameintel/contracts": "workspace:*",
         "@gameintel/db": "workspace:*",
+        "@gameintel/newsroom": "workspace:*",
         "@gameintel/output": "workspace:*",
       },
     },
@@ -268,15 +318,23 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
 
+    "@gameintel/adapter-contract-tests": ["@gameintel/adapter-contract-tests@workspace:packages/adapter-contract-tests"],
+
     "@gameintel/ai-runtime": ["@gameintel/ai-runtime@workspace:packages/ai-runtime"],
 
     "@gameintel/api": ["@gameintel/api@workspace:apps/api"],
 
     "@gameintel/config": ["@gameintel/config@workspace:packages/config"],
 
+    "@gameintel/contracts": ["@gameintel/contracts@workspace:packages/contracts"],
+
     "@gameintel/core": ["@gameintel/core@workspace:packages/core"],
 
     "@gameintel/db": ["@gameintel/db@workspace:packages/db"],
+
+    "@gameintel/in-memory": ["@gameintel/in-memory@workspace:packages/in-memory"],
+
+    "@gameintel/local-filesystem": ["@gameintel/local-filesystem@workspace:packages/local-filesystem"],
 
     "@gameintel/newsroom": ["@gameintel/newsroom@workspace:services/newsroom"],
 
