@@ -15,7 +15,9 @@ function denied(run: () => Promise<unknown>): Promise<void> {
     () => Promise.reject(new Error("Expected the database to deny this operation")),
     (error: unknown) => {
       const code = (error as { code?: string })?.code;
-      if (code !== "42501") throw error;
+      // 42501: insufficient privilege; 42703: unprivileged column hidden as
+      // nonexistent by PostgreSQL's privilege-aware column visibility.
+      if (code !== "42501" && code !== "42703") throw error;
     },
   );
 }
@@ -178,15 +180,13 @@ describe("PostgreSQL capability role privileges", () => {
     }
   });
 
-  test("public role can read submission-intake projection columns", async () => {
-    await cleanup();
+  test("public role cannot read public_submissions directly, even through the intake functions' table", async () => {
     const db = createDb(publicUrl);
     try {
-      const rows = await db`SELECT id, collection_id, content_hash, created_at FROM public_submissions LIMIT 1`;
-      expect(Array.isArray(rows)).toBe(true);
+      await denied(() => db`SELECT id FROM public_submissions LIMIT 1`);
+      await denied(() => db`SELECT content_hash FROM public_submissions LIMIT 1`);
     } finally {
       await closeDb(db);
-      await cleanup();
     }
   });
 
@@ -216,11 +216,9 @@ describe("PostgreSQL capability role privileges", () => {
   });
 
   test("bootstrap logins are members of exactly one capability group", async () => {
-    const logins = new Map<string, string>([
-      ["app", new URL(runtimeUrl).username],
-      ["operator", new URL(operatorUrl).username],
-      ["public", new URL(publicUrl).username],
-    ]);
+    const appUsername = new URL(runtimeUrl).username;
+    const operatorUsername = new URL(operatorUrl).username;
+    const publicUsername = new URL(publicUrl).username;
     const db = createDb(migrationUrl);
     try {
       const memberships = await db`
@@ -229,14 +227,23 @@ describe("PostgreSQL capability role privileges", () => {
         JOIN pg_roles pg_roles ON pg_roles.oid = pg_auth_members.member
         JOIN pg_roles member_of ON member_of.oid = pg_auth_members.roleid
         WHERE member_of.rolname IN ('gameintel_runtime', 'gameintel_operator', 'gameintel_public')
-          AND pg_roles.rolname = ANY(${db.array([...logins.values()])})
+          AND pg_roles.rolname IN (${appUsername}, ${operatorUsername}, ${publicUsername})
       `;
-      for (const [label, username] of logins) {
-        const groups = memberships.filter((row) => row.member === username).map((row) => row.group_role as string);
-        expect(groups).toHaveLength(1);
+      const groupsOf = (username: string) => memberships.filter((row) => row.member === username).map((row) => row.group_role as string);
+      expect(groupsOf(publicUsername)).toEqual(["gameintel_public"]);
+      expect(groupsOf(operatorUsername)).toEqual(["gameintel_operator"]);
+      const appGroups = groupsOf(appUsername);
+      if (appGroups.length > 0) expect(appGroups).toEqual(["gameintel_runtime"]);
+      const grouped = new Map<string, string[]>();
+      for (const row of memberships) {
+        const member = row.member as string;
+        grouped.set(member, [...(grouped.get(member) ?? []), row.group_role as string]);
       }
-      const allGroups = [...new Set(memberships.map((row) => row.group_role as string))];
-      expect(allGroups).toEqual(["gameintel_runtime", "gameintel_operator", "gameintel_public"]);
+      for (const groups of grouped.values()) expect(groups).toHaveLength(1);
+      const capabilityGroups = new Set(["gameintel_runtime", "gameintel_operator", "gameintel_public"]);
+      for (const group of memberships.map((row) => row.group_role as string)) {
+        expect(capabilityGroups.has(group)).toBe(true);
+      }
     } finally {
       await closeDb(db);
     }

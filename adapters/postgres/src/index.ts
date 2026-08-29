@@ -1232,19 +1232,7 @@ export async function purgeExpiredSourceContent(db: Db, options: { execute?: boo
 }
 
 async function submissionCount(db: Db, condition: "ip" | "session" | "account" | "global", identity?: string): Promise<number> {
-  if (condition === "ip") {
-    const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE submitter_ip_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
-    return Number(rows[0]?.count ?? 0);
-  }
-  if (condition === "session") {
-    const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE submitter_session_hash = ${identity!} AND created_at >= now() - interval '1 minute'`;
-    return Number(rows[0]?.count ?? 0);
-  }
-  if (condition === "account") {
-    const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE submitter_account_id = ${identity!} AND created_at >= now() - interval '1 day'`;
-    return Number(rows[0]?.count ?? 0);
-  }
-  const rows = await db`SELECT COUNT(created_at)::int AS count FROM public_submissions WHERE created_at >= now() - interval '1 minute'`;
+  const rows = await db`SELECT public_submission_count(${condition}, ${identity ?? null})::int AS count`;
   return Number(rows[0]?.count ?? 0);
 }
 
@@ -1288,15 +1276,9 @@ export async function createQuarantinedSubmission(db: Db, input: {
     if (accountId) await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`public-submission:account:${accountId}:${Math.floor(Date.now() / 86_400_000)}`}, 0))`;
 
     const duplicate = await transaction`
-      SELECT id
-      FROM public_submissions
-      WHERE collection_id = ${submission.collectionId}
-        AND submitter_session_hash = ${input.submitterSessionHash}
-        AND content_hash = ${contentHash}
-        AND created_at >= now() - interval '24 hours'
-      LIMIT 1
+      SELECT public_submission_duplicate_id(${submission.collectionId}, ${input.submitterSessionHash}, ${contentHash}) AS id
     `;
-    if (duplicate.length) return { id: duplicate[0].id as string, duplicate: true };
+    if (duplicate[0]?.id) return { id: duplicate[0].id as string, duplicate: true };
 
     if (await submissionCount(transaction, "global") >= limits.globalPerMinute
       || await submissionCount(transaction, "ip", input.submitterIpHash) >= limits.perIpPerMinute

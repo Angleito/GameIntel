@@ -2242,8 +2242,9 @@ suites, and a full Compose stack smoke:
   three logins bootstrapped per capability; the API runs two runtimes
   (public/operator); `privileges.test.ts` asserts the deny matrix. Review
   hardening: 018 revokes all article writes from the operator role, 019 narrows
-  public reads to the published article surface plus the submission-intake
-  projection and stops automatic future-table reads, the bootstrap revokes
+  public reads to the published article surface with community intake routed
+  through SECURITY DEFINER functions (no direct submission-table reads, no
+  automatic future-table reads), the bootstrap revokes
   stray memberships before granting exactly one capability group per login,
   and the tests prove the operator cannot publish, the public role cannot read
   internal tables or submission identity columns, and each login belongs to
