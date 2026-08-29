@@ -1,13 +1,17 @@
 # Release Checklist
 
-Run the following from a Git worktree before making a public repository,
+This repository intentionally uses local verification rather than GitHub
+Actions. Run the following from a Git worktree before every push, public
 release archive, or deployment image:
+
+Start the local PostgreSQL runtime first and set `DATABASE_URL` to the
+least-privilege application role before running database-backed tests.
 
 ```bash
 bun run security:scan
 bun test
 bun run typecheck
-bun run build
+PUBLIC_BASE_URL=https://gameintel.example GAMEINTEL_RELEASE=true bun run build
 git status --short
 git ls-files
 ```
