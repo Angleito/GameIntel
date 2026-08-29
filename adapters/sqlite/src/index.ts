@@ -3,6 +3,7 @@ import {
   cryptoIdGenerator,
   schedulerForSources,
   systemClock,
+  UnconfiguredFetchTransport,
   type GameIntelRuntime,
   type ObjectStore,
   type SchedulableSource,
@@ -15,6 +16,7 @@ import { SQLitePacingStore } from "./pacing.ts";
 // backend. It proves the capability contracts are not secretly PostgreSQL.
 export function createSqliteRuntime(options: {
   path?: string;
+  fetchTransport?: GameIntelRuntime["fetchTransport"];
   schedulerSources?: SchedulableSource[];
   objectStore?: ObjectStore | null;
 } = {}): GameIntelRuntime & { persistence: SQLitePersistence; jobQueue: SQLiteJobQueue; pacing: SQLitePacingStore } {
@@ -30,7 +32,7 @@ export function createSqliteRuntime(options: {
     persistence,
     jobQueue,
     pacing,
-    fetchTransport: null as never,
+    fetchTransport: options.fetchTransport ?? new UnconfiguredFetchTransport(),
     scheduler,
     objectStore: options.objectStore ?? null,
     clock,

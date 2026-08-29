@@ -33,7 +33,7 @@ export function createRuntime(backend: StorageBackend = storageBackend(process.e
     return createInMemoryRuntime({ fetchTransport, objectStore, schedulerSources: options.schedulerSources });
   }
   if (backend === "sqlite") {
-    return createSqliteRuntime({ schedulerSources: options.schedulerSources, objectStore });
+    return createSqliteRuntime({ fetchTransport, objectStore, schedulerSources: options.schedulerSources });
   }
   return createPostgresRuntime({ url: options.url, fetchTransport, objectStore, schedulerSources: options.schedulerSources });
 }
