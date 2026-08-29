@@ -1,17 +1,34 @@
 # Release Checklist
 
 This repository intentionally uses local verification rather than GitHub
-Actions. Run the following from a Git worktree before every push, public
-release archive, or deployment image:
-
-Start the local PostgreSQL runtime first and set `DATABASE_URL` to the
-least-privilege application role before running database-backed tests.
+Actions. One command performs every check required before a meaningful public
+push, tag, or release:
 
 ```bash
-bun run security:scan
-bun test
-bun run typecheck
-PUBLIC_BASE_URL=https://gameintel.example GAMEINTEL_RELEASE=true bun run build
+bun run release:check
+```
+
+This runs, in order: the repository secret scan, a frozen lockfile check, the
+full test suite (in-memory adapters and conformance), type checking, a
+repository-cleanliness gate (no tracked modifications or untracked files), a
+release-mode production build, and a second secret scan over the generated
+output. The cleanliness gate is strict by design: commit or stash work before
+running it.
+
+To also run the PostgreSQL reference-adapter conformance and capability-role
+privilege suites against a migrated reference deployment:
+
+```bash
+bun run release:check:postgres
+```
+
+This requires `GAMEINTEL_TEST_POSTGRES=true`, the migrated deployment, and the
+three API logins (`PUBLIC_DATABASE_URL`, `OPERATOR_DATABASE_URL`,
+`DATABASE_URL`, and `MIGRATION_DATABASE_URL` for cleanup).
+
+Manual confirmations after the automated gate:
+
+```bash
 git status --short
 git ls-files
 ```
@@ -25,11 +42,16 @@ build output, local databases, backups, certificates, `.dev.vars`, and
 
 Before a deployment, replace all relevant template blanks with non-placeholder
 values in the deployment secret store. `POSTGRES_PASSWORD`,
-`APP_DATABASE_PASSWORD`, and `LOCAL_OPERATOR_TOKEN` are required for Compose.
-`POSTGRES_USER` is the DDL-capable migration principal; the API and ingestion
-worker use the separate `APP_DATABASE_USER` runtime principal. Host-side
-application commands use `DATABASE_URL`; host-side migrations use
-`MIGRATION_DATABASE_URL`. Use URL-safe PostgreSQL passwords because Compose
+`APP_DATABASE_PASSWORD`, `APP_OPERATOR_DATABASE_PASSWORD`,
+`APP_PUBLIC_DATABASE_PASSWORD`, and `LOCAL_OPERATOR_TOKEN` are required for
+Compose. `POSTGRES_USER` is the DDL-capable migration principal. The API runs
+two logins: `APP_PUBLIC_DATABASE_USER` (`gameintel_public` group) for public
+routes and `APP_OPERATOR_DATABASE_USER` (`gameintel_operator` group) for
+operator routes. The ingestion worker, scheduler, publisher, and operator CLI
+use `APP_DATABASE_USER` (`gameintel_runtime` group). Host-side application
+commands use `DATABASE_URL`; host-side migrations use `MIGRATION_DATABASE_URL`.
+The API additionally requires `PUBLIC_DATABASE_URL` and
+`OPERATOR_DATABASE_URL`. Use URL-safe PostgreSQL passwords because Compose
 constructs its internal database URLs from those values.
 
 R2 publishing additionally requires `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
