@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, closeDb, createDb, type Db } from "./index.ts";
+import { createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, listArticles, closeDb, createDb, type Db } from "./index.ts";
 
 // Privilege-boundary tests for the local reference deployment. They assert
 // that the capability roles enforce the plan's hard rule: a public-facing
@@ -102,11 +102,32 @@ describe("PostgreSQL capability role privileges", () => {
     }
   });
 
-  test("public role can read published article surface", async () => {
+  test("public role reads only published articles through the public-safe functions", async () => {
     const db = createDb(publicUrl);
     try {
-      const articles = await db`SELECT id FROM articles WHERE game_id = 'privilege-test' LIMIT 1`;
+      await denied(() => db`SELECT title FROM articles LIMIT 1`);
+      await denied(() => db`SELECT title, body FROM articles WHERE status = 'draft' LIMIT 1`);
+      await denied(() => db`SELECT id FROM article_sources LIMIT 1`);
+      await denied(() => db`SELECT id FROM article_media LIMIT 1`);
+      await denied(() => db`SELECT id FROM media_assets LIMIT 1`);
+      const articles = await listArticles(db, "privilege-test", true);
       expect(Array.isArray(articles)).toBe(true);
+      expect(articles.every((article) => article.status === "published" || article.status === "updated")).toBe(true);
+      const single = await getArticle(db, "privilege-test", true);
+      expect(single).toBeNull();
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("public role cannot forge intake, moderation, or audit records", async () => {
+    const db = createDb(publicUrl);
+    try {
+      await denied(() => db`INSERT INTO public_submissions (id, collection_id, submitter_session_hash, submitter_ip_hash, report, content_hash, state, created_at, updated_at) VALUES ('x', 'privilege-test', 'a', 'b', 'forged promoted report', 'c', 'promoted', now(), now())`);
+      await denied(() => db`INSERT INTO public_submissions (id, collection_id, submitter_session_hash, submitter_ip_hash, report, content_hash, state, created_at, updated_at) VALUES ('x', 'privilege-test', 'a', 'b', 'forged rejected report', 'c', 'rejected', now(), now())`);
+      await denied(() => db`INSERT INTO submission_moderation_actions (id, submission_id, actor_id, action, notes) VALUES ('x', 'y', 'attacker', 'promoted', 'forged')`);
+      await denied(() => db`INSERT INTO audit_log (id, actor_id, action, target_type, target_id, reason) VALUES ('x', 'attacker', 'submission.promoted', 'public_submission', 'y', 'forged')`);
+      await denied(() => db`UPDATE public_submissions SET state = 'promoted' WHERE id = 'none'`);
     } finally {
       await closeDb(db);
     }
@@ -243,6 +264,26 @@ describe("PostgreSQL capability role privileges", () => {
       const capabilityGroups = new Set(["gameintel_runtime", "gameintel_operator", "gameintel_public"]);
       for (const group of memberships.map((row) => row.group_role as string)) {
         expect(capabilityGroups.has(group)).toBe(true);
+      }
+      for (const username of [appUsername, operatorUsername, publicUsername]) {
+        expect(capabilityGroups.has(username)).toBe(false);
+      }
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("capability group roles are never application logins", async () => {
+    const db = createDb(migrationUrl);
+    try {
+      const roles = await db`
+        SELECT rolname, rolcanlogin
+        FROM pg_roles
+        WHERE rolname IN ('gameintel_runtime', 'gameintel_operator', 'gameintel_public')
+      `;
+      expect(roles).toHaveLength(3);
+      for (const role of roles) {
+        expect(role.rolcanlogin).toBe(false);
       }
     } finally {
       await closeDb(db);

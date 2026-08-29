@@ -32,6 +32,26 @@ FROM (VALUES
 ) AS roles(role_name, role_password)
 \gexec
 
+-- Application logins must never be the capability group roles themselves:
+-- those roles carry direct table grants that would survive any membership
+-- revocation. (Generated through format() + \gexec because psql does not
+-- interpolate variables inside dollar-quoted DO blocks.)
+SELECT format(
+  $guard$
+  DO $$ BEGIN
+    IF %L IN ('gameintel_runtime', 'gameintel_operator', 'gameintel_public')
+      OR %L IN ('gameintel_runtime', 'gameintel_operator', 'gameintel_public')
+      OR %L IN ('gameintel_runtime', 'gameintel_operator', 'gameintel_public') THEN
+      RAISE EXCEPTION 'Application login names must not equal capability group role names';
+    END IF;
+  END $$
+  $guard$,
+  :'app_user',
+  :'operator_user',
+  :'public_user'
+)
+\gexec
+
 SELECT format('REVOKE gameintel_runtime, gameintel_operator, gameintel_public FROM %I', role_name)
 FROM (VALUES (:'app_user'), (:'operator_user'), (:'public_user')) AS logins(role_name)
 \gexec

@@ -143,7 +143,9 @@ bun run dev:api
 ```
 
 The API runs two storage identities: public routes use the `gameintel_public`
-database role (reads + quarantined submissions, no UPDATE privileges) and
+database role, which reads published articles only through published-only
+SECURITY DEFINER functions and writes community intake through a fenced
+submit function (no raw table reads or inserts, and no UPDATE privileges);
 operator routes use the `gameintel_operator` role (jobs and moderation, but no
 evidence review or publication). Approving evidence and publishing content
 require the operator CLI with the editor-only runtime login. Host-side API

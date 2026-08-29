@@ -69,8 +69,9 @@ bootstrap creates three logins, each a member of exactly one group role:
   submission moderation and promotion). Cannot create evidence reviews,
   article reviews, source policy reviews, media approvals, or published
   articles.
-- `gameintel_public` — the public API surface (safe reads and quarantined
-  community submissions). No UPDATE privileges at all.
+- `gameintel_public` — the public API surface: published articles through
+  published-only SECURITY DEFINER functions and fenced community intake. No
+  raw table reads or inserts, no UPDATE privileges at all.
 
 The API process runs two runtimes: public routes use the `gameintel_public`
 login and operator routes use the `gameintel_operator` login. A public request

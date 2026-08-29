@@ -768,16 +768,22 @@ const articleSelect = (db: Db) => db`
 `;
 
 export async function getArticle(db: Db, idOrSlug: string, publishedOnly = false): Promise<Article | null> {
-  const rows = publishedOnly
-    ? await db`${articleSelect(db)} WHERE (a.id = ${idOrSlug} OR a.slug = ${idOrSlug}) AND a.status IN ('published', 'updated') GROUP BY a.id, cover.cover_media ORDER BY a.created_at DESC LIMIT 1`
-    : await db`${articleSelect(db)} WHERE (a.id = ${idOrSlug} OR a.slug = ${idOrSlug}) GROUP BY a.id, cover.cover_media LIMIT 1`;
-  return rows.length ? parseArticle(rows[0] as Record<string, unknown>) : null;
+  // Published-only reads go through the SECURITY DEFINER function so the
+  // public role holds no SELECT on the article tables; the operator/editorial
+  // paths keep the raw query so drafts remain visible to them.
+  const row = publishedOnly
+    ? (await db`SELECT public_article_get(${idOrSlug}) AS article`)[0] as { article: Record<string, unknown> | null } | undefined
+    : (await db`${articleSelect(db)} WHERE (a.id = ${idOrSlug} OR a.slug = ${idOrSlug}) GROUP BY a.id, cover.cover_media LIMIT 1`)[0] as Record<string, unknown> | undefined;
+  const parsed = publishedOnly ? (row as { article: Record<string, unknown> | null } | undefined)?.article : row;
+  return parsed ? parseArticle(parsed) : null;
 }
 
 export async function listArticles(db: Db, collectionId: string, publishedOnly = true): Promise<Article[]> {
-  const rows = publishedOnly
-    ? await db`${articleSelect(db)} WHERE a.game_id = ${collectionId} AND a.status IN ('published', 'updated') GROUP BY a.id, cover.cover_media ORDER BY COALESCE(a.published_at, a.created_at) DESC`
-    : await db`${articleSelect(db)} WHERE a.game_id = ${collectionId} GROUP BY a.id, cover.cover_media ORDER BY a.created_at DESC`;
+  if (publishedOnly) {
+    const rows = await db`SELECT public_article_list(${collectionId}) AS articles`;
+    return ((rows[0] as { articles: unknown[] } | undefined)?.articles ?? []).map((row) => parseArticle(row as Record<string, unknown>));
+  }
+  const rows = await db`${articleSelect(db)} WHERE a.game_id = ${collectionId} GROUP BY a.id, cover.cover_media ORDER BY a.created_at DESC`;
   return rows.map((row) => parseArticle(row as Record<string, unknown>));
 }
 
@@ -1231,11 +1237,6 @@ export async function purgeExpiredSourceContent(db: Db, options: { execute?: boo
   });
 }
 
-async function submissionCount(db: Db, condition: "ip" | "session" | "account" | "global", identity?: string): Promise<number> {
-  const rows = await db`SELECT public_submission_count(${condition}, ${identity ?? null})::int AS count`;
-  return Number(rows[0]?.count ?? 0);
-}
-
 function validIdentityHash(value: string): boolean {
   return /^[a-f0-9]{64}$/i.test(value);
 }
@@ -1275,35 +1276,25 @@ export async function createQuarantinedSubmission(db: Db, input: {
     await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`public-submission:session:${input.submitterSessionHash}:${minuteBucket}`}, 0))`;
     if (accountId) await transaction`SELECT pg_advisory_xact_lock(hashtextextended(${`public-submission:account:${accountId}:${Math.floor(Date.now() / 86_400_000)}`}, 0))`;
 
-    const duplicate = await transaction`
-      SELECT public_submission_duplicate_id(${submission.collectionId}, ${input.submitterSessionHash}, ${contentHash}) AS id
-    `;
-    if (duplicate[0]?.id) return { id: duplicate[0].id as string, duplicate: true };
-
-    if (await submissionCount(transaction, "global") >= limits.globalPerMinute
-      || await submissionCount(transaction, "ip", input.submitterIpHash) >= limits.perIpPerMinute
-      || await submissionCount(transaction, "session", input.submitterSessionHash) >= limits.perSessionPerMinute
-      || (accountId !== null && await submissionCount(transaction, "account", accountId) >= limits.perAccountPerDay)) {
-      throw new SubmissionRateLimitError();
+    // The public role holds no INSERT on intake, moderation, or audit tables;
+    // public_submission_submit forces the initial quarantined state and the
+    // fixed system action/audit records inside the migration role's context.
+    try {
+      const result = await transaction`
+        SELECT public_submission_submit(
+          ${submission.collectionId}, ${accountId}, ${input.submitterSessionHash}, ${input.submitterIpHash},
+          ${submission.title ?? null}, ${submission.report}, ${transaction.json(submission.urls)}, ${transaction.json(submission.mediaRefs)},
+          ${contentHash}, ${retentionDays}, ${limits.perIpPerMinute}, ${limits.perSessionPerMinute},
+          ${limits.perAccountPerDay}, ${limits.globalPerMinute}
+        ) AS result
+      `;
+      const submitted = result[0]?.result as { id: string; duplicate: boolean } | undefined;
+      if (!submitted) throw new Error("Submission was not persisted");
+      return { id: submitted.id, duplicate: submitted.duplicate };
+    } catch (error) {
+      if ((error as { code?: string })?.code === "SR001") throw new SubmissionRateLimitError();
+      throw error;
     }
-
-    const submissionId = id("sub");
-    await transaction`
-      INSERT INTO public_submissions (
-        id, collection_id, submitter_account_id, submitter_session_hash, submitter_ip_hash,
-        title, report, urls, media_refs, content_hash, retention_until
-      ) VALUES (
-        ${submissionId}, ${submission.collectionId}, ${accountId}, ${input.submitterSessionHash}, ${input.submitterIpHash},
-        ${submission.title ?? null}, ${submission.report}, ${JSON.stringify(submission.urls)}, ${JSON.stringify(submission.mediaRefs)},
-        ${contentHash}, ${new Date(Date.now() + retentionDays * 86_400_000)}
-      )
-    `;
-    await transaction`
-      INSERT INTO submission_moderation_actions (id, submission_id, actor_id, action, notes)
-      VALUES (${id("subact")}, ${submissionId}, ${"system"}, ${"submitted"}, ${"Submission entered quarantine"})
-    `;
-    await audit(transaction, "system", "submission.quarantined", "public_submission", submissionId, "Unverified public submission");
-    return { id: submissionId, duplicate: false };
   });
 }
 

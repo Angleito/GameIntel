@@ -114,14 +114,18 @@ other compatible stores.
 ## Storage identity separation
 
 The reference deployment separates database capabilities by process. The
-public API login (`gameintel_public`) can read public data and insert
-quarantined submissions but has no UPDATE privileges. The operator API login
+public API login (`gameintel_public`) holds no table privileges at all on
+internal knowledge-base, article, moderation, or audit data: published
+articles are read through published-only SECURITY DEFINER functions and
+community intake is fenced in a submit function that always forces the
+initial quarantined state and its fixed system trail. The operator API login
 (`gameintel_operator`) can enqueue jobs and moderate or promote submissions
 but cannot create evidence reviews, article reviews, source policy reviews,
 media approvals, or published articles. Approving evidence and publishing
 content require the editor-only runtime login used by the operator CLI and
 publisher. A public-facing process never possesses storage permissions that
-allow it to directly approve evidence or publish content.
+allow it to approve evidence, publish content, read unpublished material, or
+forge intake/moderation records.
 
 ## Versioning
 
