@@ -15,6 +15,7 @@ import type {
   PublicSubmissionPurgeResult,
   PublicSubmissionRateLimits,
   SourceContentPurgeResult,
+  SourceDiscoverJobPayload,
   SourceIngestEnqueueResult,
   SourceIngestJobPayload,
 } from "@gameintel/contracts";
@@ -479,7 +480,7 @@ export async function getIngestionQueueStatus(db: Db, staleAfterMs = 30_000): Pr
         count(*) FILTER (WHERE status = 'dead')::int AS dead,
         min(available_at) FILTER (WHERE status = 'queued') AS oldest_queued_at
       FROM jobs
-      WHERE job_type = 'source_ingest'
+      WHERE job_type IN ('source_ingest', 'source_discover')
     `,
     db`
       SELECT
@@ -507,7 +508,7 @@ export async function listRecentIngestionJobs(db: Db, limit = 25): Promise<Inges
   const rows = await db`
     SELECT *
     FROM jobs
-    WHERE job_type = 'source_ingest'
+    WHERE job_type IN ('source_ingest', 'source_discover')
     ORDER BY updated_at DESC, job_key
     LIMIT ${limit}
   `;
@@ -536,6 +537,31 @@ export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPaylo
     LIMIT 1
   `;
   if (!existing.length) throw new Error("Source ingestion job was not persisted");
+  return { jobKey: existing[0].job_key as string, dedupeKey, duplicate: true, status: existing[0].status as string };
+}
+
+export async function enqueueSourceDiscoverJob(db: Db, input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
+  const collectionId = input.collectionId.trim();
+  const sourceId = input.sourceId.trim();
+  if (!collectionId || !sourceId) throw new Error("Source discovery jobs require a collection and source");
+  const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
+  const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
+  const jobKey = id("source_discover");
+  const dedupeKey = `source_discover:${collectionId}:${sourceId}:${hashText(feedUrl)}`;
+  const inserted = await db`
+    INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at, dedupe_key)
+    VALUES (${jobKey}, 'source_discover', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now(), ${dedupeKey})
+    ON CONFLICT (dedupe_key) WHERE status IN ('queued', 'running') DO NOTHING
+    RETURNING job_key, status
+  `;
+  if (inserted.length) return { jobKey, dedupeKey, duplicate: false, status: inserted[0].status as string };
+  const existing = await db`
+    SELECT job_key, status
+    FROM jobs
+    WHERE dedupe_key = ${dedupeKey} AND status IN ('queued', 'running')
+    LIMIT 1
+  `;
+  if (!existing.length) throw new Error("Source discovery job was not persisted");
   return { jobKey: existing[0].job_key as string, dedupeKey, duplicate: true, status: existing[0].status as string };
 }
 

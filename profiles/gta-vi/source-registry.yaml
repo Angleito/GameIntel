@@ -27,9 +27,11 @@ sources:
     publication_mode: normal
     public_citation_base: https://www.netflix.com/tudum/articles/grand-theft-auto-6-extended-first-look
     enabled: false
-  # Discovery sources: the scheduler runs the adapter's discover() against
-  # poll_url (the feed) on each cadence and enqueues every discovered item as
-  # its own ingestion job. The feed itself is never parsed as an article.
+  # Discovery sources: the scheduler enqueues a source_discover job for
+  # poll_url (the feed) on each cadence; the isolated ingestion worker fetches
+  # the feed, parses the items, and enqueues each item as its own ingestion
+  # job. The feed itself is never parsed as an article and the scheduler never
+  # fetches. RSS sources require discovery configuration.
   - id: rockstar-news-feed
     domains: [rockstargames.com]
     access: rss

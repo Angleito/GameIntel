@@ -73,6 +73,9 @@ export const SourceRegistryEntrySchema = z.object({
   if (entry.discovery !== undefined && entry.access !== "rss") {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["discovery"], message: "Discovery currently supports only rss sources" });
   }
+  if (entry.access === "rss" && entry.discovery === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["discovery"], message: "RSS sources require discovery configuration" });
+  }
   if (entry.discovery !== undefined && entry.poll_interval_seconds === undefined) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["discovery"], message: "Discovery sources require a poll cadence" });
   }

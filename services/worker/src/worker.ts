@@ -1,6 +1,7 @@
 import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/contracts";
 import { ingestUrl } from "@gameintel/newsroom";
 import { createServiceRuntime } from "@gameintel/newsroom/runtime";
+import { processDiscoveryJob } from "./discover.ts";
 import { runWorkerLoop, retryableWorkerError } from "./worker-loop.ts";
 
 function workerId(): string {
@@ -49,7 +50,7 @@ try {
     leaseMs: 60_000,
     isStopping: () => stopping,
     deps: {
-      claim: (workerId) => runtime.jobQueue.claimIngestionJob(workerId, ["source_ingest"], 60_000),
+      claim: (workerId) => runtime.jobQueue.claimIngestionJob(workerId, ["source_ingest", "source_discover"], 60_000),
       heartbeat: (currentJobKey, lastError) => runtime.jobQueue.heartbeatIngestionWorker({
         workerId: id,
         workerType: "source_ingest",
@@ -61,10 +62,13 @@ try {
       fail: (job, error, retryable) => runtime.jobQueue.failIngestionJob(job.jobKey, job.leaseToken ?? "", error, retryable),
     },
     processJob: async (job: IngestionJob, isLeaseLost: () => boolean) => {
-      if (job.jobType !== "source_ingest") throw new Error("Unsupported ingestion job");
+      if (job.jobType !== "source_ingest" && job.jobType !== "source_discover") throw new Error("Unsupported ingestion job");
       if (isLeaseLost()) throw new IngestionLeaseLostError(job.jobKey);
-      const payload = sourceIngestPayload(job.payload);
-      return ingestUrl(runtime, payload, { jobKey: job.jobKey, leaseToken: job.leaseToken ?? "" });
+      const fence = { jobKey: job.jobKey, leaseToken: job.leaseToken ?? "" };
+      if (job.jobType === "source_discover") {
+        return processDiscoveryJob(runtime, job, fence);
+      }
+      return ingestUrl(runtime, sourceIngestPayload(job.payload), fence);
     },
   });
 } finally {

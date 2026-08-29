@@ -261,13 +261,15 @@ The continuous scheduler (`services/worker/src/scheduler.ts`) enqueues due
 registered sources. Source cadence is `poll_interval_seconds` and the exact
 polling endpoint is `poll_url` in the profile registry (validated against the
 registered domains; distinct from `public_citation_base`, which is what
-readers may cite). The scheduler only enqueues; the isolated ingestion worker
+readers may cite). The scheduler never fetches: the isolated ingestion worker
 performs controlled fetches through the injected fetch transport, and the
 pacing layer (`rpm`) governs when requests are actually allowed.
 
-RSS discovery sources (`discovery: { adapter: rss, enabled: true }`) are
-discovered on each cadence: every feed item is enqueued as its own ingestion
-job, deduplicated while active, and safely re-refreshable afterward.
+RSS discovery sources (`discovery: { adapter: rss, enabled: true }`) receive a
+`source_discover` job on each cadence. The ingestion worker fetches the feed
+through the egress proxy, parses the items, and enqueues each item as its own
+ingestion job (deduplicated while active, safely re-refreshable afterward).
+The feed itself is never ingested as an article.
 
 ## Release Policy
 

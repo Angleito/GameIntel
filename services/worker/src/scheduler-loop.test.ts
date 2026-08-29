@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { JobQueue, SchedulableSource, SourceScheduler } from "@gameintel/contracts";
-import { processDueSources, type DiscoveryRunner } from "./scheduler-loop.ts";
+import { processDueSources } from "./scheduler-loop.ts";
 
 function fakeClock(initial = 1_000_000): { now: () => number; nowIso: () => string } {
   let now = initial;
@@ -27,14 +27,21 @@ function fakeScheduler(): SourceScheduler & { scheduled: string[] } {
   };
 }
 
-function fakeQueue(enqueueError?: Error): JobQueue & { enqueued: string[] } {
+function fakeQueue(enqueueError?: Error): JobQueue & { enqueued: string[]; discoverEnqueued: string[] } {
   const enqueued: string[] = [];
+  const discoverEnqueued: string[] = [];
   return {
     enqueued,
+    discoverEnqueued,
     enqueueSourceIngestJob: async (input) => {
       if (enqueueError) throw enqueueError;
       enqueued.push(input.sourceId);
       return { jobKey: `job-${input.sourceId}`, dedupeKey: `dedupe-${input.sourceId}`, duplicate: false, status: "queued" };
+    },
+    enqueueSourceDiscoverJob: async (input) => {
+      if (enqueueError) throw enqueueError;
+      discoverEnqueued.push(input.sourceId);
+      return { jobKey: `discover-${input.sourceId}`, dedupeKey: `dedupe-discover-${input.sourceId}`, duplicate: false, status: "queued" };
     },
     claimIngestionJob: async () => null,
     completeIngestionJob: async () => undefined,
@@ -79,6 +86,7 @@ describe("scheduler loop tick", () => {
         queue.enqueued.push(input.sourceId);
         return { jobKey: `job-${input.sourceId}`, dedupeKey: `dedupe-${input.sourceId}`, duplicate: false, status: "queued" };
       },
+      enqueueSourceDiscoverJob: async () => ({ jobKey: "discover", dedupeKey: "dedupe-discover", duplicate: false, status: "queued" }),
       claimIngestionJob: async () => null,
       completeIngestionJob: async () => undefined,
       failIngestionJob: async () => undefined,
@@ -95,38 +103,31 @@ describe("scheduler loop tick", () => {
     expect(scheduler.scheduled).toEqual(["ok"]);
   });
 
-  test("enqueues discovered references from a discovery source after its poll", async () => {
+  test("enqueues a source_discover job for discovery sources instead of ingesting the feed URL", async () => {
     const queue = fakeQueue();
     const scheduler = fakeScheduler();
-    const discovery = new Map<string, DiscoveryRunner>([
-      ["rss-feed", async function* () {
-        yield { externalId: "item-1", url: "https://example.com/rss-feed/item-1", title: "Item 1" };
-        yield { externalId: "item-2", url: "https://example.com/rss-feed/item-2", title: "Item 2" };
-      }],
-    ]);
     const rssSource = { ...source("rss-feed"), discoveryAdapter: "rss" as const };
-    await processDueSources({ due: [rssSource], jobQueue: queue, clock: fakeClock(), scheduler, discovery });
-    expect(queue.enqueued).toEqual(["rss-feed", "rss-feed", "rss-feed"]);
+    await processDueSources({ due: [rssSource], jobQueue: queue, clock: fakeClock(), scheduler });
+    expect(queue.enqueued).toEqual([]);
+    expect(queue.discoverEnqueued).toEqual(["rss-feed"]);
     expect(scheduler.scheduled).toEqual(["rss-feed"]);
   });
 
-  test("marks the source scheduled even when discovery yields nothing or fails", async () => {
+  test("enqueues poll_url ingestion jobs for non-discovery sources", async () => {
     const queue = fakeQueue();
     const scheduler = fakeScheduler();
-    const discovery = new Map<string, DiscoveryRunner>([
-      ["empty-feed", async function* () {}],
-      ["broken-feed", async function* () {
-        throw new Error("feed unavailable");
-      }],
-    ]);
-    await processDueSources({
-      due: [{ ...source("empty-feed"), discoveryAdapter: "rss" }, { ...source("broken-feed"), discoveryAdapter: "rss" }],
-      jobQueue: queue,
-      clock: fakeClock(),
-      scheduler,
-      discovery,
-    });
-    expect(queue.enqueued).toEqual(["empty-feed", "broken-feed"]);
-    expect(scheduler.scheduled).toEqual(["empty-feed", "broken-feed"]);
+    await processDueSources({ due: [source("scrape-page")], jobQueue: queue, clock: fakeClock(), scheduler });
+    expect(queue.enqueued).toEqual(["scrape-page"]);
+    expect(queue.discoverEnqueued).toEqual([]);
+    expect(scheduler.scheduled).toEqual(["scrape-page"]);
+  });
+
+  test("does not mark a discovery source scheduled when enqueueing its discover job fails", async () => {
+    const queue = fakeQueue(new Error("database unavailable"));
+    const scheduler = fakeScheduler();
+    const rssSource = { ...source("rss-feed"), discoveryAdapter: "rss" as const };
+    await processDueSources({ due: [rssSource], jobQueue: queue, clock: fakeClock(), scheduler });
+    expect(queue.discoverEnqueued).toEqual([]);
+    expect(scheduler.scheduled).toEqual([]);
   });
 });

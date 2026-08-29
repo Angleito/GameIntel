@@ -32,12 +32,15 @@ Two ingestion patterns are supported:
   worker performs the controlled fetch.
 - **Discover new items**: an RSS/API/index page whose items are queued
   individually. A registry source with `discovery: { adapter: rss,
-  enabled: true }` runs the adapter's `discover()` against the feed URL each
-  tick, and every discovered reference is enqueued as its own ingestion job.
-  The feed itself is never parsed as an article.
+  enabled: true }` gets a `source_discover` job on each cadence; the isolated
+  ingestion worker fetches the feed through the controlled fetch transport
+  (egress proxy, pacing, SSRF hardening), parses the items, and enqueues each
+  one as its own ingestion job. The feed itself is never ingested as an
+  article, and the scheduler stays networkless.
 
 `FixtureAdapter` is available for deterministic tests and development.
-`RssAdapter` implements the rss discovery adapter. Additional adapters
+`RssAdapter` implements the rss discovery adapter, and `parseRssFeed` is the
+shared pure XML parser used by discovery jobs. Additional adapters
 (filesystem, webhook, REST API, platform APIs) are added only when a
 demonstrated need exists.
 

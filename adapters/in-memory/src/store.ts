@@ -16,7 +16,7 @@ import type {
   SourceStrength,
   PublicationMode,
 } from "@gameintel/core";
-import type { SourceIngestJobPayload, SourceInput } from "@gameintel/contracts";
+import type { SourceDiscoverJobPayload, SourceIngestJobPayload, SourceInput } from "@gameintel/contracts";
 
 // In-memory adapter state. Records mirror the reference PostgreSQL schema.
 // The store is snapshot-cloned by `transaction` so rollback is a discard.
@@ -276,7 +276,7 @@ export type JobRecord = {
   jobKey: string;
   jobType: string;
   status: "queued" | "running" | "completed" | "dead";
-  payload: SourceIngestJobPayload;
+  payload: SourceIngestJobPayload | SourceDiscoverJobPayload;
   dedupeKey: string;
   priority: number;
   attempts: number;

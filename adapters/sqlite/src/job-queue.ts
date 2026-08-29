@@ -6,6 +6,7 @@ import {
   type IngestionQueueStatus,
   type IngestionWorkerHeartbeat,
   type JobQueue,
+  type SourceDiscoverJobPayload,
   type SourceIngestEnqueueResult,
   type SourceIngestJobPayload,
 } from "@gameintel/contracts";
@@ -78,6 +79,26 @@ export class SQLiteJobQueue implements JobQueue {
     this.db.query(
       `INSERT INTO jobs (job_key, job_type, status, payload, dedupe_key, priority, attempts, max_attempts, available_at, leased_by, lease_token, lease_expires_at, last_error, result, created_at, updated_at, completed_at)
        VALUES (?, 'source_ingest', 'queued', ?, ?, 100, 0, 5, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL)`,
+    ).run(jobKey, json(payload), dedupeKey, now, now, now);
+    return { jobKey, dedupeKey, duplicate: false, status: "queued" };
+  }
+
+  async enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
+    const collectionId = input.collectionId.trim();
+    const sourceId = input.sourceId.trim();
+    if (!collectionId || !sourceId) throw new Error("Source discovery jobs require a collection and source");
+    const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
+    const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
+    const jobKey = this.ids.generate("source_discover");
+    const dedupeKey = `source_discover:${collectionId}:${sourceId}:${hashText(feedUrl)}`;
+    const now = this.clock.now();
+    const existing = this.db.query(
+      "SELECT job_key, status FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running') LIMIT 1",
+    ).get(dedupeKey) as { job_key: string; status: string } | null;
+    if (existing) return { jobKey: existing.job_key, dedupeKey, duplicate: true, status: existing.status as "queued" | "running" };
+    this.db.query(
+      `INSERT INTO jobs (job_key, job_type, status, payload, dedupe_key, priority, attempts, max_attempts, available_at, leased_by, lease_token, lease_expires_at, last_error, result, created_at, updated_at, completed_at)
+       VALUES (?, 'source_discover', 'queued', ?, ?, 100, 0, 5, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, NULL)`,
     ).run(jobKey, json(payload), dedupeKey, now, now, now);
     return { jobKey, dedupeKey, duplicate: false, status: "queued" };
   }
@@ -176,7 +197,7 @@ export class SQLiteJobQueue implements JobQueue {
         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
         SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) AS dead,
         MIN(CASE WHEN status = 'queued' THEN available_at END) AS oldest_queued
-       FROM jobs WHERE job_type = 'source_ingest'`,
+       FROM jobs WHERE job_type IN ('source_ingest', 'source_discover')`,
     ).get() as { queued: number | null; running: number | null; completed: number | null; dead: number | null; oldest_queued: number | null };
     const workers = this.db.query("SELECT * FROM ingestion_worker_heartbeats").all() as Array<{ worker_id: string; last_seen_at: number }>;
     return {

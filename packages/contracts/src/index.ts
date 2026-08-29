@@ -79,11 +79,22 @@ export type SourceIngestJobPayload = {
   profileId?: string;
 };
 
+// Discovery jobs are enqueued by the scheduler for discovery sources. The
+// isolated ingestion worker fetches the feed, parses items, and enqueues each
+// item as its own source_ingest job. The feed URL is never ingested as an
+// article.
+export type SourceDiscoverJobPayload = {
+  collectionId: string;
+  sourceId: string;
+  feedUrl: string;
+  profileId?: string;
+};
+
 export type IngestionJob = {
   jobKey: string;
   jobType: string;
   status: string;
-  payload: SourceIngestJobPayload;
+  payload: SourceIngestJobPayload | SourceDiscoverJobPayload;
   attempts: number;
   maxAttempts: number;
   leaseToken: string | null;
@@ -338,6 +349,7 @@ export interface GameIntelPersistence extends
 
 export interface JobQueue {
   enqueueSourceIngestJob(input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult>;
+  enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult>;
   claimIngestionJob(workerId: string, jobTypes?: string[], leaseMs?: number): Promise<IngestionJob | null>;
   completeIngestionJob(jobKey: string, leaseToken: string, result: unknown): Promise<void>;
   failIngestionJob(jobKey: string, leaseToken: string, error: unknown, retryable?: boolean): Promise<void>;
@@ -364,8 +376,8 @@ export type SchedulableSource = {
   url: string;
   profileId?: string;
   pollIntervalSeconds: number;
-  // Discovery adapter run against url (the feed) on each due tick; discovered
-  // references are enqueued as individual ingestion jobs.
+  // Discovery sources enqueue a source_discover job for url (the feed) on
+  // each due tick; the isolated ingestion worker performs the fetch.
   discoveryAdapter?: "rss" | null;
 };
 

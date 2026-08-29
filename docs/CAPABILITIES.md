@@ -68,6 +68,12 @@ executions never block future refreshes. Unchanged fetches create no revision
 churn; material changes create new immutable source revisions that propagate
 through affected evidence and publication state.
 
+Discovery is a queue behavior too: the scheduler enqueues `source_discover`
+jobs for feed sources, and the isolated ingestion worker fetches the feed,
+parses items, and enqueues each item as its own ingestion job. The feed URL is
+never ingested as an article, the scheduler never fetches, and discovery
+failures use the same retry/lease machinery as URL ingestion.
+
 ## Controlled fetch
 
 The `ControlledFetchTransport` capability enforces the GameIntel

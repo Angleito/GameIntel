@@ -6,6 +6,7 @@ import {
   type IngestionQueueStatus,
   type IngestionWorkerHeartbeat,
   type JobQueue,
+  type SourceDiscoverJobPayload,
   type SourceIngestEnqueueResult,
   type SourceIngestJobPayload,
 } from "@gameintel/contracts";
@@ -84,6 +85,42 @@ export class InMemoryJobQueue implements JobQueue {
     this.jobs.set(jobKey, {
       jobKey,
       jobType: "source_ingest",
+      status: "queued",
+      payload,
+      dedupeKey,
+      priority: 100,
+      attempts: 0,
+      maxAttempts: 5,
+      availableAt: now,
+      leasedBy: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      lastError: null,
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    });
+    return { jobKey, dedupeKey, duplicate: false, status: "queued" };
+  }
+
+  async enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
+    const collectionId = input.collectionId.trim();
+    const sourceId = input.sourceId.trim();
+    if (!collectionId || !sourceId) throw new Error("Source discovery jobs require a collection and source");
+    const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
+    const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
+    const jobKey = this.ids.generate("source_discover");
+    const dedupeKey = `source_discover:${collectionId}:${sourceId}:${hashText(feedUrl)}`;
+    for (const existing of this.jobs.values()) {
+      if (existing.dedupeKey === dedupeKey && (existing.status === "queued" || existing.status === "running")) {
+        return { jobKey: existing.jobKey, dedupeKey, duplicate: true, status: existing.status };
+      }
+    }
+    const now = this.clock.now();
+    this.jobs.set(jobKey, {
+      jobKey,
+      jobType: "source_discover",
       status: "queued",
       payload,
       dedupeKey,
@@ -202,7 +239,7 @@ export class InMemoryJobQueue implements JobQueue {
       throw new Error("Ingestion worker stale threshold must be between 1 second and 1 hour");
     }
     const now = this.clock.now();
-    const jobs = [...this.jobs.values()].filter((job) => job.jobType === "source_ingest");
+    const jobs = [...this.jobs.values()].filter((job) => job.jobType === "source_ingest" || job.jobType === "source_discover");
     const queued = jobs.filter((job) => job.status === "queued");
     const workers = [...this.heartbeats.values()];
     return {

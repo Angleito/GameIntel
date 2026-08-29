@@ -29,6 +29,7 @@ import {
   createEvent,
   createQuarantinedSubmission,
   enqueueSourceIngestJob,
+  enqueueSourceDiscoverJob,
   ensureGame,
   ensureSource,
   failIngestionJob,
@@ -185,6 +186,7 @@ export class PostgresJobQueue implements JobQueue {
   constructor(private readonly handle: Db) {}
 
   enqueueSourceIngestJob = (input: Parameters<typeof enqueueSourceIngestJob>[1]) => enqueueSourceIngestJob(this.handle, input);
+  enqueueSourceDiscoverJob = (input: Parameters<typeof enqueueSourceDiscoverJob>[1]) => enqueueSourceDiscoverJob(this.handle, input);
   claimIngestionJob = (workerId: string, jobTypes?: string[], leaseMs?: number) => claimIngestionJob(this.handle, workerId, jobTypes, leaseMs);
   completeIngestionJob = (jobKey: string, leaseToken: string, result: unknown) => completeIngestionJob(this.handle, jobKey, leaseToken, result);
   failIngestionJob = (jobKey: string, leaseToken: string, error: unknown, retryable?: boolean) =>

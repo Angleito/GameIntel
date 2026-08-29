@@ -190,8 +190,11 @@ material.
 ## URL intake
 
 URL and RSS intake are operator-only. Operator requests enqueue a durable
-job; only the isolated ingestion worker may fetch it. The URL must match an
-enabled source in the active profile's source registry. The fetcher checks
+job; only the isolated ingestion worker may fetch it. Feed discovery is the
+same model: the scheduler enqueues `source_discover` jobs, and the ingestion
+worker fetches the feed through the controlled transport and enqueues each
+item as its own ingestion job. The URL must match an enabled source in the
+active profile's source registry. The fetcher checks
 HTTP(S), registered domains, redirects, public DNS addresses, content type,
 response size, timeouts, and globally coordinated per-source request pacing.
 It does not bypass paywalls, authentication, CAPTCHAs, DRM, or rate limits,
