@@ -6,6 +6,7 @@ COPY --chown=bun:bun packages ./packages
 COPY --chown=bun:bun services ./services
 COPY --chown=bun:bun scripts ./scripts
 COPY --chown=bun:bun config ./config
+RUN chown bun:bun /app
 USER bun
 RUN bun install --frozen-lockfile
 EXPOSE 3000

@@ -1,6 +1,19 @@
-import { PublicHttpUrlSchema, type NormalizedSourceItem, type SourceStrength } from "@gameintel/core";
+import {
+  effectivePublicationMode,
+  PublicHttpUrlSchema,
+  trustClassificationFor,
+  type NormalizedSourceItem,
+  type SourceStrength,
+} from "@gameintel/core";
 import { loadSourceRegistry, sourceRegistryPath, type SourceRegistryEntry } from "@gameintel/config";
-import { createDb, type Db } from "@gameintel/db";
+import {
+  acquireSourceFetchSlot,
+  ensureSource,
+  getPublicSubmissionForPromotion,
+  inTransaction,
+  markPublicSubmissionPromoted,
+  type Db,
+} from "@gameintel/db";
 import { createManualSourceItem, fetchPermittedUrl, parseArticleHtml } from "@gameintel/source-sdk";
 import { processNormalizedItem } from "./pipeline.ts";
 
@@ -19,7 +32,7 @@ async function sourceFor(entry: RegistryEntry, citationUrl: string | null = null
      canonicalUrl: entry.domains[0] ? `https://${entry.domains[0]}` : `urn:gameintelgg:source:${entry.id}`,
     publicCitationUrl,
     sourceStrength: entry.source_strength,
-     publicationMode: entry.publication_mode,
+    publicationMode: effectivePublicationMode(entry.source_strength, entry.publication_mode),
     policy: {
       accessMode: entry.access,
       requestsPerMinute: entry.rpm,
@@ -27,6 +40,10 @@ async function sourceFor(entry: RegistryEntry, citationUrl: string | null = null
       mayStoreFullText: false,
       attributionRequired: true,
       termsReviewedAt: "2026-08-27",
+      evidenceReview: entry.evidence_review ?? {
+        minimumApprovals: 1,
+        preventSubmitterApproval: true,
+      },
     },
     enabled: entry.enabled,
   } as const;
@@ -34,6 +51,7 @@ async function sourceFor(entry: RegistryEntry, citationUrl: string | null = null
 
 function candidateClaim(item: NormalizedSourceItem, sourceStrength: SourceStrength): NormalizedSourceItem["claims"][number] {
   const value = item.text.split(/(?<=[.!?])\s+/, 1)[0].slice(0, 500) || item.text.slice(0, 500);
+  const trust = trustClassificationFor(sourceStrength);
   return {
     subject: item.title,
     predicate: "reports",
@@ -42,10 +60,11 @@ function candidateClaim(item: NormalizedSourceItem, sourceStrength: SourceStreng
     spoilerTags: [],
     exploitClass: null,
     evidenceLevel: "suspected",
-    attributionType: sourceStrength === "PRIMARY" ? "official" : "trusted_secondary",
+    attributionType: trust.attributionType,
     statement: null,
     editorialAssessment: null,
-    evidenceType: sourceStrength === "PRIMARY" ? "official_document" : sourceStrength === "UNVERIFIED" ? "community_report" : "trusted_reporting",
+    stance: "supports",
+    evidenceType: trust.evidenceType,
     excerpt: value,
     startMs: null,
     endMs: null,
@@ -53,13 +72,20 @@ function candidateClaim(item: NormalizedSourceItem, sourceStrength: SourceStreng
 }
 
 export async function ingestUrl(db: Db, input: { collectionId: string; sourceId: string; url: string; profileId?: string }): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
+  if (process.env.GAMEINTEL_FETCH_WORKER !== "true") {
+    throw new Error("Registered URL ingestion is restricted to the isolated ingestion worker");
+  }
   const entry = (await loadRegistry(input.profileId ? sourceRegistryPath(input.profileId) : undefined)).find((candidate) => candidate.id === input.sourceId);
   if (!entry) throw new Error(`Source ${input.sourceId} is not registered`);
   if (entry.access === "manual") throw new Error(`Source ${input.sourceId} does not permit URL ingestion`);
   const source = await sourceFor(entry, entry.public_citation_base ?? input.url);
+  await ensureSource(db, source);
+  const waitMs = await acquireSourceFetchSlot(db, entry.id, source.policy.requestsPerMinute);
+  if (waitMs) await Bun.sleep(waitMs);
   const fetched = await fetchPermittedUrl(input.url, {
     source: { id: entry.id, domains: entry.domains, access: entry.access, rpm: entry.rpm, userAgent: entry.userAgent, enabled: entry.enabled },
     sourcePolicy: source.policy,
+    proxyUrl: process.env.SOURCE_FETCH_PROXY_URL,
   });
   const parsed = parseArticleHtml(fetched.text);
   const item = {
@@ -72,17 +98,62 @@ export async function ingestUrl(db: Db, input: { collectionId: string; sourceId:
   return processNormalizedItem(db, item, source);
 }
 
-export async function ingestText(db: Db, input: { collectionId: string; sourceId: string; title: string; text: string; citationUrl?: string | null; inputKind: "pasted_text" | "local_file"; profileId?: string }): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
+export async function ingestText(db: Db, input: {
+  collectionId: string;
+  sourceId: string;
+  title: string;
+  text: string;
+  citationUrl?: string | null;
+  inputKind: "pasted_text" | "local_file";
+  profileId?: string;
+  submittedBy?: string | null;
+}): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
   const entry = (await loadRegistry(input.profileId ? sourceRegistryPath(input.profileId) : undefined)).find((candidate) => candidate.id === input.sourceId);
   if (!entry) throw new Error(`Source ${input.sourceId} is not registered`);
   if (entry.access !== "manual") throw new Error(`Source ${input.sourceId} requires URL ingestion`);
   const source = await sourceFor(entry, input.citationUrl ?? null);
   const item = createManualSourceItem({ sourceId: entry.id, collectionId: input.collectionId, title: input.title, text: input.text, citationUrl: input.citationUrl, inputKind: input.inputKind });
+  item.sourceStrength = entry.source_strength;
+  item.publicationMode = source.publicationMode;
   item.claims = [candidateClaim(item, entry.source_strength)];
-  return processNormalizedItem(db, item, source);
+  return processNormalizedItem(db, item, source, { submittedBy: input.submittedBy });
 }
 
-export async function ingestUrlWithNewDb(input: { collectionId: string; sourceId: string; url: string }) {
-  const db = createDb();
-  try { return await ingestUrl(db, input); } finally { await db.end({ timeout: 2 }); }
+// Public report promotion is deliberate and preserves its lower trust class.
+// It never fetches reporter URLs or creates a normal publication candidate.
+export async function promotePublicSubmission(db: Db, input: {
+  submissionId: string;
+  actorId: string;
+  notes?: string;
+  profileId?: string;
+}): Promise<{ submissionId: string; sourceItemId: string; eventId: string; duplicate: boolean }> {
+  if (!input.submissionId.trim()) throw new Error("A submission id is required");
+  if (!input.actorId.trim()) throw new Error("A promotion actor is required");
+  return inTransaction(db, async (transaction) => {
+    const submission = await getPublicSubmissionForPromotion(transaction, input.submissionId);
+    const profileId = input.profileId ?? submission.collectionId;
+    if (profileId !== submission.collectionId) throw new Error("Submission does not belong to the active collection");
+    const result = await ingestText(transaction, {
+      collectionId: submission.collectionId,
+      sourceId: "community-submission",
+      title: submission.title ?? `Community report ${submission.id.slice(-8)}`,
+      text: submission.report,
+      citationUrl: null,
+      inputKind: "pasted_text",
+      profileId,
+      submittedBy: input.actorId,
+    });
+    await markPublicSubmissionPromoted(transaction, {
+      submissionId: submission.id,
+      sourceItemId: result.sourceItemId,
+      actorId: input.actorId,
+      notes: input.notes,
+    });
+    return {
+      submissionId: submission.id,
+      sourceItemId: result.sourceItemId,
+      eventId: result.eventId,
+      duplicate: result.duplicate,
+    };
+  });
 }

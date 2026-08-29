@@ -14,6 +14,7 @@ export type RegisteredSource = {
 export type FetchPolicy = {
   source: RegisteredSource;
   sourcePolicy: SourcePolicy;
+  proxyUrl?: string;
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;
@@ -106,6 +107,17 @@ function limiterFor(sourceId: string): RateLimiter {
 export async function fetchPermittedUrl(value: string, policy: FetchPolicy): Promise<{ url: string; contentType: string; status: number; text: string }> {
   if (!policy.source.enabled) throw new Error(`Source ${policy.source.id} is disabled`);
   if (policy.sourcePolicy.accessMode !== "rss" && policy.sourcePolicy.accessMode !== "permitted_scrape" && policy.sourcePolicy.accessMode !== "official_api") throw new Error("Source policy does not permit network fetching");
+  const proxyUrl = policy.proxyUrl ?? process.env.SOURCE_FETCH_PROXY_URL;
+  if (!proxyUrl) throw new Error("SOURCE_FETCH_PROXY_URL is required for source fetching");
+  let proxy: URL;
+  try {
+    proxy = new URL(proxyUrl);
+  } catch {
+    throw new Error("SOURCE_FETCH_PROXY_URL must be a valid HTTP proxy URL");
+  }
+  if (proxy.protocol !== "http:" || proxy.username || proxy.password || proxy.pathname !== "/" || proxy.search || proxy.hash) {
+    throw new Error("SOURCE_FETCH_PROXY_URL must be an unauthenticated HTTP proxy origin");
+  }
   let url = assertRegisteredUrl(value, policy.source);
   let redirects = 0;
   while (true) {
@@ -115,7 +127,8 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy): Pro
       redirect: "manual",
       headers: { accept: "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, text/xml", "user-agent": policy.userAgent ?? policy.source.userAgent ?? "gameintelgg/0.1" },
       signal: AbortSignal.timeout(policy.timeoutMs ?? 15_000),
-    });
+      proxy: proxy.toString(),
+    } as RequestInit & { proxy: string });
     if (response.status >= 300 && response.status < 400) {
       if (++redirects > (policy.maxRedirects ?? 3)) throw new Error("Too many redirects");
       const location = response.headers.get("location");

@@ -1,7 +1,15 @@
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { CollectionProfileSchema, PublicHttpUrlSchema, SourcePolicySchema, SourceStrengthSchema, PublicationModeSchema, type CollectionProfile } from "@gameintel/core";
+import {
+  CollectionProfileSchema,
+  EvidenceReviewPolicySchema,
+  PublicHttpUrlSchema,
+  SourcePolicySchema,
+  SourceStrengthSchema,
+  PublicationModeSchema,
+  type CollectionProfile,
+} from "@gameintel/core";
 
 const RegisteredDomainSchema = z.string().regex(
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i,
@@ -26,6 +34,7 @@ export const SourceRegistryEntrySchema = z.object({
   userAgent: z.string().optional(),
   source_strength: SourceStrengthSchema,
   publication_mode: PublicationModeSchema,
+  evidence_review: EvidenceReviewPolicySchema.optional(),
   public_citation_base: PublicHttpUrlSchema.optional(),
   enabled: z.boolean(),
 }).superRefine((entry, context) => {

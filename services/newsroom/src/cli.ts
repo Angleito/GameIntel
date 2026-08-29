@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { loadProjectConfig } from "@gameintel/config";
+import { PublicSubmissionReviewDecisionSchema } from "@gameintel/core";
 import { loadFixture } from "./fixture.ts";
-import { ingestText, ingestUrl } from "./ingest.ts";
+import { ingestText, promotePublicSubmission } from "./ingest.ts";
 import {
   approveArticle,
   approveCoverMedia,
@@ -10,20 +11,25 @@ import {
   clearCoverMedia,
   closeDb,
   createDb,
+  enqueueSourceIngestJob,
   importMediaCatalog,
+  listArticleEvidence,
   listArticles,
   listCoverCandidates,
+  listPublicSubmissionsForModeration,
   markPublished,
   publicArticles,
   rejectCoverMedia,
   reviewArticle,
+  reviewEvidence,
+  reviewPublicSubmission,
   reviewSource,
   setCoverMedia,
 } from "@gameintel/db";
 import { processFixture } from "./pipeline.ts";
 
 const db = createDb();
-const operator = "local-operator";
+const operator = process.env.OPERATOR_ID ?? "local-operator";
 const [command, ...args] = process.argv.slice(2);
 const commandOptions = options(args);
 const project = await loadProjectConfig(new URL("../../../config/project.json", import.meta.url));
@@ -60,7 +66,9 @@ try {
     console.log(JSON.stringify(await processFixture(db, fixture, { allowFixture: true }), null, 2));
   } else if (command === "ingest-url") {
     const values = options(args);
-    console.log(JSON.stringify(await ingestUrl(db, { collectionId: collectionId(values), sourceId: required(values, "source"), url: required(values, "url"), profileId: values.profile as string | undefined }), null, 2));
+    console.log(JSON.stringify(await enqueueSourceIngestJob(db, {
+      collectionId: collectionId(values), sourceId: required(values, "source"), url: required(values, "url"), profileId: values.profile as string | undefined,
+    }), null, 2));
   } else if (command === "ingest-text") {
     const values = options(args);
     const text = values.stdin === true ? await new Response(Bun.stdin.stream()).text() : await readFile(required(values, "text-file"), "utf8");
@@ -69,6 +77,23 @@ try {
       title: (values.title as string | undefined) ?? "Operator note", text,
       citationUrl: (values["citation-url"] as string | undefined) ?? null,
       inputKind: values.stdin === true ? "pasted_text" : "local_file",
+      submittedBy: operator,
+    }), null, 2));
+  } else if (command === "list-submissions") {
+    console.log(JSON.stringify(await listPublicSubmissionsForModeration(db, profileId), null, 2));
+  } else if (command === "review-submission") {
+    if (!args[0]) throw new Error("Usage: newsroom review-submission <submission-id> --decision under_review|rejected|blocked [--notes <text>]");
+    const decision = PublicSubmissionReviewDecisionSchema.parse(required(commandOptions, "decision"));
+    console.log(JSON.stringify(await reviewPublicSubmission(db, {
+      submissionId: args[0], actorId: operator, decision,
+      notes: typeof commandOptions.notes === "string" ? commandOptions.notes : undefined,
+    }), null, 2));
+  } else if (command === "promote-submission") {
+    if (!args[0]) throw new Error("Usage: newsroom promote-submission <submission-id> [--notes <text>] [--profile <profile-id>]");
+    console.log(JSON.stringify(await promotePublicSubmission(db, {
+      submissionId: args[0], actorId: operator,
+      notes: typeof commandOptions.notes === "string" ? commandOptions.notes : undefined,
+      profileId,
     }), null, 2));
   } else if (command === "list") {
     console.log(JSON.stringify(await listArticles(db, profileId, false), null, 2));
@@ -105,8 +130,16 @@ try {
     console.log(`Selected cover for ${args[0]} cleared.`);
   } else if (command === "review-source") {
     if (!args[0]) throw new Error("Usage: newsroom review-source <source-id>");
-    await reviewSource(db, args[0], operator, "Reviewed by local operator");
-    console.log(`Source ${args[0]} approved.`);
+    await reviewSource(db, args[0], operator, "Source policy reviewed by local operator");
+    console.log(`Source policy ${args[0]} approved. This does not approve individual evidence.`);
+  } else if (command === "list-evidence") {
+    if (!args[0]) throw new Error("Usage: newsroom list-evidence <article-id>");
+    console.log(JSON.stringify(await listArticleEvidence(db, args[0]), null, 2));
+  } else if (command === "review-evidence") {
+    if (!args[0]) throw new Error("Usage: newsroom review-evidence <evidence-id> [--decision approved|rejected|disputed]");
+    const decision = typeof commandOptions.decision === "string" ? commandOptions.decision as "approved" | "rejected" | "disputed" : "approved";
+    await reviewEvidence(db, args[0], operator, decision, "Evidence reviewed by local operator");
+    console.log(`Evidence ${args[0]} marked ${decision}.`);
   } else if (command === "review-article") {
     if (!args[0]) throw new Error("Usage: newsroom review-article <article-id>");
     await reviewArticle(db, args[0], operator, "Reviewed by local operator");
@@ -122,7 +155,7 @@ try {
   } else if (command === "public-snapshot") {
     console.log(JSON.stringify(await publicArticles(db, profileId), null, 2));
   } else {
-    console.log("Commands: ingest <fixture.json> --allow-fixtures, ingest-url --collection <profile-id> --source <id> --url <url> [--profile <profile-id>], ingest-text --collection <profile-id> --source <id> --title <title> --text-file <path> [--citation-url <url>] [--profile <profile-id>], list [--profile <profile-id>], import-media <catalog.json>, list-cover-candidates <article-id>, set-cover <article-id> <media-id>, approve-media <media-id> | approve-media --all [--profile <profile-id>], approve-cover <article-id>, reject-cover <article-id>, clear-cover <article-id>, review-source <id>, review-article <id>, approve <id>, publish <id>, public-snapshot [--profile <profile-id>]");
+    console.log("Commands: ingest <fixture.json> --allow-fixtures, ingest-url --collection <profile-id> --source <id> --url <url> [--profile <profile-id>], ingest-text --collection <profile-id> --source <id> --title <title> --text-file <path> [--citation-url <url>] [--profile <profile-id>], list-submissions [--profile <profile-id>], review-submission <submission-id> --decision under_review|rejected|blocked [--notes <text>], promote-submission <submission-id> [--notes <text>] [--profile <profile-id>], list [--profile <profile-id>], import-media <catalog.json>, list-cover-candidates <article-id>, set-cover <article-id> <media-id>, approve-media <media-id> | approve-media --all [--profile <profile-id>], approve-cover <article-id>, reject-cover <article-id>, clear-cover <article-id>, review-source <id>, list-evidence <article-id>, review-evidence <id> [--decision approved|rejected|disputed], review-article <id>, approve <id>, publish <id>, public-snapshot [--profile <profile-id>]");
   }
 } finally {
   await closeDb(db);

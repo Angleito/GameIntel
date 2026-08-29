@@ -1,11 +1,25 @@
 import {
-  calculateConfidence,
+  effectivePublicationMode,
+  PublicationModeSchema,
   SourcePolicySchema,
+  SourceStrengthSchema,
+  trustClassificationFor,
   type AttributionType,
   type EvidenceLevel,
   type NormalizedSourceItem,
 } from "@gameintel/core";
-import { createArticleDraft, createEvent, ensureSource, inTransaction, insertClaim, insertSourceItem, recommendArticleCover, type Db } from "@gameintel/db";
+import {
+  createArticleDraft,
+  calculateClaimConfidence,
+  createEvent,
+  ensureSource,
+  inTransaction,
+  insertClaim,
+  insertSourceItem,
+  invalidateEvidenceApprovalsForSourceItem,
+  recommendArticleCover,
+  type Db,
+} from "@gameintel/db";
 import { OpenCodeRuntime, type ArticleDraft } from "@gameintel/ai-runtime";
 import { prepareIngestion } from "@gameintel/pipeline";
 import type { Fixture } from "@gameintel/source-sdk";
@@ -55,9 +69,25 @@ function citationLabel(type: AttributionType, sourceType: string): string {
 export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, source: {
   id: string; type: string; canonicalUrl: string; publicCitationUrl: string | null;
   sourceStrength: string; publicationMode: string; policy: unknown; enabled?: boolean;
-}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
+}, options: { submittedBy?: string | null } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
   if (!source.enabled) throw new Error(`Source ${source.id} is disabled by source policy`);
+  if (item.sourceId !== source.id) throw new Error("Source item does not match its source policy");
+  const sourceStrength = SourceStrengthSchema.parse(source.sourceStrength);
+  if (item.sourceStrength !== sourceStrength) throw new Error("Source item trust metadata must match its source policy");
   const policy = SourcePolicySchema.parse(source.policy);
+  const publicationMode = effectivePublicationMode(sourceStrength, PublicationModeSchema.parse(source.publicationMode));
+  const trust = trustClassificationFor(sourceStrength);
+  source = { ...source, sourceStrength, publicationMode, policy };
+  item = {
+    ...item,
+    sourceStrength,
+    publicationMode,
+    claims: item.claims.map((claim) => ({
+      ...claim,
+      attributionType: trust.attributionType,
+      evidenceType: trust.evidenceType,
+    })),
+  };
 
   return inTransaction(db, async (transaction) => {
   await ensureSource(transaction, source);
@@ -71,30 +101,30 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
     communityInterest: 0.4,
     searchInterest: 0.3,
   });
-  item = prepared.item;
-  const { lineageId } = prepared;
-  const inserted = await insertSourceItem(transaction, item, prepared.rawHash, lineageId, policy);
-  if (inserted.duplicate) return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: ["Source content was already ingested"] };
+   item = prepared.item;
+   const { lineageId } = prepared;
+    const inserted = await insertSourceItem(transaction, item, prepared.rawHash, lineageId, policy, options.submittedBy ?? null);
+   if (inserted.duplicate) return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: ["Source content was already ingested"] };
+   if (!inserted.revisionId) throw new Error("Changed source item did not create an evidence revision");
+   if (inserted.materialChange) await invalidateEvidenceApprovalsForSourceItem(transaction, inserted.id);
 
-  const score = prepared.newsworthiness;
-  const disposition = prepared.disposition;
-  const eventId = await createEvent(transaction, { collectionId: item.collectionId, sourceItemId: inserted.id, newsworthiness: score, disposition });
-  const claimIds: string[] = [];
-  for (const claim of item.claims) claimIds.push(await insertClaim(transaction, item, inserted.id, claim, lineageId));
+   const score = prepared.newsworthiness;
+   const disposition = prepared.disposition;
+   const eventId = await createEvent(transaction, { collectionId: item.collectionId, sourceItemId: inserted.id, newsworthiness: score, disposition });
+   const claimIds: string[] = [];
+   for (const claim of item.claims) {
+     claimIds.push(await insertClaim(transaction, item, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, claim, lineageId));
+   }
 
   if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal") {
     return { sourceItemId: inserted.id, eventId, articleId: null, disposition, duplicate: false, warnings: ["Source policy or public citation does not permit article output"] };
   }
 
-  const confidence = calculateConfidence(item.sourceStrength, item.claims.map((claim) => ({
-    sourceItemId: inserted.id,
-    stance: "supports" as const,
-    evidenceType: claim.evidenceType,
-    excerpt: claim.excerpt,
-    startMs: claim.startMs,
-    endMs: claim.endMs,
-    lineageId,
-  })), item.claims.every((claim) => Object.keys(claim.qualifiers).length > 0) ? 0.9 : 0.5);
+   const claimConfidences: number[] = [];
+   for (const claimId of claimIds) claimConfidences.push(await calculateClaimConfidence(transaction, claimId));
+   const confidence = claimConfidences.length
+     ? Math.round((claimConfidences.reduce((sum, value) => sum + value, 0) / claimConfidences.length) * 100) / 100
+     : 0;
   const safeClaims = item.claims.map((claim, index) => ({ claim, claimId: claimIds[index] })).filter(({ claim }) => claim.spoilerTags.length === 0);
   let aiDraft: ArticleDraft | null = null;
   if (process.env.OPENCODE_ENABLED === "true") {

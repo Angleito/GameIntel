@@ -20,11 +20,13 @@ build output, local databases, backups, certificates, `.dev.vars`, and
 ## Configuration And Secrets
 
 Before a deployment, replace all relevant template blanks with non-placeholder
-values in the deployment secret store. `POSTGRES_PASSWORD` and
-`LOCAL_OPERATOR_TOKEN` are required for the Compose API. Host-side Bun
-commands also require a `DATABASE_URL` with the same PostgreSQL credentials.
-Use a URL-safe PostgreSQL password because Compose constructs its internal
-database URL from that value.
+values in the deployment secret store. `POSTGRES_PASSWORD`,
+`APP_DATABASE_PASSWORD`, and `LOCAL_OPERATOR_TOKEN` are required for Compose.
+`POSTGRES_USER` is the DDL-capable migration principal; the API and ingestion
+worker use the separate `APP_DATABASE_USER` runtime principal. Host-side
+application commands use `DATABASE_URL`; host-side migrations use
+`MIGRATION_DATABASE_URL`. Use URL-safe PostgreSQL passwords because Compose
+constructs its internal database URLs from those values.
 
 R2 publishing additionally requires `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
 `R2_SECRET_ACCESS_KEY`, `R2_PRIVATE_BUCKET`, `R2_PUBLIC_BUCKET`, and

@@ -1,4 +1,4 @@
-import { closeDb, createDb, purgeExpiredSourceContent } from "@gameintel/db";
+import { closeDb, createDb, purgeExpiredPublicSubmissions, purgeExpiredSourceContent } from "@gameintel/db";
 
 const args = new Set(process.argv.slice(2));
 if ([...args].some((argument) => argument !== "--execute")) {
@@ -7,8 +7,12 @@ if ([...args].some((argument) => argument !== "--execute")) {
 
 const db = createDb();
 try {
-  const result = await purgeExpiredSourceContent(db, { execute: args.has("--execute") });
-  console.log(JSON.stringify(result));
+  const options = { execute: args.has("--execute") };
+  const [sourceContent, publicSubmissions] = await Promise.all([
+    purgeExpiredSourceContent(db, options),
+    purgeExpiredPublicSubmissions(db, options),
+  ]);
+  console.log(JSON.stringify({ sourceContent, publicSubmissions }));
 } finally {
   await closeDb(db);
 }

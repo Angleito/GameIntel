@@ -5,7 +5,7 @@ function checksum(value: string): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
 }
 
-const db = createDb();
+const db = createDb(process.env.MIGRATION_DATABASE_URL ?? process.env.DATABASE_URL);
 try {
   await db`SELECT pg_advisory_lock(hashtextextended('gameintelgg-schema-migrations', 0))`;
   await db`CREATE TABLE IF NOT EXISTS schema_migrations (version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(), filename text, checksum text)`;

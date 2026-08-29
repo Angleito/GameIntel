@@ -99,6 +99,8 @@ review is required before publication:
 ```bash
 bun run operator list
 bun run operator review-source <source-id>
+bun run operator list-evidence <article-id>
+bun run operator review-evidence <evidence-id>
 bun run operator review-article <article-id>
 bun run operator approve <article-id>
 bun run operator publish <article-id>
@@ -114,6 +116,13 @@ bun run operator ingest-url \
   --url https://www.rockstargames.com/VI
 ```
 
+URL intake returns a durable job rather than fetching synchronously. Run the
+Compose `ingest-worker` service and inspect a job with
+`GET /internal/operator/jobs/:jobKey`. The worker is isolated from the API and
+can reach registered source domains only through the configured egress proxy.
+`GET /internal/operator/jobs` exposes queue depth, dead-job counts, and worker
+heartbeats for operational alerting.
+
 For local text or an authorized excerpt:
 
 ```bash
@@ -127,6 +136,12 @@ bun run operator ingest-text \
 
 Sources are disabled by default until their access terms are reviewed. Raw
 source material and unapproved drafts are excluded from public artifacts.
+
+`review-source` records source-policy approval only. Each evidence record must
+be reviewed independently before editorial and publication approval can proceed.
+Public community submissions remain disabled unless
+`PUBLIC_SUBMISSIONS_ENABLED=true` is configured behind a trusted proxy and
+submission identity hashing is configured.
 
 ## Development
 

@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { canPublish, dispositionFor, PublicHttpUrlSchema, scoreNewsworthiness, toSafeArticle } from "./index";
+import {
+  canPublish,
+  calculateConfidence,
+  dispositionFor,
+  effectivePublicationMode,
+  PublicSubmissionReviewDecisionSchema,
+  PublicSubmissionSchema,
+  PublicSubmissionStateSchema,
+  PublicHttpUrlSchema,
+  scoreNewsworthiness,
+  toSafeArticle,
+  trustClassificationFor,
+} from "./index";
 
 describe("editorial rules", () => {
   test("scores and dispositions deterministically", () => {
@@ -15,6 +27,85 @@ describe("editorial rules", () => {
   test("requires every human publication gate", () => {
     expect(canPublish({ sourceReviewCompleted: true, editorReviewCompleted: true, articleSourcesComplete: true, approvedBy: "operator" })).toBe(true);
     expect(canPublish({ sourceReviewCompleted: true, editorReviewCompleted: true, articleSourcesComplete: false, approvedBy: "operator" })).toBe(false);
+  });
+
+  test("classifies every source strength deterministically", () => {
+    expect(trustClassificationFor("PRIMARY")).toEqual({
+      attributionType: "official",
+      evidenceType: "official_document",
+      initialPublicationMode: "normal",
+    });
+    expect(trustClassificationFor("DIRECT_EVIDENCE")).toEqual({
+      attributionType: "direct_evidence",
+      evidenceType: "independent_reproduction",
+      initialPublicationMode: "normal",
+    });
+    expect(trustClassificationFor("TRUSTED_SECONDARY")).toEqual({
+      attributionType: "trusted_secondary",
+      evidenceType: "trusted_reporting",
+      initialPublicationMode: "normal",
+    });
+    expect(trustClassificationFor("COMMUNITY")).toEqual({
+      attributionType: "community",
+      evidenceType: "community_report",
+      initialPublicationMode: "discussion_only",
+    });
+    expect(trustClassificationFor("UNVERIFIED")).toEqual({
+      attributionType: "unverified",
+      evidenceType: "community_report",
+      initialPublicationMode: "discussion_only",
+    });
+  });
+
+  test("never gives community strengths a normal publication mode", () => {
+    expect(effectivePublicationMode("COMMUNITY", "normal")).toBe("discussion_only");
+    expect(effectivePublicationMode("UNVERIFIED", "normal")).toBe("discussion_only");
+    expect(effectivePublicationMode("PRIMARY", "blocked")).toBe("blocked");
+  });
+
+  test("rejects public attempts to set trust or publication fields", () => {
+    expect(PublicSubmissionSchema.safeParse({
+      collectionId: "gta-vi",
+      report: "Rare vehicle appears behind Ocean Hotel around midnight.",
+      sourceStrength: "TRUSTED_SECONDARY",
+    }).success).toBe(false);
+    expect(PublicSubmissionSchema.parse({
+      collectionId: "gta-vi",
+      report: "Rare vehicle appears behind Ocean Hotel around midnight.",
+      urls: ["https://example.com/report"],
+    })).toEqual({
+      collectionId: "gta-vi",
+      report: "Rare vehicle appears behind Ocean Hotel around midnight.",
+      urls: ["https://example.com/report"],
+      mediaRefs: [],
+    });
+  });
+
+  test("limits submission review state changes to non-promotion decisions", () => {
+    expect(PublicSubmissionStateSchema.parse("under_review")).toBe("under_review");
+    expect(PublicSubmissionReviewDecisionSchema.safeParse("promoted").success).toBe(false);
+    expect(PublicSubmissionReviewDecisionSchema.parse("blocked")).toBe("blocked");
+  });
+
+  test("counts independent provenance families instead of repeated reports", () => {
+    const evidence = (familyId: string, stance: "supports" | "contradicts" = "supports") => ({
+      sourceItemId: `${familyId}-item`,
+      provenanceFamilyId: familyId,
+      stance,
+      evidenceType: "independent_reproduction" as const,
+      excerpt: "Observed under the reported conditions.",
+      startMs: null,
+      endMs: null,
+      lineageId: `${familyId}-lineage`,
+    });
+    const oneFamily = calculateConfidence("COMMUNITY", [evidence("original")]);
+    const copiedTenTimes = calculateConfidence("COMMUNITY", Array.from({ length: 10 }, () => evidence("original")));
+    const independentReproduction = calculateConfidence("COMMUNITY", [evidence("original"), evidence("reproduction")]);
+    const contradiction = calculateConfidence("COMMUNITY", [evidence("original"), evidence("failed-reproduction", "contradicts")]);
+
+    expect(copiedTenTimes).toBe(oneFamily);
+    expect(independentReproduction).toBeGreaterThan(oneFamily);
+    expect(contradiction).toBeLessThan(oneFamily);
   });
 
   test("accepts only credential-free HTTP(S) URLs at public boundaries", () => {

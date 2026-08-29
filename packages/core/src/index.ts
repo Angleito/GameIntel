@@ -38,6 +38,12 @@ export type SourceStrength = z.infer<typeof SourceStrengthSchema>;
 export const PublicationModeSchema = z.enum(["normal", "discussion_only", "blocked"]);
 export type PublicationMode = z.infer<typeof PublicationModeSchema>;
 
+export const EvidenceReviewPolicySchema = z.object({
+  minimumApprovals: z.number().int().min(1).max(5).default(1),
+  preventSubmitterApproval: z.boolean().default(true),
+}).default({ minimumApprovals: 1, preventSubmitterApproval: true });
+export type EvidenceReviewPolicy = z.infer<typeof EvidenceReviewPolicySchema>;
+
 export const SourcePolicySchema = z.object({
   accessMode: z.enum(["official_api", "rss", "permitted_scrape", "provider_api", "manual"]),
   requestsPerMinute: z.number().nonnegative(),
@@ -45,6 +51,7 @@ export const SourcePolicySchema = z.object({
   mayStoreFullText: z.boolean(),
   attributionRequired: z.boolean(),
   termsReviewedAt: z.string().nullable(),
+  evidenceReview: EvidenceReviewPolicySchema,
 });
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>;
 
@@ -54,7 +61,14 @@ export type InputKind = z.infer<typeof InputKindSchema>;
 export const EvidenceLevelSchema = z.enum(["suspected", "corroborated", "confirmed", "disputed"]);
 export type EvidenceLevel = z.infer<typeof EvidenceLevelSchema>;
 
-export const AttributionTypeSchema = z.enum(["official", "trusted_secondary", "community", "reviewed_leak_reporting"]);
+export const AttributionTypeSchema = z.enum([
+  "official",
+  "direct_evidence",
+  "trusted_secondary",
+  "community",
+  "unverified",
+  "reviewed_leak_reporting",
+]);
 export type AttributionType = z.infer<typeof AttributionTypeSchema>;
 
 export const CollectionProfileSchema = z.object({
@@ -90,6 +104,7 @@ export type Source = z.infer<typeof SourceSchema>;
 
 export const EvidenceSchema = z.object({
   sourceItemId: z.string(),
+  provenanceFamilyId: z.string().optional(),
   stance: z.enum(["supports", "contradicts", "context"]),
   evidenceType: z.enum([
     "official_document",
@@ -107,6 +122,71 @@ export const EvidenceSchema = z.object({
 });
 export type Evidence = z.infer<typeof EvidenceSchema>;
 
+export const SourceTrustClassificationSchema = z.object({
+  attributionType: AttributionTypeSchema,
+  evidenceType: EvidenceSchema.shape.evidenceType,
+  initialPublicationMode: PublicationModeSchema,
+});
+export type SourceTrustClassification = z.infer<typeof SourceTrustClassificationSchema>;
+
+export const EvidenceReviewDecisionSchema = z.enum(["approved", "rejected", "disputed"]);
+export type EvidenceReviewDecision = z.infer<typeof EvidenceReviewDecisionSchema>;
+
+export const SourcePolicyReviewDecisionSchema = z.enum(["approved", "rejected", "revoked"]);
+export type SourcePolicyReviewDecision = z.infer<typeof SourcePolicyReviewDecisionSchema>;
+
+export const ProvenanceRelationshipSchema = z.enum([
+  "copied_from",
+  "quoted_from",
+  "derived_from",
+  "independent_reproduction",
+  "contradiction",
+  "same_media",
+  "same_source_family",
+]);
+export type ProvenanceRelationship = z.infer<typeof ProvenanceRelationshipSchema>;
+
+export const ProvenanceClusteringMethodSchema = z.enum(["automatic_exact", "manual", "declared"]);
+export type ProvenanceClusteringMethod = z.infer<typeof ProvenanceClusteringMethodSchema>;
+
+const sourceTrustClassifications: Record<SourceStrength, SourceTrustClassification> = {
+  PRIMARY: {
+    attributionType: "official",
+    evidenceType: "official_document",
+    initialPublicationMode: "normal",
+  },
+  DIRECT_EVIDENCE: {
+    attributionType: "direct_evidence",
+    evidenceType: "independent_reproduction",
+    initialPublicationMode: "normal",
+  },
+  TRUSTED_SECONDARY: {
+    attributionType: "trusted_secondary",
+    evidenceType: "trusted_reporting",
+    initialPublicationMode: "normal",
+  },
+  COMMUNITY: {
+    attributionType: "community",
+    evidenceType: "community_report",
+    initialPublicationMode: "discussion_only",
+  },
+  UNVERIFIED: {
+    attributionType: "unverified",
+    evidenceType: "community_report",
+    initialPublicationMode: "discussion_only",
+  },
+};
+
+// Trust metadata is derived from the source policy, never from a submitted claim.
+export function trustClassificationFor(sourceStrength: SourceStrength): SourceTrustClassification {
+  return sourceTrustClassifications[sourceStrength];
+}
+
+export function effectivePublicationMode(sourceStrength: SourceStrength, configuredMode: PublicationMode): PublicationMode {
+  const classification = trustClassificationFor(sourceStrength);
+  return classification.initialPublicationMode === "discussion_only" ? "discussion_only" : configuredMode;
+}
+
 export const ClaimSchema = z.object({
   id: z.string(),
   collectionId: z.string(),
@@ -117,7 +197,7 @@ export const ClaimSchema = z.object({
   spoilerTags: z.array(z.string()),
   exploitClass: z.string().nullable(),
   evidenceLevel: EvidenceLevelSchema.default("suspected"),
-  attributionType: AttributionTypeSchema.default("trusted_secondary"),
+  attributionType: AttributionTypeSchema.default("unverified"),
   statement: z.string().nullable().default(null),
   editorialAssessment: z.string().nullable().default(null),
   evidence: z.array(EvidenceSchema).min(1),
@@ -147,16 +227,46 @@ export const NormalizedSourceItemSchema = z.object({
     spoilerTags: z.array(z.string()).default([]),
      exploitClass: z.string().nullable().default(null),
      evidenceLevel: EvidenceLevelSchema.default("suspected"),
-     attributionType: AttributionTypeSchema.default("trusted_secondary"),
-     statement: z.string().nullable().default(null),
-     editorialAssessment: z.string().nullable().default(null),
-     evidenceType: EvidenceSchema.shape.evidenceType,
+      attributionType: AttributionTypeSchema.default("unverified"),
+      statement: z.string().nullable().default(null),
+      editorialAssessment: z.string().nullable().default(null),
+      stance: EvidenceSchema.shape.stance.default("supports"),
+      evidenceType: EvidenceSchema.shape.evidenceType,
     excerpt: z.string().max(1000),
     startMs: z.number().nonnegative().nullable().default(null),
     endMs: z.number().nonnegative().nullable().default(null),
   })).default([]),
 });
 export type NormalizedSourceItem = z.infer<typeof NormalizedSourceItemSchema>;
+
+// This is intentionally separate from NormalizedSourceItemSchema. Public
+// reporters describe what they observed; only trusted server workflows attach
+// source strength, claim confidence, attribution, or publication metadata.
+export const PublicSubmissionSchema = z.object({
+  collectionId: z.string().regex(/^[a-z0-9-]{1,64}$/, "Expected a collection id"),
+  title: z.string().trim().min(1).max(280).optional(),
+  report: z.string().trim().min(1).max(10_000),
+  urls: z.array(PublicHttpUrlSchema).max(3).default([]),
+  mediaRefs: z.array(z.object({
+    uploadId: z.string().regex(/^upload_[a-zA-Z0-9_-]{16,128}$/, "Expected a staged upload reference"),
+  }).strict()).max(3).default([]),
+}).strict();
+export type PublicSubmission = z.infer<typeof PublicSubmissionSchema>;
+
+export const PublicSubmissionStateSchema = z.enum([
+  "quarantined",
+  "under_review",
+  "rejected",
+  "promoted",
+  "blocked",
+  "expired",
+]);
+export type PublicSubmissionState = z.infer<typeof PublicSubmissionStateSchema>;
+
+// Promotion is intentionally absent. It has its own operator-only workflow
+// that can enforce a reviewed submission and a non-publishable source policy.
+export const PublicSubmissionReviewDecisionSchema = z.enum(["under_review", "rejected", "blocked"]);
+export type PublicSubmissionReviewDecision = z.infer<typeof PublicSubmissionReviewDecisionSchema>;
 
 export const ArticleFactSchema = z.object({
   text: z.string(),
@@ -169,7 +279,7 @@ export const ArticleFactSchema = z.object({
 const ArticleFactInputSchema = z.preprocess((value) => typeof value === "string" ? {
   text: value,
   evidenceLevel: "suspected",
-  attributionType: "trusted_secondary",
+   attributionType: "unverified",
   claimIds: [],
   editorialAssessment: null,
 } : value, ArticleFactSchema);
@@ -296,18 +406,25 @@ export function calculateConfidence(
   evidence: Array<Evidence & { sourceStrength?: SourceStrength }>,
   conditionQuality = 0.5,
 ): number {
-  const lineages = new Set<string>();
+  const families = new Map<string, { support: number; contradiction: number }>();
+  for (const item of evidence) {
+    const familyId = item.provenanceFamilyId ?? item.lineageId;
+    const family = families.get(familyId) ?? { support: 0, contradiction: 0 };
+    if (item.stance === "contradicts") {
+      family.contradiction = Math.max(
+        family.contradiction,
+        item.evidenceType === "independent_reproduction" ? 0.15 : 0.25,
+      );
+    } else {
+      family.support = Math.max(family.support, evidenceWeight[item.evidenceType]);
+    }
+    families.set(familyId, family);
+  }
   let independent = 0;
   let contradiction = 0;
-  for (const item of evidence) {
-    if (item.stance === "contradicts") {
-      contradiction -= item.evidenceType === "independent_reproduction" ? 0.15 : 0.25;
-      continue;
-    }
-    if (!lineages.has(item.lineageId)) {
-      lineages.add(item.lineageId);
-      independent += evidenceWeight[item.evidenceType];
-    }
+  for (const family of families.values()) {
+    independent += family.support;
+    contradiction -= family.contradiction;
   }
   const logit = -1.4 + strengthPrior[strength] + independent + contradiction + 0.35 * conditionQuality;
   const confidence = 1 / (1 + Math.exp(-logit));
@@ -316,6 +433,16 @@ export function calculateConfidence(
 
 export function hashText(value: string): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+export function publicSubmissionFingerprint(submission: PublicSubmission): string {
+  return hashText(JSON.stringify({
+    collectionId: submission.collectionId,
+    title: submission.title ?? null,
+    report: submission.report,
+    urls: [...submission.urls].sort(),
+    mediaRefs: submission.mediaRefs.map((media) => media.uploadId).sort(),
+  }));
 }
 
 export function canonicalizeUrl(value: string): string {

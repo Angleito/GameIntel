@@ -18,13 +18,15 @@ const tudumSource = (id: string, enabled = true) => ({
 
 const tudumPolicy = (source = tudumSource("tudum-policy")) => ({
   source,
+  proxyUrl: "http://egress-proxy:3128",
   sourcePolicy: {
     accessMode: "permitted_scrape" as const,
     requestsPerMinute: source.rpm,
     retainRawTextDays: 2,
-    mayStoreFullText: false,
-    attributionRequired: true,
-    termsReviewedAt: "2026-08-27",
+     mayStoreFullText: false,
+     attributionRequired: true,
+     termsReviewedAt: "2026-08-27",
+     evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
   },
 });
 
@@ -102,13 +104,20 @@ describe("source intake policy", () => {
     });
   });
 
+  test("requires an explicit egress proxy for enabled sources", async () => {
+    const { proxyUrl: _proxyUrl, ...withoutProxy } = tudumPolicy(tudumSource("tudum-no-proxy"));
+    await expect(fetchPermittedUrl("https://www.netflix.com/tudum/articles/example", withoutProxy))
+      .rejects.toThrow("SOURCE_FETCH_PROXY_URL is required");
+  });
+
   test("accepts same-domain redirects", async () => {
     const source = tudumSource("tudum-same-domain-redirect");
     const responses = [
       new Response(null, { status: 302, headers: { location: "https://www.netflix.com/tudum/articles/redirected" } }),
       htmlResponse(),
     ];
-    const fetched = await withFetchStub(async () => {
+    const fetched = await withFetchStub(async (_input, init) => {
+      expect((init as RequestInit & { proxy?: string }).proxy).toBe("http://egress-proxy:3128/");
       return responses.shift()!;
     }, () => fetchPermittedUrl("https://www.netflix.com/tudum/articles/original", tudumPolicy(source)));
 

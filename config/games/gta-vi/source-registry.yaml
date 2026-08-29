@@ -24,3 +24,10 @@ sources:
     source_strength: UNVERIFIED
     publication_mode: discussion_only
     enabled: true
+  - id: community-submission
+    domains: []
+    access: manual
+    rpm: 0
+    source_strength: COMMUNITY
+    publication_mode: discussion_only
+    enabled: true
