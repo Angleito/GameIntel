@@ -3,6 +3,16 @@
 The API exposes approved GameIntel output and a protected local ingestion
 surface.
 
+## Storage Identities
+
+The API runs two database connections. Public routes use the
+`gameintel_public` PostgreSQL role (reads plus quarantined submission intake,
+no UPDATE privileges). Operator routes use the `gameintel_operator` role,
+which can enqueue jobs and moderate or promote submissions but cannot create
+evidence reviews, article reviews, source policy reviews, media approvals, or
+published articles. Approving evidence and publishing content require the
+operator CLI with the editor-only runtime login.
+
 ## Public Routes
 
 - `GET /health` returns service, project, and active profile status.

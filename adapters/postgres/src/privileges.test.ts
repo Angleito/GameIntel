@@ -1,0 +1,179 @@
+import { describe, expect, test } from "bun:test";
+import { createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, closeDb, createDb, type Db } from "./index.ts";
+
+// Privilege-boundary tests for the local reference deployment. They assert
+// that the capability roles enforce the plan's hard rule: a public-facing
+// process cannot possess storage permissions that allow it to directly
+// approve evidence or publish content. Requires a migrated database and the
+// three API logins (GAMEINTEL_TEST_POSTGRES=true); skipped by default so
+// `bun test` runs without Docker or a database.
+
+const enabled = process.env.GAMEINTEL_TEST_POSTGRES === "true";
+
+function denied(run: () => Promise<unknown>): Promise<void> {
+  return run().then(
+    () => Promise.reject(new Error("Expected the database to deny this operation")),
+    (error: unknown) => {
+      const code = (error as { code?: string })?.code;
+      if (code !== "42501") throw error;
+    },
+  );
+}
+
+describe("PostgreSQL capability role privileges", () => {
+  if (!enabled) {
+    test("skipped; set GAMEINTEL_TEST_POSTGRES=true to run against the reference PostgreSQL deployment", () => {});
+    return;
+  }
+
+  const publicUrl = process.env.PUBLIC_DATABASE_URL;
+  const operatorUrl = process.env.OPERATOR_DATABASE_URL;
+  const runtimeUrl = process.env.DATABASE_URL;
+  const migrationUrl = process.env.MIGRATION_DATABASE_URL ?? runtimeUrl;
+  if (!publicUrl || !operatorUrl || !runtimeUrl || !migrationUrl) {
+    test("skipped; PUBLIC_DATABASE_URL, OPERATOR_DATABASE_URL, DATABASE_URL, and MIGRATION_DATABASE_URL are required", () => {});
+    return;
+  }
+
+  async function cleanup(): Promise<void> {
+    const db = createDb(migrationUrl);
+    try {
+      await db.begin(async (transaction) => {
+        await transaction`
+          DELETE FROM audit_log
+          WHERE target_type = 'public_submission' AND target_id IN (SELECT id FROM public_submissions WHERE collection_id = 'privilege-test')
+            OR (target_type = 'source' AND target_id = 'privilege-source')
+        `;
+        await transaction`DELETE FROM submission_moderation_actions WHERE submission_id IN (SELECT id FROM public_submissions WHERE collection_id = 'privilege-test')`;
+        await transaction`DELETE FROM public_submissions WHERE collection_id = 'privilege-test'`;
+        await transaction`DELETE FROM jobs WHERE payload::text LIKE '%privilege-test%'`;
+        await transaction`DELETE FROM source_policy_reviews WHERE source_id = 'privilege-source'`;
+        await transaction`DELETE FROM sources WHERE id = 'privilege-source'`;
+        await transaction`DELETE FROM games WHERE id = 'privilege-test'`;
+      });
+    } finally {
+      await closeDb(db);
+    }
+  }
+
+  async function setup(): Promise<void> {
+    const db = createDb(migrationUrl);
+    try {
+      await ensureGame(db, {
+        id: "privilege-test",
+        canonicalName: "Privilege Test",
+        aliases: [] as string[],
+        version: "1",
+        capabilities: { story: false, progression: false, onlineMode: false, map: false },
+        categories: ["test"],
+        spoilerSafeCategories: ["test"],
+        defaultExploitMode: "intended_only",
+        platforms: ["PC"],
+        sourceQueries: [],
+      });
+    } finally {
+      await closeDb(db);
+    }
+  }
+
+  test("public role can submit a quarantined community report", async () => {
+    await cleanup();
+    await setup();
+    const db = createDb(publicUrl);
+    try {
+      const result = await createQuarantinedSubmission(db, {
+        submission: {
+          collectionId: "privilege-test",
+          title: "Privilege test report",
+          report: "A community report used to prove the public intake surface.",
+          urls: [],
+          mediaRefs: [],
+        },
+        submitterSessionHash: "a".repeat(64),
+        submitterIpHash: "b".repeat(64),
+      });
+      expect(result.id).toMatch(/^sub_/);
+      expect(result.duplicate).toBe(false);
+    } finally {
+      await closeDb(db);
+      await cleanup();
+    }
+  });
+
+  test("public role can read published article surface", async () => {
+    const db = createDb(publicUrl);
+    try {
+      const articles = await db`SELECT id FROM articles WHERE game_id = 'privilege-test' LIMIT 1`;
+      expect(Array.isArray(articles)).toBe(true);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("public role cannot approve evidence, review articles, publish, or enqueue", async () => {
+    const db = createDb(publicUrl);
+    try {
+      await denied(() => db`INSERT INTO evidence_reviews (id, evidence_id, source_item_revision_id, reviewer_id, decision) VALUES ('x', 'y', 'z', 'operator', 'approved')`);
+      await denied(() => db`INSERT INTO reviews (id, target_type, target_id, reviewer_id, decision) VALUES ('x', 'article', 'y', 'operator', 'approved')`);
+      await denied(() => db`UPDATE articles SET status = 'published' WHERE id = 'none'`);
+      await denied(() => db`UPDATE public_submissions SET state = 'promoted' WHERE id = 'none'`);
+      await denied(() => db`INSERT INTO jobs (job_key, job_type, status, payload) VALUES ('x', 'source_ingest', 'queued', '{}')`);
+      await denied(() => db`INSERT INTO source_items (id, source_id, game_id, external_id, url, title, text_excerpt, raw_hash, lineage_id) VALUES ('x', 'y', 'privilege-test', 'z', 'u', 't', 'e', 'h', 'l')`);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("operator role can enqueue durable ingestion jobs", async () => {
+    await cleanup();
+    const db = createDb(operatorUrl);
+    try {
+      const result = await enqueueSourceIngestJob(db, {
+        collectionId: "privilege-test",
+        sourceId: "privilege-source",
+        url: "https://example.com/privilege",
+        profileId: "privilege-test",
+      });
+      expect(result.jobKey).toMatch(/^source_ingest_/);
+      expect(result.duplicate).toBe(false);
+    } finally {
+      await closeDb(db);
+      await cleanup();
+    }
+  });
+
+  test("operator role cannot create evidence reviews, article reviews, policy reviews, or media approvals", async () => {
+    const db = createDb(operatorUrl);
+    try {
+      await denied(() => db`INSERT INTO evidence_reviews (id, evidence_id, source_item_revision_id, reviewer_id, decision) VALUES ('x', 'y', 'z', 'operator', 'approved')`);
+      await denied(() => db`INSERT INTO reviews (id, target_type, target_id, reviewer_id, decision) VALUES ('x', 'article', 'y', 'operator', 'approved')`);
+      await denied(() => db`INSERT INTO source_policy_reviews (id, source_id, reviewer_id, decision) VALUES ('x', 'y', 'operator', 'approved')`);
+      await denied(() => db`INSERT INTO media_assets (id, game_id, collection, caption, review_status) VALUES ('x', 'privilege-test', 'c', 'cap', 'approved')`);
+      await denied(() => db`UPDATE media_assets SET review_status = 'approved' WHERE id = 'none'`);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  test("runtime role retains editorial write access", async () => {
+    await cleanup();
+    const db = createDb(runtimeUrl);
+    try {
+      await ensureSource(db, {
+        id: "privilege-source",
+        type: "operator-note",
+        canonicalUrl: "urn:gameintelgg:source:privilege-source",
+        publicCitationUrl: null,
+        sourceStrength: "COMMUNITY",
+        publicationMode: "evidence_only",
+        policy: { accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true } },
+        enabled: true,
+      });
+      await db`INSERT INTO source_policy_reviews (id, source_id, reviewer_id, decision, notes) VALUES ('privilege-policy-review', 'privilege-source', 'operator', 'approved', '')`;
+      await db`DELETE FROM source_policy_reviews WHERE id = 'privilege-policy-review'`;
+    } finally {
+      await closeDb(db);
+      await cleanup();
+    }
+  });
+});
