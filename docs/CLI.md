@@ -10,6 +10,7 @@ The root commands are:
 - `bun run operator list-submissions [--profile <id>]` lists retained public reports for moderation.
 - `bun run operator review-submission <id> --decision under_review|rejected|blocked` changes a quarantined report's moderation state.
 - `bun run operator promote-submission <id> [--profile <id>]` promotes a reviewed report as discussion-only community evidence.
+- `bun run operator review-source <id>` records source access metadata; it is not required for collection and does not approve evidence.
 - `bun run operator list [--profile <id>]` lists drafts and published records.
 - `bun run operator public-snapshot [--profile <id>]` prints approved output.
 - `bun run publish` writes the configured static publication artifact.

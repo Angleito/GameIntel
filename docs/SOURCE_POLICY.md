@@ -4,12 +4,19 @@ Source intake produces reusable normalized records before any article or other
 public output is generated. A source may be retained for research or data
 processing without being eligible for public article output.
 
-Only approved fixtures, official APIs, RSS feeds and registered web sources may
-enter the ingestion pipeline. Registered web sources may be scraped when their
-adapter is enabled. Adapters have a kill switch and are disabled by default
-unless their policy is configured. Fixture ingestion additionally requires the
-explicit `--allow-fixtures` local CLI flag and must only consume trusted test
-data.
+Only explicitly enabled fixtures, official APIs, RSS feeds and registered web
+sources may enter the ingestion pipeline. Registered web sources may be scraped
+when their adapter is enabled. Adapters have a kill switch and are disabled by
+default unless their registry entry enables them. Enabling a source is
+ingestion configuration, not evidence approval: collection may then run
+continuously without any editorial review. Fixture ingestion additionally
+requires the explicit `--allow-fixtures` local CLI flag and must only consume
+trusted test data.
+
+Access metadata such as a terms review date, retention rules and operator notes
+may be recorded per source (see `review-source`). That metadata is operational
+documentation. It is not a prerequisite for fetching an enabled source and it
+never approves evidence.
 
 Leak reporting may be discussed only through legitimate public reporting or
 official responses. Leaked assets, footage and direct leak URLs are never

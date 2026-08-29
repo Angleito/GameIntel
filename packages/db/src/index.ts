@@ -7,7 +7,11 @@ import {
   ArticleCoverMediaSchema,
   calculateConfidence,
   canonicalizeUrl,
+  ClaimStateSchema,
+  type ClaimState,
+  deriveClaimState,
   EvidenceReviewDecisionSchema,
+  evidenceReviewGate,
   hashText,
   type Evidence,
   type EvidenceReviewDecision,
@@ -259,8 +263,8 @@ export async function insertClaim(
     claimId = existing[0].id as string;
   } else {
     await db`
-      INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment)
-      VALUES (${claimId}, ${item.collectionId}, ${sourceItemId}, ${claim.subject}, ${claim.predicate}, ${claim.value}, ${JSON.stringify(claim.qualifiers)}, ${JSON.stringify(claim.spoilerTags)}, ${claim.exploitClass}, ${claim.evidenceLevel}, ${claim.attributionType}, ${claim.statement}, ${claim.editorialAssessment})
+      INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state)
+      VALUES (${claimId}, ${item.collectionId}, ${sourceItemId}, ${claim.subject}, ${claim.predicate}, ${claim.value}, ${JSON.stringify(claim.qualifiers)}, ${JSON.stringify(claim.spoilerTags)}, ${claim.exploitClass}, ${claim.evidenceLevel}, ${claim.attributionType}, ${claim.statement}, ${claim.editorialAssessment}, 'unverified')
     `;
   }
   const existingEvidence = await db`
@@ -499,23 +503,36 @@ export async function listRecentIngestionJobs(db: Db, limit = 25): Promise<Inges
   return rows.map((row) => parseJob(row as Record<string, unknown>));
 }
 
-export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPayload): Promise<{ jobKey: string; duplicate: boolean; status: string }> {
+export type SourceIngestEnqueueResult = {
+  jobKey: string;
+  dedupeKey: string;
+  duplicate: boolean;
+  status: string;
+};
+
+export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult> {
   const collectionId = input.collectionId.trim();
   const sourceId = input.sourceId.trim();
   if (!collectionId || !sourceId) throw new Error("Source ingestion jobs require a collection and source");
   const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
   const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
-  const jobKey = `source_ingest:${collectionId}:${sourceId}:${hashText(url)}`;
+  const jobKey = id("source_ingest");
+  const dedupeKey = `source_ingest:${collectionId}:${sourceId}:${hashText(url)}`;
   const inserted = await db`
-    INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at)
-    VALUES (${jobKey}, 'source_ingest', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now())
-    ON CONFLICT (job_key) DO NOTHING
+    INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at, dedupe_key)
+    VALUES (${jobKey}, 'source_ingest', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now(), ${dedupeKey})
+    ON CONFLICT (dedupe_key) WHERE status IN ('queued', 'running') DO NOTHING
     RETURNING job_key, status
   `;
-  if (inserted.length) return { jobKey, duplicate: false, status: inserted[0].status as string };
-  const existing = await db`SELECT status FROM jobs WHERE job_key = ${jobKey} LIMIT 1`;
+  if (inserted.length) return { jobKey, dedupeKey, duplicate: false, status: inserted[0].status as string };
+  const existing = await db`
+    SELECT job_key, status
+    FROM jobs
+    WHERE dedupe_key = ${dedupeKey} AND status IN ('queued', 'running')
+    LIMIT 1
+  `;
   if (!existing.length) throw new Error("Source ingestion job was not persisted");
-  return { jobKey, duplicate: true, status: existing[0].status as string };
+  return { jobKey: existing[0].job_key as string, dedupeKey, duplicate: true, status: existing[0].status as string };
 }
 
 export async function claimIngestionJob(
@@ -594,6 +611,19 @@ export async function failIngestionJob(db: Db, jobKey: string, leaseToken: strin
       WHERE job_key = ${jobKey}
     `;
   });
+}
+
+export async function renewIngestionJobLease(db: Db, jobKey: string, leaseToken: string, durationMs: number): Promise<boolean> {
+  if (!jobKey.trim() || !leaseToken.trim() || !Number.isInteger(durationMs) || durationMs < 1_000 || durationMs > 3_600_000) {
+    throw new Error("Invalid ingestion job lease renewal request");
+  }
+  const renewed = await db`
+    UPDATE jobs
+    SET lease_expires_at = now() + make_interval(secs => ${durationMs / 1000}), updated_at = now()
+    WHERE job_key = ${jobKey} AND status = 'running' AND lease_token = ${leaseToken}
+    RETURNING job_key
+  `;
+  return renewed.length > 0;
 }
 
 export async function getIngestionJob(db: Db, jobKey: string): Promise<IngestionJob | null> {
@@ -721,6 +751,7 @@ function timestamp(value: unknown): number {
 type EvidenceApprovalState = {
   approved: boolean;
   latestReviewAt: number;
+  blockedBy: "rejected" | "disputed" | null;
 };
 
 async function evidenceApprovalState(
@@ -730,14 +761,21 @@ async function evidenceApprovalState(
   policy: SourcePolicy,
 ): Promise<EvidenceApprovalState> {
   const reviews = await db`
-    SELECT DISTINCT ON (reviewer_id) decision, created_at
+    SELECT DISTINCT ON (reviewer_id) reviewer_id, decision, created_at
     FROM evidence_reviews
     WHERE evidence_id = ${evidenceId} AND source_item_revision_id = ${sourceItemRevisionId}
-    ORDER BY reviewer_id, created_at DESC, id DESC
+    ORDER BY reviewer_id, seq DESC
   `;
-  const approved = reviews.filter((review) => review.decision === "approved").length >= policy.evidenceReview.minimumApprovals;
+  const gate = evidenceReviewGate(
+    reviews.map((review) => ({
+      reviewerId: review.reviewer_id as string,
+      decision: review.decision as EvidenceReviewDecision,
+      createdAt: timestamp(review.created_at),
+    })),
+    policy.evidenceReview,
+  );
   const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestamp(review.created_at)), 0);
-  return { approved, latestReviewAt };
+  return { approved: gate.eligible, latestReviewAt, blockedBy: gate.blockedBy };
 }
 
 const sourceStrengthOrder: Record<SourceStrength, number> = {
@@ -931,7 +969,9 @@ export async function reviewSourcePolicy(
   });
 }
 
-// Kept as a compatibility entrypoint; it records source policy review only.
+// Kept as a compatibility entrypoint; it records source access metadata only.
+// Collection itself follows the registry enabled state and never requires this
+// record, so an editorial review cannot become an ingestion gate.
 export async function reviewSource(db: Db, sourceId: string, reviewerId: string, notes = ""): Promise<void> {
   await reviewSourcePolicy(db, sourceId, reviewerId, "approved", notes);
 }
@@ -981,6 +1021,35 @@ export async function reviewEvidence(
   });
 }
 
+export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimState> {
+  const rows = await db`
+    SELECT e.stance, e.provenance_family_id, item.source_strength, revision.is_current AS current_rev
+    FROM evidence e
+    JOIN source_items item ON item.id = e.source_item_id
+    JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
+    WHERE e.claim_id = ${claimId}
+  `;
+  const supportingFamilies = new Set<string>();
+  const contradictingFamilies = new Set<string>();
+  let strongest: SourceStrength = "UNVERIFIED";
+  for (const row of rows as Array<Record<string, unknown>>) {
+    const familyId = row.provenance_family_id as string | null;
+    const strength = SourceStrengthSchema.parse(row.source_strength);
+    if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
+    if (!familyId) continue;
+    if (row.stance === "contradicts") contradictingFamilies.add(familyId);
+    else supportingFamilies.add(familyId);
+  }
+  const state = deriveClaimState({
+    supportingFamilies: supportingFamilies.size,
+    contradictingFamilies: contradictingFamilies.size,
+    strongestStrength: strongest,
+    hasCurrentEvidence: rows.some((row) => row.current_rev === true),
+  });
+  await db`UPDATE claims SET state = ${state} WHERE id = ${claimId}`;
+  return state;
+}
+
 export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceItemId: string): Promise<void> {
   const articles = await db`
     SELECT DISTINCT article_source.article_id
@@ -991,6 +1060,7 @@ export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceIte
   for (const article of articles) {
     const articleId = article.article_id as string;
     await refreshArticleEvidenceState(db, articleId);
+    await refreshArticleConfidence(db, articleId);
     await audit(db, "system", "evidence_review.invalidated", "article", articleId, "Underlying source evidence changed");
   }
 }

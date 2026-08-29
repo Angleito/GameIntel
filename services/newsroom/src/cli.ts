@@ -130,8 +130,8 @@ try {
     console.log(`Selected cover for ${args[0]} cleared.`);
   } else if (command === "review-source") {
     if (!args[0]) throw new Error("Usage: newsroom review-source <source-id>");
-    await reviewSource(db, args[0], operator, "Source policy reviewed by local operator");
-    console.log(`Source policy ${args[0]} approved. This does not approve individual evidence.`);
+    await reviewSource(db, args[0], operator, "Source access metadata reviewed by local operator");
+    console.log(`Access metadata recorded for source ${args[0]}. This does not approve evidence; collection follows the registry enabled state.`);
   } else if (command === "list-evidence") {
     if (!args[0]) throw new Error("Usage: newsroom list-evidence <article-id>");
     console.log(JSON.stringify(await listArticleEvidence(db, args[0]), null, 2));

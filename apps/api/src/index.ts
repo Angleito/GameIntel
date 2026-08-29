@@ -297,7 +297,7 @@ app.post("/internal/operator/ingest/url", async (c) => {
   if (body.gameId !== profile.id) return c.json({ error: "Game not found" }, 404);
   try {
     const job = await enqueueSourceIngestJob(db, { collectionId: body.gameId, sourceId: body.sourceId, url: body.url, profileId: profile.id });
-    return c.json({ jobId: job.jobKey, status: job.status, duplicate: job.duplicate }, job.duplicate ? 200 : 202);
+    return c.json({ jobId: job.jobKey, dedupeKey: job.dedupeKey, status: job.status, duplicate: job.duplicate }, job.duplicate ? 200 : 202);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Ingestion failed" }, 400);
   }

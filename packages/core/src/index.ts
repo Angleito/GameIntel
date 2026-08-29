@@ -61,6 +61,36 @@ export type InputKind = z.infer<typeof InputKindSchema>;
 export const EvidenceLevelSchema = z.enum(["suspected", "corroborated", "confirmed", "disputed"]);
 export type EvidenceLevel = z.infer<typeof EvidenceLevelSchema>;
 
+export const ClaimStateSchema = z.enum([
+  "unverified",
+  "supported",
+  "contested",
+  "confirmed",
+  "superseded",
+  "retracted",
+]);
+export type ClaimState = z.infer<typeof ClaimStateSchema>;
+
+export type ClaimStateInput = {
+  supportingFamilies: number;
+  contradictingFamilies: number;
+  strongestStrength: SourceStrength;
+  hasCurrentEvidence: boolean;
+  retracted?: boolean;
+};
+
+// Claim states describe what GameIntel currently believes, not permanent
+// truth. Evidence tied to superseded source revisions moves the claim to
+// superseded; contradictions make it contested; an explicit retraction wins.
+export function deriveClaimState(input: ClaimStateInput): ClaimState {
+  if (input.retracted) return "retracted";
+  if (!input.hasCurrentEvidence) return input.supportingFamilies + input.contradictingFamilies === 0 ? "unverified" : "superseded";
+  if (input.contradictingFamilies > 0) return "contested";
+  if (input.supportingFamilies === 0) return "unverified";
+  if (input.strongestStrength === "PRIMARY" || input.strongestStrength === "DIRECT_EVIDENCE") return "confirmed";
+  return "supported";
+}
+
 export const AttributionTypeSchema = z.enum([
   "official",
   "direct_evidence",
@@ -131,6 +161,38 @@ export type SourceTrustClassification = z.infer<typeof SourceTrustClassification
 
 export const EvidenceReviewDecisionSchema = z.enum(["approved", "rejected", "disputed"]);
 export type EvidenceReviewDecision = z.infer<typeof EvidenceReviewDecisionSchema>;
+
+export type EvidenceReviewVote = {
+  reviewerId: string;
+  decision: EvidenceReviewDecision;
+  createdAt: number;
+};
+
+export type EvidenceReviewGate = {
+  eligible: boolean;
+  approvedCount: number;
+  blockedBy: "rejected" | "disputed" | null;
+};
+
+// Conservative publication gate: the latest decision per reviewer wins. Any
+// currently rejected or disputed evidence is blocked from influencing
+// publication regardless of how many other reviewers approved it. A later
+// decision by the objecting reviewer can resolve the objection.
+export function evidenceReviewGate(
+  votes: EvidenceReviewVote[],
+  policy: Pick<EvidenceReviewPolicy, "minimumApprovals">,
+): EvidenceReviewGate {
+  const latest = new Map<string, { decision: EvidenceReviewDecision; createdAt: number }>();
+  for (const vote of votes) {
+    const current = latest.get(vote.reviewerId);
+    if (current === undefined || vote.createdAt >= current.createdAt) latest.set(vote.reviewerId, { decision: vote.decision, createdAt: vote.createdAt });
+  }
+  const decisions = [...latest.values()].map((review) => review.decision);
+  const approvedCount = decisions.filter((decision) => decision === "approved").length;
+  if (decisions.includes("rejected")) return { eligible: false, approvedCount, blockedBy: "rejected" };
+  if (decisions.includes("disputed")) return { eligible: false, approvedCount, blockedBy: "disputed" };
+  return { eligible: approvedCount >= policy.minimumApprovals, approvedCount, blockedBy: null };
+}
 
 export const SourcePolicyReviewDecisionSchema = z.enum(["approved", "rejected", "revoked"]);
 export type SourcePolicyReviewDecision = z.infer<typeof SourcePolicyReviewDecisionSchema>;

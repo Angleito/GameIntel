@@ -5,9 +5,12 @@ import {
   createDb,
   failIngestionJob,
   heartbeatIngestionWorker,
+  renewIngestionJobLease,
+  type IngestionJob,
   type SourceIngestJobPayload,
 } from "@gameintel/db";
 import { ingestUrl } from "./ingest.ts";
+import { runWorkerLoop, retryableWorkerError } from "./worker-loop.ts";
 
 function workerId(): string {
   return process.env.INGESTION_WORKER_ID ?? `ingest-worker-${crypto.randomUUID().slice(0, 8)}`;
@@ -33,11 +36,6 @@ function sourceIngestPayload(value: unknown): SourceIngestJobPayload {
   };
 }
 
-function retryable(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return !/(?:not registered|does not permit|disabled|restricted to the isolated|SOURCE_FETCH_PROXY_URL|required|payload is invalid)/i.test(message);
-}
-
 if (process.env.OPENCODE_ENABLED === "true") {
   throw new Error("The ingestion worker must not run AI drafting; use a separately isolated AI worker");
 }
@@ -54,33 +52,31 @@ process.on("SIGINT", () => { stopping = true; });
 
 try {
   await heartbeatIngestionWorker(db, { workerId: id, workerType: "source_ingest", currentJobKey: null, lastError: null });
-  while (!stopping) {
-    const job = await claimIngestionJob(db, id);
-    if (!job) {
-      await heartbeatIngestionWorker(db, { workerId: id, workerType: "source_ingest", currentJobKey: null });
-      await Bun.sleep(pollInterval());
-      continue;
-    }
-    try {
-      if (job.jobType !== "source_ingest" || !job.leaseToken) throw new Error("Unsupported ingestion job");
-      await heartbeatIngestionWorker(db, { workerId: id, workerType: "source_ingest", currentJobKey: job.jobKey, lastError: null });
-      const payload = sourceIngestPayload(job.payload);
-      const result = await ingestUrl(db, payload);
-      await completeIngestionJob(db, job.jobKey, job.leaseToken, result);
-      await heartbeatIngestionWorker(db, { workerId: id, workerType: "source_ingest", currentJobKey: null, lastError: null });
-      console.log(`Completed ingestion job ${job.jobKey}`);
-    } catch (error) {
-      if (!job.leaseToken) throw error;
-      await failIngestionJob(db, job.jobKey, job.leaseToken, error, retryable(error));
-      await heartbeatIngestionWorker(db, {
+  await runWorkerLoop({
+    workerId: id,
+    pollMs: pollInterval(),
+    leaseMs: 60_000,
+    isStopping: () => stopping,
+    deps: {
+      claim: (workerId) => claimIngestionJob(db, workerId, ["source_ingest"], 60_000),
+      heartbeat: (currentJobKey, lastError) => heartbeatIngestionWorker(db, {
         workerId: id,
         workerType: "source_ingest",
-        currentJobKey: null,
-        lastError: error instanceof Error ? error.message : String(error),
-      });
-      console.error(`Failed ingestion job ${job.jobKey}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
+        currentJobKey,
+        lastError: lastError === undefined ? null : lastError,
+      }),
+      renewLease: (job) => renewIngestionJobLease(db, job.jobKey, job.leaseToken ?? "", 60_000),
+      complete: (job, result) => completeIngestionJob(db, job.jobKey, job.leaseToken ?? "", result),
+      fail: (job, error, retryable) => failIngestionJob(db, job.jobKey, job.leaseToken ?? "", error, retryable),
+    },
+    processJob: async (job: IngestionJob) => {
+      if (job.jobType !== "source_ingest") throw new Error("Unsupported ingestion job");
+      const payload = sourceIngestPayload(job.payload);
+      return ingestUrl(db, payload);
+    },
+  });
 } finally {
   await closeDb(db);
 }
+
+export { retryableWorkerError };

@@ -55,7 +55,7 @@ function isPlaceholder(value: string): boolean {
     || /(?:^|[^a-z0-9])(?:change(?:[-_ ]?me)?|replace|placeholder|redacted|example|dummy|sample|your)(?:[^a-z0-9]|$)/i.test(normalized);
 }
 
-const namedSecretAssignment = /(?:^|[\n,])[ \t]*["']?(?:AWS_SECRET_ACCESS_KEY|CF_API_TOKEN|CLOUDFLARE_API_KEY|CLOUDFLARE_API_TOKEN|DAILY_SHUFFLE_SECRET|DATABASE_PASSWORD|GITHUB_TOKEN|LOCAL_OPERATOR_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|OPENCODE_PASSWORD|POSTGRES_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|SUPADATA_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:["']([^"'\r\n]*)["']|([^\s,#}\r\n]+))/gim;
+const namedSecretAssignment = /(?:^|[\n,])[ \t]*["']?(?:APP_DATABASE_PASSWORD|AWS_SECRET_ACCESS_KEY|CF_API_TOKEN|CLOUDFLARE_API_KEY|CLOUDFLARE_API_TOKEN|DAILY_SHUFFLE_SECRET|DATABASE_PASSWORD|GITHUB_TOKEN|LOCAL_OPERATOR_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|OPENCODE_PASSWORD|POSTGRES_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|SUBMISSION_IDENTITY_SECRET|SUPADATA_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:["']([^"'\r\n]*)["']|([^\s,#}\r\n]+))/gim;
 
 function isConfigurationText(path: string): boolean {
   return /(?:^|\/)(?:\.env(?:\.[^/]+)?|[^/]+\.(?:json|jsonc|yaml|yml))$/i.test(path);

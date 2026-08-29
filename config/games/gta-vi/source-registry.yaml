@@ -1,4 +1,7 @@
 sources:
+  # Enabling a source is ingestion configuration, not evidence approval.
+  # Optional access metadata: terms_reviewed_at, retain_raw_text_days,
+  # may_store_full_text. Collection never requires an editorial review record.
   - id: rockstar-official
     domains: [rockstargames.com]
     access: permitted_scrape

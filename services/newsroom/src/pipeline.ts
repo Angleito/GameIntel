@@ -18,6 +18,7 @@ import {
   insertSourceItem,
   invalidateEvidenceApprovalsForSourceItem,
   recommendArticleCover,
+  refreshClaimState,
   type Db,
 } from "@gameintel/db";
 import { OpenCodeRuntime, type ArticleDraft } from "@gameintel/ai-runtime";
@@ -115,6 +116,7 @@ export async function processNormalizedItem(db: Db, item: NormalizedSourceItem, 
    for (const claim of item.claims) {
      claimIds.push(await insertClaim(transaction, item, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, claim, lineageId));
    }
+   for (const claimId of claimIds) await refreshClaimState(transaction, claimId);
 
   if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal") {
     return { sourceItemId: inserted.id, eventId, articleId: null, disposition, duplicate: false, warnings: ["Source policy or public citation does not permit article output"] };

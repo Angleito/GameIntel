@@ -36,10 +36,10 @@ async function sourceFor(entry: RegistryEntry, citationUrl: string | null = null
     policy: {
       accessMode: entry.access,
       requestsPerMinute: entry.rpm,
-      retainRawTextDays: entry.access === "manual" ? 7 : 2,
-      mayStoreFullText: false,
+      retainRawTextDays: entry.retain_raw_text_days ?? (entry.access === "manual" ? 7 : 2),
+      mayStoreFullText: entry.may_store_full_text ?? false,
       attributionRequired: true,
-      termsReviewedAt: "2026-08-27",
+      termsReviewedAt: entry.terms_reviewed_at ?? null,
       evidenceReview: entry.evidence_review ?? {
         minimumApprovals: 1,
         preventSubmitterApproval: true,

@@ -36,6 +36,9 @@ export const SourceRegistryEntrySchema = z.object({
   publication_mode: PublicationModeSchema,
   evidence_review: EvidenceReviewPolicySchema.optional(),
   public_citation_base: PublicHttpUrlSchema.optional(),
+  terms_reviewed_at: z.string().nullable().optional(),
+  retain_raw_text_days: z.number().nonnegative().optional(),
+  may_store_full_text: z.boolean().optional(),
   enabled: z.boolean(),
 }).superRefine((entry, context) => {
   if (entry.access !== "manual" && entry.domains.length === 0) {
