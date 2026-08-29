@@ -67,10 +67,11 @@ describe("editorial rules", () => {
 
   test("derives claim states from evidence and revision currency", () => {
     expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", hasCurrentEvidence: false })).toBe("unverified");
+    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
     expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "COMMUNITY", hasCurrentEvidence: true })).toBe("supported");
     expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("confirmed");
     expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 1, strongestStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("contested");
-    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: false })).toBe("superseded");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
     expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: true, retracted: true })).toBe("retracted");
   });
 

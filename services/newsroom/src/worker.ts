@@ -5,6 +5,7 @@ import {
   createDb,
   failIngestionJob,
   heartbeatIngestionWorker,
+  IngestionLeaseLostError,
   renewIngestionJobLease,
   type IngestionJob,
   type SourceIngestJobPayload,
@@ -69,10 +70,11 @@ try {
       complete: (job, result) => completeIngestionJob(db, job.jobKey, job.leaseToken ?? "", result),
       fail: (job, error, retryable) => failIngestionJob(db, job.jobKey, job.leaseToken ?? "", error, retryable),
     },
-    processJob: async (job: IngestionJob) => {
+    processJob: async (job: IngestionJob, isLeaseLost: () => boolean) => {
       if (job.jobType !== "source_ingest") throw new Error("Unsupported ingestion job");
+      if (isLeaseLost()) throw new IngestionLeaseLostError(job.jobKey);
       const payload = sourceIngestPayload(job.payload);
-      return ingestUrl(db, payload);
+      return ingestUrl(db, payload, { jobKey: job.jobKey, leaseToken: job.leaseToken ?? "" });
     },
   });
 } finally {

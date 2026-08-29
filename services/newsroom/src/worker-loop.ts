@@ -1,4 +1,4 @@
-import type { IngestionJob } from "@gameintel/db";
+import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/db";
 
 export type WorkerLeaseDeps = {
   claim: (workerId: string) => Promise<IngestionJob | null>;
@@ -61,7 +61,7 @@ export async function runWorkerLoop(options: {
       console.log(`Completed ingestion job ${job.jobKey}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (leaseLost) {
+      if (leaseLost || error instanceof IngestionLeaseLostError) {
         console.error(`Lease lost for ingestion job ${job.jobKey}; stopping this execution: ${message}`);
         continue;
       }

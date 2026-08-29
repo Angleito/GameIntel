@@ -21,6 +21,7 @@ claimIngestionJob,
   getPublicSubmissionForModeration,
   heartbeatIngestionWorker,
   importMediaCatalog,
+  IngestionLeaseLostError,
   linkSourceItemProvenance,
   listArticleEvidence,
   listCoverCandidates,
@@ -41,7 +42,7 @@ claimIngestionJob,
 import type { Db } from "@gameintel/db";
 import { loadFixture } from "./fixture.ts";
 import { loadRegistry, promotePublicSubmission } from "./ingest.ts";
-import { processFixture } from "./pipeline.ts";
+import { processFixture, processNormalizedItem } from "./pipeline.ts";
 
 const fixturePath = fileURLToPath(new URL("../../../fixtures/sources/gta-vi-netflix-tudum.json", import.meta.url));
 const profilePath = fileURLToPath(new URL("../../../config/games/gta-vi/profile.json", import.meta.url));
@@ -205,6 +206,50 @@ describe("Tudum newsroom pipeline", () => {
         .rejects.toThrow("current source revision");
       await expect(reviewArticle(db, articleId, "second-editor", "Cannot review stale evidence"))
         .rejects.toThrow("current evidence approval");
+    });
+  });
+
+  test("derives claim state from current source revisions only", async () => {
+    await inRolledBackTransaction(async (db) => {
+      await ensureGame(db, profile);
+      const fixture = await testFixture();
+      const first = await processFixture(db, fixture, { allowFixture: true });
+      const states = async (sourceItemId: string) => {
+        const rows = await db`SELECT DISTINCT state FROM claims WHERE source_item_id = ${sourceItemId}`;
+        return rows.map((row) => row.state as string);
+      };
+      expect(await states(first.sourceItemId)).toEqual(["supported"]);
+
+      fixture.source.sourceStrength = "PRIMARY";
+      fixture.item.sourceStrength = "PRIMARY";
+      fixture.item.text = `${fixture.item.text} Official confirmation added.`;
+      const primary = await processFixture(db, fixture, { allowFixture: true });
+      expect(primary.duplicate).toBe(false);
+      expect(await states(primary.sourceItemId)).toEqual(["confirmed"]);
+
+      fixture.source.sourceStrength = "COMMUNITY";
+      fixture.item.sourceStrength = "COMMUNITY";
+      fixture.item.text = `${fixture.item.text} Community follow-up report.`;
+      const community = await processFixture(db, fixture, { allowFixture: true });
+      expect(community.duplicate).toBe(false);
+      expect(await states(community.sourceItemId)).toEqual(["supported"]);
+    });
+  });
+
+  test("marks claims superseded when a material change drops them", async () => {
+    await inRolledBackTransaction(async (db) => {
+      await ensureGame(db, profile);
+      const fixture = await testFixture();
+      const first = await processFixture(db, fixture, { allowFixture: true });
+      expect((await db`SELECT count(*)::int AS count FROM claims WHERE source_item_id = ${first.sourceItemId}`)[0].count).toBeGreaterThan(0);
+
+      fixture.item.claims = [];
+      fixture.item.text = `${fixture.item.text} The claims were removed from this revision.`;
+      const revised = await processFixture(db, fixture, { allowFixture: true });
+      expect(revised.duplicate).toBe(false);
+
+      const rows = await db`SELECT DISTINCT state FROM claims WHERE source_item_id = ${first.sourceItemId}`;
+      expect(rows.map((row) => row.state)).toEqual(["superseded"]);
     });
   });
 
@@ -695,6 +740,56 @@ describe("Tudum newsroom pipeline", () => {
         .rejects.toThrow("lease is no longer held");
 
       await completeIngestionJob(db, reclaimed!.jobKey, reclaimed!.leaseToken!, { disposition: "duplicate" });
+      expect(await getIngestionJob(db, enqueued.jobKey)).toMatchObject({ status: "completed" });
+    });
+  });
+
+  test("fences ingestion transactions against a reclaimed lease", async () => {
+    await inRolledBackTransaction(async (db) => {
+      await ensureGame(db, profile);
+      const fixture = await testFixture();
+      const enqueued = await enqueueSourceIngestJob(db, {
+        collectionId: "gta-vi",
+        sourceId: "netflix-tudum",
+        url: "https://www.netflix.com/tudum/articles/fenced-report",
+        profileId: "gta-vi",
+      });
+      const stalled = await claimIngestionJob(db, "stalled-worker", ["source_ingest"], 60_000);
+      await db`UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE job_key = ${stalled!.jobKey}`;
+      const reclaimed = await claimIngestionJob(db, "replacement-worker");
+      expect(reclaimed?.jobKey).toBe(enqueued.jobKey);
+
+      await expect(processNormalizedItem(db, { ...fixture.item, sourceId: fixture.source.id }, fixture.source, {
+        leaseFence: { jobKey: enqueued.jobKey, leaseToken: stalled!.leaseToken! },
+      })).rejects.toThrow(IngestionLeaseLostError);
+      expect((await db`SELECT count(*)::int AS count FROM source_items WHERE source_id = ${fixture.source.id} AND external_id = ${fixture.item.externalId}`)[0].count).toBe(0);
+      expect((await db`
+        SELECT count(*)::int AS count
+        FROM claims claim
+        JOIN source_items item ON item.id = claim.source_item_id
+        WHERE item.external_id = ${fixture.item.externalId}
+      `)[0].count).toBe(0);
+      expect(await getIngestionJob(db, enqueued.jobKey)).toMatchObject({ status: "running", lastError: null });
+    });
+  });
+
+  test("allows ingestion while the fence lease is still held", async () => {
+    await inRolledBackTransaction(async (db) => {
+      await ensureGame(db, profile);
+      const fixture = await testFixture();
+      const enqueued = await enqueueSourceIngestJob(db, {
+        collectionId: "gta-vi",
+        sourceId: "netflix-tudum",
+        url: "https://www.netflix.com/tudum/articles/fenced-success",
+        profileId: "gta-vi",
+      });
+      const leased = await claimIngestionJob(db, "worker-a", ["source_ingest"], 60_000);
+      const result = await processNormalizedItem(db, { ...fixture.item, sourceId: fixture.source.id }, fixture.source, {
+        leaseFence: { jobKey: enqueued.jobKey, leaseToken: leased!.leaseToken! },
+      });
+      expect(result.duplicate).toBe(false);
+      expect(result.articleId).not.toBeNull();
+      await completeIngestionJob(db, leased!.jobKey, leased!.leaseToken!, { disposition: result.disposition });
       expect(await getIngestionJob(db, enqueued.jobKey)).toMatchObject({ status: "completed" });
     });
   });

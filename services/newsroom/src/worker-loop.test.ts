@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { IngestionJob } from "@gameintel/db";
+import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/db";
 import { runWorkerLoop, retryableWorkerError, type WorkerLeaseDeps } from "./worker-loop.ts";
 
 function fakeJob(jobKey: string): IngestionJob {
@@ -98,6 +98,16 @@ describe("ingestion worker loop", () => {
       return { ok: true };
     });
     expect(completes).toBe(0);
+    expect(failures).toBe(0);
+  });
+
+  test("does not record a failure when the fence detects lease loss", async () => {
+    let failures = 0;
+    await runOnce({
+      fail: async () => { failures += 1; },
+    }, async () => {
+      throw new IngestionLeaseLostError("job-one");
+    });
     expect(failures).toBe(0);
   });
 

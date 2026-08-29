@@ -71,7 +71,7 @@ function candidateClaim(item: NormalizedSourceItem, sourceStrength: SourceStreng
   };
 }
 
-export async function ingestUrl(db: Db, input: { collectionId: string; sourceId: string; url: string; profileId?: string }): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
+export async function ingestUrl(db: Db, input: { collectionId: string; sourceId: string; url: string; profileId?: string }, fence?: { jobKey: string; leaseToken: string }): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
   if (process.env.GAMEINTEL_FETCH_WORKER !== "true") {
     throw new Error("Registered URL ingestion is restricted to the isolated ingestion worker");
   }
@@ -95,7 +95,7 @@ export async function ingestUrl(db: Db, input: { collectionId: string; sourceId:
     contentType: fetched.contentType, language: parsed.language, claims: [],
   } as NormalizedSourceItem;
   item.claims = [candidateClaim(item, entry.source_strength)];
-  return processNormalizedItem(db, item, source);
+  return processNormalizedItem(db, item, source, { leaseFence: fence ?? null });
 }
 
 export async function ingestText(db: Db, input: {

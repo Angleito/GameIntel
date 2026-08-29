@@ -76,6 +76,7 @@ export type ClaimStateInput = {
   contradictingFamilies: number;
   strongestStrength: SourceStrength;
   hasCurrentEvidence: boolean;
+  hasHistoricalEvidence?: boolean;
   retracted?: boolean;
 };
 
@@ -84,7 +85,7 @@ export type ClaimStateInput = {
 // superseded; contradictions make it contested; an explicit retraction wins.
 export function deriveClaimState(input: ClaimStateInput): ClaimState {
   if (input.retracted) return "retracted";
-  if (!input.hasCurrentEvidence) return input.supportingFamilies + input.contradictingFamilies === 0 ? "unverified" : "superseded";
+  if (!input.hasCurrentEvidence) return input.hasHistoricalEvidence ? "superseded" : "unverified";
   if (input.contradictingFamilies > 0) return "contested";
   if (input.supportingFamilies === 0) return "unverified";
   if (input.strongestStrength === "PRIMARY" || input.strongestStrength === "DIRECT_EVIDENCE") return "confirmed";

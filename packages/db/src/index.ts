@@ -578,6 +578,28 @@ export async function claimIngestionJob(
   });
 }
 
+export class IngestionLeaseLostError extends Error {
+  constructor(jobKey: string) {
+    super(`Ingestion job ${jobKey} lease is no longer held`);
+    this.name = "IngestionLeaseLostError";
+  }
+}
+
+// Fences an ingestion transaction against lease loss. The job row is locked
+// FOR UPDATE for the remainder of the transaction, so the reaper cannot
+// requeue or reclaim it mid-transaction. A worker whose lease was reclaimed
+// while stalled fails this check and its transaction rolls back.
+export async function assertIngestionJobLeaseHeld(db: Db, jobKey: string, leaseToken: string): Promise<void> {
+  if (!jobKey.trim() || !leaseToken.trim()) throw new Error("An ingestion job key and lease token are required");
+  const held = await db`
+    SELECT job_key
+    FROM jobs
+    WHERE job_key = ${jobKey} AND status = 'running' AND lease_token = ${leaseToken}
+    FOR UPDATE
+  `;
+  if (!held.length) throw new IngestionLeaseLostError(jobKey);
+}
+
 export async function completeIngestionJob(db: Db, jobKey: string, leaseToken: string, result: unknown): Promise<void> {
   const completed = await db`
     UPDATE jobs
@@ -586,7 +608,7 @@ export async function completeIngestionJob(db: Db, jobKey: string, leaseToken: s
     WHERE job_key = ${jobKey} AND status = 'running' AND lease_token = ${leaseToken}
     RETURNING job_key
   `;
-  if (!completed.length) throw new Error("Ingestion job lease is no longer held");
+  if (!completed.length) throw new IngestionLeaseLostError(jobKey);
 }
 
 export async function failIngestionJob(db: Db, jobKey: string, leaseToken: string, error: unknown, retryable = true): Promise<void> {
@@ -597,7 +619,7 @@ export async function failIngestionJob(db: Db, jobKey: string, leaseToken: strin
       WHERE job_key = ${jobKey} AND status = 'running' AND lease_token = ${leaseToken}
       FOR UPDATE
     `;
-    if (!jobs.length) throw new Error("Ingestion job lease is no longer held");
+    if (!jobs.length) throw new IngestionLeaseLostError(jobKey);
     const attempts = Number(jobs[0].attempts);
     const maxAttempts = Number(jobs[0].max_attempts);
     const terminal = !retryable || attempts >= maxAttempts;
@@ -1029,10 +1051,11 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
     JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
     WHERE e.claim_id = ${claimId}
   `;
+  const currentRows = rows.filter((row) => row.current_rev === true);
   const supportingFamilies = new Set<string>();
   const contradictingFamilies = new Set<string>();
   let strongest: SourceStrength = "UNVERIFIED";
-  for (const row of rows as Array<Record<string, unknown>>) {
+  for (const row of currentRows as Array<Record<string, unknown>>) {
     const familyId = row.provenance_family_id as string | null;
     const strength = SourceStrengthSchema.parse(row.source_strength);
     if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
@@ -1044,10 +1067,21 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
     supportingFamilies: supportingFamilies.size,
     contradictingFamilies: contradictingFamilies.size,
     strongestStrength: strongest,
-    hasCurrentEvidence: rows.some((row) => row.current_rev === true),
+    hasCurrentEvidence: currentRows.length > 0,
+    hasHistoricalEvidence: rows.length > 0,
   });
   await db`UPDATE claims SET state = ${state} WHERE id = ${claimId}`;
   return state;
+}
+
+// Refreshes every claim belonging to a source item, including claims that no
+// longer appear in the newest extraction. Claims persist across source
+// revisions, so a material change that removes a claim leaves its evidence
+// stale and the claim becomes superseded.
+export async function refreshClaimStatesForSourceItem(db: Db, sourceItemId: string): Promise<number> {
+  const claims = await db`SELECT id FROM claims WHERE source_item_id = ${sourceItemId}`;
+  for (const claim of claims) await refreshClaimState(db, claim.id as string);
+  return claims.length;
 }
 
 export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceItemId: string): Promise<void> {
