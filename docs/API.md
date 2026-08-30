@@ -39,6 +39,9 @@ source policy, public citation requirements, or human publication gates.
 - `GET /internal/operator/jobs` returns source-ingestion queue counts,
   current/stale worker heartbeats, and recent jobs including retry errors.
 - `GET /internal/operator/jobs/:jobKey` returns one durable ingestion job.
+- Reprocessing is intentionally not exposed over HTTP. It remains a local
+  privileged CLI operation (`reprocess-revision`) so operator API credentials
+  retain their intake-only database scope.
 
 Operator submission routes are separate from public output:
 

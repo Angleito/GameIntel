@@ -2,14 +2,14 @@ import {
   effectivePublicationMode,
   NORMALIZATION_VERSION,
   PublicHttpUrlSchema,
-  trustClassificationFor,
   type NormalizedSourceItem,
-  type SourceStrength,
 } from "@gameintel/core";
 import type { GameIntelPersistence, GameIntelRuntime, SourceInput } from "@gameintel/contracts";
 import { loadSourceRegistry, sourceRegistryPath, type SourceRegistryEntry } from "@gameintel/config";
 import { createManualSourceItem, parseArticleHtml } from "@gameintel/source-sdk";
-import { processNormalizedItem } from "./pipeline.ts";
+import { processNormalizedItem, reprocessSourceRevision } from "./pipeline.ts";
+
+export { processNormalizedItem, reprocessSourceRevision } from "./pipeline.ts";
 
 export type RegistryEntry = SourceRegistryEntry;
 
@@ -43,28 +43,6 @@ export async function sourceFor(entry: RegistryEntry, citationUrl: string | null
   } as const;
 }
 
-function candidateClaim(item: NormalizedSourceItem, sourceStrength: SourceStrength): NormalizedSourceItem["claims"][number] {
-  const value = item.text.split(/(?<=[.!?])\s+/, 1)[0].slice(0, 500) || item.text.slice(0, 500);
-  const trust = trustClassificationFor(sourceStrength);
-  return {
-    subject: item.title,
-    predicate: "reports",
-    value,
-    qualifiers: { input_kind: item.inputKind, review_status: "candidate" },
-    spoilerTags: [],
-    exploitClass: null,
-    evidenceLevel: "suspected",
-    attributionType: trust.attributionType,
-    statement: null,
-    editorialAssessment: null,
-    stance: "supports",
-    evidenceType: trust.evidenceType,
-    excerpt: value,
-    startMs: null,
-    endMs: null,
-  };
-}
-
 export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId: string; sourceId: string; url: string; profileId?: string }, fence?: { jobKey: string; leaseToken: string }): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
   if (process.env.GAMEINTEL_FETCH_WORKER !== "true") {
     throw new Error("Registered URL ingestion is restricted to the isolated ingestion worker");
@@ -82,6 +60,9 @@ export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId
     proxyUrl: process.env.SOURCE_FETCH_PROXY_URL,
   });
   const parsed = parseArticleHtml(fetched.text);
+  // Claims are extracted by the versioned claim extractor inside the
+  // pipeline, so a stored revision can be reprocessed by a later extractor
+  // version without refetching.
   const item = {
      sourceId: entry.id, collectionId: input.collectionId, externalId: fetched.url, url: fetched.url,
     title: parsed.title, text: parsed.text, sourceStrength: entry.source_strength, publicationMode: source.publicationMode,
@@ -89,7 +70,6 @@ export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId
     contentType: fetched.contentType, language: parsed.language, claims: [],
     processingVersion: `${parsed.parserVersion}.${NORMALIZATION_VERSION}`,
   } as NormalizedSourceItem;
-  item.claims = [candidateClaim(item, entry.source_strength)];
   return processNormalizedItem(runtime.persistence, item, source, { leaseFence: fence ?? null });
 }
 
@@ -110,7 +90,6 @@ export async function ingestText(persistence: GameIntelPersistence, input: {
   const item = createManualSourceItem({ sourceId: entry.id, collectionId: input.collectionId, title: input.title, text: input.text, citationUrl: input.citationUrl, inputKind: input.inputKind });
   item.sourceStrength = entry.source_strength;
   item.publicationMode = source.publicationMode;
-  item.claims = [candidateClaim(item, entry.source_strength)];
   return processNormalizedItem(persistence, item, source, { submittedBy: input.submittedBy });
 }
 

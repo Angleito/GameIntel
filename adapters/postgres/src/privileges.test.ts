@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hashText } from "@gameintel/core";
-import { createArticleDraft, createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, getPublicArticle, insertClaim, insertSourceItem, listArticles, listPublicArticles, materializePublicArticle, setCoverMedia, closeDb, createDb, type Db } from "./index.ts";
+import { createAnalysisRun, createArticleDraft, createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, getPublicArticle, insertClaim, insertSourceItem, listArticles, listPublicArticles, materializePublicArticle, setCoverMedia, closeDb, createDb, type Db } from "./index.ts";
 
 // Privilege-boundary tests for the local reference deployment. They assert
 // that the capability roles enforce the plan's hard rule: a public-facing
@@ -58,7 +58,12 @@ describe("PostgreSQL capability role privileges", () => {
         await transaction`DELETE FROM article_revisions WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'privilege-test')`;
         await transaction`DELETE FROM articles WHERE game_id = 'privilege-test'`;
         await transaction`DELETE FROM evidence WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
+        await transaction`
+          DELETE FROM analysis_runs
+          WHERE source_item_revision_id IN (SELECT id FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test'))
+        `;
         await transaction`DELETE FROM claims WHERE game_id = 'privilege-test'`;
+        await transaction`DELETE FROM canonical_claims WHERE game_id = 'privilege-test'`;
         await transaction`DELETE FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
         await transaction`DELETE FROM source_item_provenance WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
         await transaction`DELETE FROM provenance_families WHERE collection_id = 'privilege-test'`;
@@ -172,7 +177,8 @@ describe("PostgreSQL capability role privileges", () => {
         accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, termsReviewedAt: null, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
       }, null);
       if (!inserted.revisionId) throw new Error("Expected a source revision");
-      const claimId = await insertClaim(editor, surfaceItem, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, {
+      const run = await createAnalysisRun(editor, { sourceItemRevisionId: inserted.revisionId, versions: { normalizationVersion: "1", claimExtractorVersion: "1", confidenceModelVersion: "1" }, triggerReason: "privilege-test" });
+      const claim = await insertClaim(editor, surfaceItem, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, {
         subject: "Subject",
         predicate: "reports",
         value: "Value",
@@ -189,6 +195,7 @@ describe("PostgreSQL capability role privileges", () => {
         startMs: null,
         endMs: null,
       }, "lineage-surface");
+      const claimId = claim.claimId;
       articleId = await createArticleDraft(editor, {
         collectionId: "privilege-test",
         title: "Boundary article",
@@ -358,6 +365,68 @@ describe("PostgreSQL capability role privileges", () => {
       await denied(() => db`INSERT INTO article_media (article_id, media_id, role, selection_source, review_status) VALUES ('x', 'y', 'cover', 'automatic', 'pending')`);
     } finally {
       await closeDb(db);
+    }
+  });
+
+  test("operator role can supersede an analysis run without article write access", async () => {
+    await cleanup();
+    await setup();
+    const runtime = createDb(runtimeUrl);
+    let revisionId = "";
+    try {
+      await ensureSource(runtime, {
+        id: "privilege-source",
+        type: "operator-note",
+        canonicalUrl: "urn:gameintelgg:source:privilege-source",
+        publicCitationUrl: null,
+        sourceStrength: "COMMUNITY",
+        publicationMode: "discussion_only",
+        policy: { accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true } },
+        enabled: true,
+      });
+      const item = {
+        sourceId: "privilege-source",
+        collectionId: "privilege-test",
+        externalId: "operator-analysis-run",
+        url: "urn:gameintelgg:manual:operator-analysis-run",
+        title: "Operator analysis run",
+        text: "Retained operator intake text.",
+        sourceStrength: "COMMUNITY" as const,
+        publicationMode: "discussion_only" as const,
+        discoveredAt: new Date().toISOString(),
+        publishedAt: null,
+        lineageId: null,
+        inputKind: "pasted_text" as const,
+        contentType: "text/plain",
+        language: null,
+        processingVersion: "1",
+        claims: [],
+      };
+      const inserted = await insertSourceItem(runtime, item, hashText("operator-analysis-run"), "operator-analysis-lineage", {
+        accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, termsReviewedAt: null, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
+      }, null);
+      revisionId = inserted.revisionId;
+      await createAnalysisRun(runtime, {
+        sourceItemRevisionId: revisionId,
+        versions: { normalizationVersion: "1", claimExtractorVersion: "1", confidenceModelVersion: "1" },
+        triggerReason: "privilege-test",
+      });
+    } finally {
+      await closeDb(runtime);
+    }
+
+    const operator = createDb(operatorUrl);
+    try {
+      const v2 = await createAnalysisRun(operator, {
+        sourceItemRevisionId: revisionId,
+        versions: { normalizationVersion: "2", claimExtractorVersion: "1", confidenceModelVersion: "1" },
+        triggerReason: "operator-analysis-upgrade",
+      });
+      expect(v2.normalizationVersion).toBe("2");
+      await denied(() => operator`UPDATE articles SET confidence = 1 WHERE id = 'none'`);
+    } finally {
+      await closeDb(operator);
+      await cleanup();
     }
   });
 

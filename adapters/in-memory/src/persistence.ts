@@ -3,15 +3,19 @@ import {
   IngestionLeaseLostError,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
+  type AnalysisRunInfo,
+  type AnalysisVersions,
   type ArticleEvidenceForReview,
   type Clock,
   type CoverMediaCandidate,
   type GameIntelPersistence,
   type IdGenerator,
+  type InsertedClaim,
   type InsertedSourceItem,
   type PublicSubmissionForModeration,
   type PublicSubmissionModerationAction,
   type PublicSubmissionPurgeResult,
+  type RevisionForAnalysis,
   type SourceContentPurgeResult,
   type SourceInput,
 } from "@gameintel/contracts";
@@ -20,6 +24,7 @@ import {
   ArticleSchema,
   assertUniqueMedia,
   calculateConfidence,
+  canonicalClaimKey,
   deriveClaimState,
   effectivePublicationMode,
   evidenceReviewGate,
@@ -43,9 +48,11 @@ import {
 import {
   articleRecordToArticle,
   memoryCatalogEntry,
+  type AnalysisRunRecord,
   type ArticleMediaRecord,
   type ArticleRecord,
   type ArticleSourceRecord,
+  type CanonicalClaimRecord,
   type ClaimRecord,
   type EvidenceRecord,
   type MemoryStore,
@@ -155,12 +162,24 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const excerpt = policy.retainRawTextDays === 0 ? "" : item.text.slice(0, policy.mayStoreFullText ? 4_000 : 1_000);
     const retentionUntil = this.clock.now() + policy.retainRawTextDays * 86_400_000;
 
+    const currentRevisionId = (sourceItemId: string): string => {
+      const current = [...this.store.revisions.values()]
+        .filter((revision) => revision.sourceItemId === sourceItemId && revision.isCurrent)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (current) return current.id;
+      const first = [...this.store.revisions.values()]
+        .filter((revision) => revision.sourceItemId === sourceItemId)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+      if (!first) throw new Error(`Source item ${sourceItemId} has no source revisions`);
+      return first.id;
+    };
+
     const existingByExternal = [...this.store.sourceItems.values()]
       .find((candidate) => candidate.sourceId === item.sourceId && candidate.externalId === item.externalId);
     if (existingByExternal && existingByExternal.rawHash === rawHash) {
       return {
         id: existingByExternal.id,
-        revisionId: null,
+        revisionId: currentRevisionId(existingByExternal.id),
         provenanceFamilyId: this.provenanceFamilyForSourceItem(existingByExternal.id, item.collectionId, lineageId),
         duplicate: true,
         materialChange: false,
@@ -171,7 +190,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     if (existingByHash) {
       return {
         id: existingByHash.id,
-        revisionId: null,
+        revisionId: currentRevisionId(existingByHash.id),
         provenanceFamilyId: this.provenanceFamilyForSourceItem(existingByHash.id, item.collectionId, lineageId),
         duplicate: true,
         materialChange: false,
@@ -215,6 +234,9 @@ export class InMemoryPersistence implements GameIntelPersistence {
         httpStatus: item.inputKind === "url" || item.inputKind === "rss" ? 200 : null,
         isCurrent: true,
         processingVersion: item.processingVersion ?? null,
+        title: item.title,
+        content: excerpt,
+        contentPurgedAt: null,
         createdAt: now,
       });
       return {
@@ -260,6 +282,9 @@ export class InMemoryPersistence implements GameIntelPersistence {
       httpStatus: item.inputKind === "url" || item.inputKind === "rss" ? 200 : null,
       isCurrent: true,
       processingVersion: item.processingVersion ?? null,
+      title: item.title,
+      content: excerpt,
+      contentPurgedAt: null,
       createdAt: now,
     });
     return {
@@ -338,7 +363,13 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const affectedArticles = new Set<string>();
     for (const articleSource of this.store.articleSources.values()) {
       const claim = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
-      if (claim?.sourceItemId === input.sourceItemId) affectedArticles.add(articleSource.articleId);
+      if (!claim) continue;
+      const memberIds = [...this.store.claims.values()]
+        .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === (claim.canonicalClaimId ?? claim.id))
+        .map((candidate) => candidate.id);
+      const hasEvidence = [...this.store.evidence.values()]
+        .some((record) => record.sourceItemId === input.sourceItemId && memberIds.includes(record.claimId));
+      if (hasEvidence) affectedArticles.add(articleSource.articleId);
     }
     for (const articleId of affectedArticles) {
       await this.refreshArticleConfidence(articleId);
@@ -354,15 +385,20 @@ export class InMemoryPersistence implements GameIntelPersistence {
     item: NormalizedSourceItem,
     sourceItemId: string,
     sourceItemRevisionId: string,
+    analysisRunId: string,
     provenanceFamilyId: string,
     claim: NormalizedSourceItem["claims"][number],
     lineageId: string,
-  ): Promise<string> {
-    let claimId = [...this.store.claims.values()]
-      .find((candidate) => candidate.sourceItemId === sourceItemId && candidate.subject === claim.subject && candidate.predicate === claim.predicate && candidate.value === claim.value)?.id;
-    if (!claimId) {
-      claimId = this.ids.generate("clm");
-      this.store.claims.set(claimId, {
+  ): Promise<InsertedClaim> {
+    const claimKey = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, qualifiers: claim.qualifiers });
+    let claimRecord = [...this.store.claims.values()]
+      .find((candidate) => candidate.sourceItemId === sourceItemId && candidate.claimKey === claimKey);
+    let canonicalClaimId: string;
+    if (claimRecord) {
+      canonicalClaimId = claimRecord.canonicalClaimId ?? this.resolveCanonicalClaimForRow(claimRecord.id, item.collectionId, claim.subject, claim.predicate, claim.value, claimRecord.qualifiers);
+    } else {
+      const claimId = this.ids.generate("clm");
+      claimRecord = {
         id: claimId,
         gameId: item.collectionId,
         sourceItemId,
@@ -370,6 +406,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
         predicate: claim.predicate,
         value: claim.value,
         qualifiers: { ...claim.qualifiers },
+        claimKey,
         spoilerTags: [...claim.spoilerTags],
         exploitClass: claim.exploitClass,
         evidenceLevel: claim.evidenceLevel,
@@ -377,18 +414,22 @@ export class InMemoryPersistence implements GameIntelPersistence {
         statement: claim.statement,
         editorialAssessment: claim.editorialAssessment,
         state: "unverified",
+        canonicalClaimId: null,
         createdAt: this.clock.nowIso(),
-      });
+      };
+      this.store.claims.set(claimId, claimRecord);
+      canonicalClaimId = this.resolveCanonicalClaimForRow(claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
     }
     const existingEvidence = [...this.store.evidence.values()]
-      .find((candidate) => candidate.claimId === claimId && candidate.sourceItemRevisionId === sourceItemRevisionId);
+      .find((candidate) => candidate.claimId === claimRecord!.id && candidate.analysisRunId === analysisRunId);
     if (!existingEvidence) {
       const evidenceId = this.ids.generate("evd");
       this.store.evidence.set(evidenceId, {
         id: evidenceId,
-        claimId,
+        claimId: claimRecord!.id,
         sourceItemId,
         sourceItemRevisionId,
+        analysisRunId,
         provenanceFamilyId,
         stance: claim.stance,
         evidenceType: claim.evidenceType,
@@ -399,7 +440,183 @@ export class InMemoryPersistence implements GameIntelPersistence {
         createdAt: this.clock.nowIso(),
       });
     }
-    return claimId;
+    return { claimId: claimRecord!.id, canonicalClaimId };
+  }
+
+  private resolveCanonicalClaimForRow(
+    claimId: string,
+    collectionId: string,
+    subject: string,
+    predicate: string,
+    value: string,
+    qualifiers: Record<string, string>,
+  ): string {
+    const key = canonicalClaimKey({ subject, predicate, value, qualifiers });
+    let canonical = [...this.store.canonicalClaims.values()]
+      .find((candidate) => candidate.gameId === collectionId && candidate.canonicalKey === key);
+    if (!canonical) {
+      canonical = {
+        id: this.ids.generate("cc"),
+        gameId: collectionId,
+        subject,
+        predicate,
+        value,
+        qualifiers: { ...qualifiers },
+        canonicalKey: key,
+        createdAt: this.clock.nowIso(),
+      };
+      this.store.canonicalClaims.set(canonical.id, canonical);
+    }
+    const claim = this.store.claims.get(claimId);
+    if (claim) {
+      claim.canonicalClaimId = canonical.id;
+      claim.claimKey = key;
+    }
+    return canonical.id;
+  }
+
+  private ensureCanonicalClaimsForSourceItem(sourceItemId: string): number {
+    const unresolved = [...this.store.claims.values()].filter((claim) => claim.sourceItemId === sourceItemId && claim.canonicalClaimId === null);
+    for (const claim of unresolved) {
+      this.resolveCanonicalClaimForRow(claim.id, claim.gameId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
+    }
+    return unresolved.length;
+  }
+
+  private latestAnalysisRunForRevision(sourceItemRevisionId: string): AnalysisRunRecord | null {
+    return [...this.store.analysisRuns.values()]
+      .filter((run) => run.sourceItemRevisionId === sourceItemRevisionId && run.status === "completed")
+      .sort((left, right) => (right.completedAt ?? "").localeCompare(left.completedAt ?? "") || right.id.localeCompare(left.id))[0] ?? null;
+  }
+
+  private parseAnalysisRun(record: AnalysisRunRecord): AnalysisRunInfo {
+    return {
+      id: record.id,
+      sourceItemRevisionId: record.sourceItemRevisionId,
+      processingVersion: record.processingVersion,
+      normalizationVersion: record.normalizationVersion,
+      claimExtractorVersion: record.claimExtractorVersion,
+      confidenceModelVersion: record.confidenceModelVersion,
+      status: record.status,
+      triggeredBy: record.triggeredBy,
+      triggerReason: record.triggerReason,
+      createdAt: record.createdAt,
+      completedAt: record.completedAt,
+    };
+  }
+
+  async getAnalysisRun(sourceItemRevisionId: string, versions: AnalysisVersions): Promise<AnalysisRunInfo | null> {
+    const run = [...this.store.analysisRuns.values()]
+      .find((candidate) => candidate.sourceItemRevisionId === sourceItemRevisionId
+        && candidate.status === "completed"
+        && candidate.normalizationVersion === versions.normalizationVersion
+        && candidate.claimExtractorVersion === versions.claimExtractorVersion
+        && candidate.confidenceModelVersion === versions.confidenceModelVersion);
+    return run ? this.parseAnalysisRun(run) : null;
+  }
+
+  async createAnalysisRun(input: { sourceItemRevisionId: string; versions: AnalysisVersions; triggeredBy?: string | null; triggerReason: string }): Promise<AnalysisRunInfo> {
+    const existing = await this.getAnalysisRun(input.sourceItemRevisionId, input.versions);
+    if (existing) return existing;
+    for (const run of this.store.analysisRuns.values()) {
+      if (run.sourceItemRevisionId === input.sourceItemRevisionId && run.status === "completed") run.status = "superseded";
+    }
+    const now = this.clock.nowIso();
+    const run: AnalysisRunRecord = {
+      id: this.ids.generate("arun"),
+      sourceItemRevisionId: input.sourceItemRevisionId,
+      processingVersion: this.store.revisions.get(input.sourceItemRevisionId)?.processingVersion ?? null,
+      normalizationVersion: input.versions.normalizationVersion,
+      claimExtractorVersion: input.versions.claimExtractorVersion,
+      confidenceModelVersion: input.versions.confidenceModelVersion,
+      status: "completed",
+      triggeredBy: input.triggeredBy ?? null,
+      triggerReason: input.triggerReason,
+      createdAt: now,
+      completedAt: now,
+    };
+    this.store.analysisRuns.set(run.id, run);
+    return this.parseAnalysisRun(run);
+  }
+
+  async listAnalysisRuns(sourceItemRevisionId: string): Promise<AnalysisRunInfo[]> {
+    return [...this.store.analysisRuns.values()]
+      .filter((run) => run.sourceItemRevisionId === sourceItemRevisionId)
+      .sort((left, right) => (right.completedAt ?? "").localeCompare(left.completedAt ?? "") || right.id.localeCompare(left.id))
+      .map((run) => this.parseAnalysisRun(run));
+  }
+
+  async getRevisionForAnalysis(revisionId: string): Promise<RevisionForAnalysis | null> {
+    const revision = this.store.revisions.get(revisionId);
+    if (!revision) return null;
+    const item = this.store.sourceItems.get(revision.sourceItemId);
+    if (!item) return null;
+    const source = this.store.sources.get(item.sourceId);
+    if (!source) return null;
+    return {
+      id: revision.id,
+      sourceItemId: revision.sourceItemId,
+      title: revision.title,
+      content: revision.content,
+      rawHash: revision.rawHash,
+      processingVersion: revision.processingVersion,
+      contentPurged: revision.contentPurgedAt !== null || revision.content === "",
+      sourceItem: {
+        collectionId: item.gameId,
+        externalId: item.externalId,
+        url: item.url,
+        sourceStrength: item.sourceStrength,
+        publicationMode: item.publicationMode,
+        discoveredAt: item.discoveredAt,
+        publishedAt: item.publishedAt,
+        inputKind: item.inputKind,
+        contentType: item.contentType,
+        language: item.language,
+        lineageId: item.lineageId,
+        submittedBy: item.submittedBy,
+      },
+      source,
+    };
+  }
+
+  async resolveExistingArticleForCanonicalClaims(canonicalClaimIds: string[]): Promise<string | null> {
+    const unique = new Set(canonicalClaimIds);
+    if (!unique.size) return null;
+    const articles = [...this.store.articles.values()]
+      .filter((article) => article.status !== "retracted")
+      .map((article) => {
+        for (const articleSource of this.store.articleSources.values()) {
+          if (articleSource.articleId !== article.id || articleSource.claimId === null) continue;
+          const claim = this.store.claims.get(articleSource.claimId);
+          if (claim && unique.has(claim.canonicalClaimId ?? claim.id)) return article;
+        }
+        return null;
+      })
+      .filter((article): article is ArticleRecord => article !== null)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return articles[0]?.id ?? null;
+  }
+
+  async refreshArticlesForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]> {
+    const unique = new Set(canonicalClaimIds);
+    const articleIds = new Set<string>();
+    for (const articleSource of this.store.articleSources.values()) {
+      if (articleSource.claimId === null) continue;
+      const claim = this.store.claims.get(articleSource.claimId);
+      if (claim && unique.has(claim.canonicalClaimId ?? claim.id)) articleIds.add(articleSource.articleId);
+    }
+    for (const articleId of articleIds) {
+      await this.refreshArticleEvidenceState(articleId);
+      await this.refreshArticleConfidence(articleId);
+      await this.audit("system", auditAction, "article", articleId, auditReason);
+    }
+    return [...articleIds];
+  }
+
+  async canonicalClaimIdsForSourceItem(sourceItemId: string): Promise<string[]> {
+    return [...new Set([...this.store.claims.values()]
+      .filter((claim) => claim.sourceItemId === sourceItemId)
+      .map((claim) => claim.canonicalClaimId ?? claim.id))];
   }
 
   private evidenceApprovalState(evidenceId: string, sourceItemRevisionId: string, policy: SourcePolicy): { approved: boolean; latestReviewAt: number; blockedBy: "rejected" | "disputed" | null } {
@@ -419,18 +636,15 @@ export class InMemoryPersistence implements GameIntelPersistence {
   async calculateClaimConfidence(claimId: string): Promise<number> {
     const claim = this.store.claims.get(claimId);
     if (!claim) throw new Error("Claim not found");
-    const qualifiersJson = JSON.stringify(claim.qualifiers);
-    const comparable = [...this.store.claims.values()]
-      .filter((candidate) => candidate.gameId === claim.gameId
-        && candidate.subject === claim.subject
-        && candidate.predicate === claim.predicate
-        && candidate.value === claim.value
-        && JSON.stringify(candidate.qualifiers) === qualifiersJson);
-    const comparableIds = new Set(comparable.map((candidate) => candidate.id));
+    const identity = claim.canonicalClaimId ?? claim.id;
     let strongest: SourceStrength = "UNVERIFIED";
     const approvedEvidence: Array<Evidence & { sourceStrength?: SourceStrength }> = [];
     for (const record of this.store.evidence.values()) {
-      if (!comparableIds.has(record.claimId)) continue;
+      const recordClaim = this.store.claims.get(record.claimId);
+      if (!recordClaim || (recordClaim.canonicalClaimId ?? recordClaim.id) !== identity) continue;
+      const run = this.store.analysisRuns.get(record.analysisRunId);
+      const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
+      if (!run || run.status !== "completed" || latestRun?.id !== run.id) continue;
       const item = this.store.sourceItems.get(record.sourceItemId);
       const revision = this.store.revisions.get(record.sourceItemRevisionId);
       if (!item || !revision || !revision.isCurrent) continue;
@@ -473,8 +687,17 @@ export class InMemoryPersistence implements GameIntelPersistence {
   async refreshClaimState(claimId: string): Promise<ClaimState> {
     const claim = this.store.claims.get(claimId);
     if (!claim) throw new Error("Claim not found");
-    const rows = [...this.store.evidence.values()].filter((record) => record.claimId === claimId);
-    const currentRows = rows.filter((record) => this.store.revisions.get(record.sourceItemRevisionId)?.isCurrent);
+    const identity = claim.canonicalClaimId ?? claim.id;
+    const memberIds = new Set([...this.store.claims.values()]
+      .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === identity)
+      .map((candidate) => candidate.id));
+    const rows = [...this.store.evidence.values()].filter((record) => memberIds.has(record.claimId));
+    const currentRows = rows.filter((record) => {
+      const revision = this.store.revisions.get(record.sourceItemRevisionId);
+      const run = this.store.analysisRuns.get(record.analysisRunId);
+      const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
+      return revision?.isCurrent === true && run?.status === "completed" && latestRun?.id === run.id;
+    });
     const supportingFamilies = new Set<string>();
     const contradictingFamilies = new Set<string>();
     let strongest: SourceStrength = "UNVERIFIED";
@@ -494,11 +717,15 @@ export class InMemoryPersistence implements GameIntelPersistence {
       hasCurrentEvidence: currentRows.length > 0,
       hasHistoricalEvidence: rows.length > 0,
     });
-    claim.state = state;
+    for (const memberId of memberIds) {
+      const member = this.store.claims.get(memberId);
+      if (member) member.state = state;
+    }
     return state;
   }
 
   async refreshClaimStatesForSourceItem(sourceItemId: string): Promise<number> {
+    this.ensureCanonicalClaimsForSourceItem(sourceItemId);
     const claims = [...this.store.claims.values()].filter((claim) => claim.sourceItemId === sourceItemId);
     for (const claim of claims) await this.refreshClaimState(claim.id);
     return claims.length;
@@ -512,7 +739,12 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const affectedArticles = new Set<string>();
     for (const articleSource of this.store.articleSources.values()) {
       const claim = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
-      if (claim?.sourceItemId === sourceItemId) affectedArticles.add(articleSource.articleId);
+      if (!claim) continue;
+      const memberIds = [...this.store.claims.values()]
+        .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === (claim.canonicalClaimId ?? claim.id))
+        .map((candidate) => candidate.id);
+      const memberClaims = memberIds.map((id) => this.store.claims.get(id)).filter((candidate): candidate is ClaimRecord => candidate !== undefined);
+      if (memberClaims.some((candidate) => candidate.sourceItemId === sourceItemId)) affectedArticles.add(articleSource.articleId);
     }
     for (const articleId of affectedArticles) {
       await this.refreshArticleEvidenceState(articleId);
@@ -522,21 +754,30 @@ export class InMemoryPersistence implements GameIntelPersistence {
   }
 
   async listArticleEvidence(articleId: string): Promise<ArticleEvidenceForReview[]> {
-    const claimIds = new Set([...this.store.articleSources.values()]
-      .filter((articleSource) => articleSource.articleId === articleId && articleSource.claimId !== null)
-      .map((articleSource) => articleSource.claimId as string));
+    const memberClaimIds = new Set<string>();
+    for (const articleSource of this.store.articleSources.values()) {
+      if (articleSource.articleId !== articleId || articleSource.claimId === null) continue;
+      const claim = this.store.claims.get(articleSource.claimId);
+      if (!claim) continue;
+      for (const candidate of this.store.claims.values()) {
+        if ((candidate.canonicalClaimId ?? candidate.id) === (claim.canonicalClaimId ?? claim.id)) memberClaimIds.add(candidate.id);
+      }
+    }
     const rows: ArticleEvidenceForReview[] = [];
     for (const record of this.store.evidence.values()) {
-      if (!claimIds.has(record.claimId)) continue;
+      if (!memberClaimIds.has(record.claimId)) continue;
+      const revision = this.store.revisions.get(record.sourceItemRevisionId);
+      const run = this.store.analysisRuns.get(record.analysisRunId);
+      const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
       rows.push({
         id: record.id,
         claimId: record.claimId,
         sourceItemId: record.sourceItemId,
         sourceItemRevisionId: record.sourceItemRevisionId,
-        processingVersion: this.store.revisions.get(record.sourceItemRevisionId)?.processingVersion ?? null,
+        processingVersion: revision?.processingVersion ?? null,
         excerpt: record.excerpt,
         evidenceType: record.evidenceType,
-        current: this.store.revisions.get(record.sourceItemRevisionId)?.isCurrent === true,
+        current: revision?.isCurrent === true && run?.status === "completed" && latestRun?.id === run.id,
       });
     }
     return rows.sort((left, right) => left.id.localeCompare(right.id));
@@ -569,8 +810,12 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const revision = this.store.revisions.get(record.sourceItemRevisionId);
     const item = this.store.sourceItems.get(record.sourceItemId);
     const source = item ? this.store.sources.get(item.sourceId) : undefined;
-    if (!revision || !item || !source) throw new Error("Evidence not found or cannot be reviewed without a source revision");
-    if (!revision.isCurrent) throw new Error("Evidence review requires the current source revision");
+    const run = this.store.analysisRuns.get(record.analysisRunId);
+    const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
+    if (!revision || !item || !source || !run || run.status !== "completed" || latestRun?.id !== run.id) {
+      throw new Error("Evidence not found or cannot be reviewed without a source revision");
+    }
+    if (!revision.isCurrent) throw new Error("Evidence review requires the current source revision and analysis run");
     const policy = parsePolicy(source.policy);
     if (decision === "approved" && policy.evidenceReview.preventSubmitterApproval && item.submittedBy === reviewerId) {
       throw new Error("Submitters cannot approve their own evidence");
@@ -587,8 +832,13 @@ export class InMemoryPersistence implements GameIntelPersistence {
       createdAt: this.clock.nowIso(),
     });
     const affectedArticles = new Set<string>();
-    for (const articleSource of this.store.articleSources.values()) {
-      if (articleSource.claimId === record.claimId) affectedArticles.add(articleSource.articleId);
+    const claim = this.store.claims.get(record.claimId);
+    if (claim) {
+      const identity = claim.canonicalClaimId ?? claim.id;
+      for (const articleSource of this.store.articleSources.values()) {
+        const referenced = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
+        if (referenced && (referenced.canonicalClaimId ?? referenced.id) === identity) affectedArticles.add(articleSource.articleId);
+      }
     }
     for (const articleId of affectedArticles) {
       await this.refreshArticleEvidenceState(articleId);
@@ -603,7 +853,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
 
   private articleEvidenceState(articleId: string): { sourceCount: number; evidenceCount: number; approvedCount: number; complete: boolean; latestChangeAt: number } {
     const references = new Map<string, Set<string>>();
-    const evidenceRows = new Map<string, EvidenceRecord>();
+    const evidenceRows = new Map<string, { record: EvidenceRecord; directReferenceIds: Set<string> }>();
     let latestChangeAt = 0;
     for (const articleSource of this.store.articleSources.values()) {
       if (articleSource.articleId !== articleId) continue;
@@ -612,26 +862,42 @@ export class InMemoryPersistence implements GameIntelPersistence {
       latestChangeAt = Math.max(latestChangeAt, timestamp(articleSource.updatedAt));
       const claim = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
       if (!claim) continue;
+      const identity = claim.canonicalClaimId ?? claim.id;
+      const memberIds = new Set([...this.store.claims.values()]
+        .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === identity)
+        .map((candidate) => candidate.id));
       for (const record of this.store.evidence.values()) {
-        if (record.claimId !== claim.id) continue;
-        references.get(referenceId)!.add(record.id);
-        evidenceRows.set(record.id, record);
+        if (!memberIds.has(record.claimId)) continue;
+        const direct = record.claimId === claim.id;
+        const evidence = evidenceRows.get(record.id) ?? { record, directReferenceIds: new Set<string>() };
+        if (direct) evidence.directReferenceIds.add(referenceId);
+        evidenceRows.set(record.id, evidence);
       }
     }
     let approvedCount = 0;
-    for (const record of evidenceRows.values()) {
+    let directEvidenceCount = 0;
+    let blockedBy: "rejected" | "disputed" | null = null;
+    for (const evidence of evidenceRows.values()) {
+      const { record, directReferenceIds } = evidence;
       const revision = this.store.revisions.get(record.sourceItemRevisionId);
       const item = this.store.sourceItems.get(record.sourceItemId);
       const source = item ? this.store.sources.get(item.sourceId) : undefined;
+      const run = this.store.analysisRuns.get(record.analysisRunId);
+      const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
       latestChangeAt = Math.max(latestChangeAt, timestamp(record.createdAt), revision ? timestamp(revision.createdAt) : 0);
-      if (!revision || !revision.isCurrent || !item || !source) continue;
+      if (!revision || !revision.isCurrent || !item || !source || !run || run.status !== "completed" || latestRun?.id !== run.id) continue;
       const review = this.evidenceApprovalState(record.id, record.sourceItemRevisionId, parsePolicy(source.policy));
       latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
-      if (review.approved) approvedCount += 1;
+      if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
+      if (directReferenceIds.size) {
+        directEvidenceCount += 1;
+        for (const referenceId of directReferenceIds) references.get(referenceId)!.add(record.id);
+        if (review.approved) approvedCount += 1;
+      }
     }
     const sourceCount = references.size;
-    const evidenceCount = evidenceRows.size;
-    const complete = sourceCount > 0
+    const evidenceCount = directEvidenceCount;
+    const complete = blockedBy === null && sourceCount > 0
       && evidenceCount > 0
       && approvedCount === evidenceCount
       && [...references.values()].every((evidenceIds) => evidenceIds.size > 0);
@@ -644,10 +910,14 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const evidence = this.articleEvidenceState(articleId);
     article.sourceReviewCompleted = evidence.complete;
     article.articleSourcesComplete = evidence.sourceCount > 0;
-    article.editorReviewCompleted = false;
-    article.approvedBy = null;
-    article.approvedAt = null;
-    article.status = article.status === "retracted" ? article.status : evidence.complete ? "source_review" : "draft";
+    if (!evidence.complete) {
+      article.editorReviewCompleted = false;
+      article.approvedBy = null;
+      article.approvedAt = null;
+      article.status = article.status === "retracted" ? article.status : "draft";
+    } else if (article.status !== "retracted" && article.status !== "published" && article.status !== "updated") {
+      article.status = "source_review";
+    }
   }
 
   private async assertPublicationRequirements(articleId: string): Promise<void> {
@@ -841,6 +1111,74 @@ export class InMemoryPersistence implements GameIntelPersistence {
     return articleId;
   }
 
+  async updateExistingArticle(input: {
+    articleId: string;
+    sourceItemId: string;
+    sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
+    body?: ArticleBody | null;
+    changeSummary?: string;
+  }): Promise<void> {
+    const article = this.store.articles.get(input.articleId);
+    if (!article) throw new Error("Article not found");
+    const maxRevision = [...this.store.articleRevisions.values()]
+      .filter((revision) => revision.articleId === input.articleId)
+      .reduce((max, revision) => Math.max(max, revision.revisionNumber), 0);
+    const now = this.clock.nowIso();
+    if (input.body) article.body = input.body;
+    article.updatedAt = now;
+    this.store.articleRevisions.set(this.ids.generate("rev"), {
+      id: this.ids.generate("rev"),
+      articleId: input.articleId,
+      revisionNumber: maxRevision + 1,
+      body: input.body ?? article.body,
+      changeSummary: input.changeSummary ?? "Re-analyzed source revision",
+      createdAt: now,
+    });
+    const ownedClaimIds = new Set([...this.store.claims.values()]
+      .filter((claim) => claim.sourceItemId === input.sourceItemId)
+      .map((claim) => claim.id));
+    for (const articleSource of this.store.articleSources.values()) {
+      if (articleSource.articleId === input.articleId && articleSource.claimId !== null && ownedClaimIds.has(articleSource.claimId)) {
+        this.store.articleSources.delete(articleSource.id);
+      }
+    }
+    for (const source of input.sourceRefs) {
+      const articleSourceId = this.ids.generate("arts");
+      this.store.articleSources.set(articleSourceId, {
+        id: articleSourceId,
+        articleId: input.articleId,
+        sourceId: source.sourceId,
+        claimId: source.claimId,
+        citationLabel: source.citationLabel,
+        publicCitationUrl: source.publicCitationUrl,
+        updatedAt: now,
+      });
+    }
+    await this.refreshArticleEvidenceState(input.articleId);
+    await this.refreshArticleConfidence(input.articleId);
+  }
+
+  async listClaimsForArticle(articleId: string): Promise<import("@gameintel/contracts").ArticleClaimForDraft[]> {
+    const claimIds = new Set([...this.store.articleSources.values()]
+      .filter((source) => source.articleId === articleId && source.claimId !== null)
+      .map((source) => source.claimId!));
+    return [...this.store.claims.values()]
+      .filter((claim) => claimIds.has(claim.id))
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((claim) => ({
+        id: claim.id,
+        sourceItemId: claim.sourceItemId,
+        subject: claim.subject,
+        predicate: claim.predicate,
+        value: claim.value,
+        evidenceLevel: claim.evidenceLevel,
+        attributionType: claim.attributionType,
+        statement: claim.statement,
+        editorialAssessment: claim.editorialAssessment,
+        spoilerTags: [...claim.spoilerTags],
+      }));
+  }
+
   async publicArticles(collectionId: string): Promise<unknown[]> {
     return this.listPublicArticles(collectionId);
   }
@@ -867,8 +1205,11 @@ export class InMemoryPersistence implements GameIntelPersistence {
     let purgedRevisions = 0;
     let purgedEvidence = 0;
     for (const revision of this.store.revisions.values()) {
-      if (ids.has(revision.sourceItemId) && revision.excerpt !== "") {
+      if (ids.has(revision.sourceItemId) && (revision.excerpt !== "" || revision.title !== "" || revision.content !== "")) {
         revision.excerpt = "";
+        revision.title = "";
+        revision.content = "";
+        revision.contentPurgedAt = now;
         purgedRevisions += 1;
       }
     }

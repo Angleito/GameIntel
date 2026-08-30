@@ -13,6 +13,8 @@ The root commands are:
 - `bun run operator review-source <id>` records source access metadata; it is not required for collection and does not approve evidence.
 - `bun run operator list [--profile <id>]` lists drafts and published records.
 - `bun run operator list-evidence <article-id>` / `review-evidence <id> [--decision approved|rejected|disputed]` runs the evidence review gate.
+- `bun run operator list-analysis-runs <source-revision-id>` lists the analysis runs that interpreted a revision.
+- `bun run operator reprocess-revision <source-revision-id> [--reason <text>]` re-interprets retained revision content with the current normalization/extractor/confidence versions, without refetching. Missing or purged content is non-reprocessable.
 - `bun run operator review-article <id>` / `approve <id>` / `publish <id>` runs the editorial and publication gates.
 - `bun run operator import-media <catalog.json>` and the cover/media approval commands manage the media catalog.
 - `bun run operator public-snapshot [--profile <id>]` prints approved output.

@@ -4,15 +4,19 @@ import {
   IngestionLeaseLostError,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
+  type AnalysisRunInfo,
+  type AnalysisVersions,
   type ArticleEvidenceForReview,
   type Clock,
   type CoverMediaCandidate,
   type GameIntelPersistence,
   type IdGenerator,
+  type InsertedClaim,
   type InsertedSourceItem,
   type PublicSubmissionForModeration,
   type PublicSubmissionModerationAction,
   type PublicSubmissionPurgeResult,
+  type RevisionForAnalysis,
   type SourceContentPurgeResult,
   type SourceInput,
 } from "@gameintel/contracts";
@@ -21,6 +25,7 @@ import {
   ArticleSchema,
   assertUniqueMedia,
   calculateConfidence,
+  canonicalClaimKey,
   deriveClaimState,
   evidenceReviewGate,
   MediaCatalogSchema,
@@ -183,6 +188,20 @@ export class SQLitePersistence implements GameIntelPersistence {
     const excerpt = policy.retainRawTextDays === 0 ? "" : item.text.slice(0, policy.mayStoreFullText ? 4_000 : 1_000);
     const retentionUntil = Date.now() + policy.retainRawTextDays * 86_400_000;
 
+    const currentRevisionId = (sourceItemId: string): string => {
+      const current = this.get<{ id: string }>(
+        "SELECT id FROM source_item_revisions WHERE source_item_id = ? AND is_current = 1 ORDER BY created_at DESC, id DESC LIMIT 1",
+        sourceItemId,
+      );
+      if (current) return current.id;
+      const first = this.get<{ id: string }>(
+        "SELECT id FROM source_item_revisions WHERE source_item_id = ? ORDER BY created_at ASC, id ASC LIMIT 1",
+        sourceItemId,
+      );
+      if (!first) throw new Error(`Source item ${sourceItemId} has no source revisions`);
+      return first.id;
+    };
+
     const existingByExternal = this.get<{ id: string; raw_hash: string }>(
       "SELECT id, raw_hash FROM source_items WHERE source_id = ? AND external_id = ?",
       item.sourceId, item.externalId,
@@ -190,7 +209,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     if (existingByExternal && existingByExternal.raw_hash === rawHash) {
       return {
         id: existingByExternal.id,
-        revisionId: null,
+        revisionId: currentRevisionId(existingByExternal.id),
         provenanceFamilyId: this.provenanceFamilyForSourceItem(existingByExternal.id, item.collectionId, lineageId),
         duplicate: true,
         materialChange: false,
@@ -203,7 +222,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     if (existingByHash) {
       return {
         id: existingByHash.id,
-        revisionId: null,
+        revisionId: currentRevisionId(existingByHash.id),
         provenanceFamilyId: this.provenanceFamilyForSourceItem(existingByHash.id, item.collectionId, lineageId),
         duplicate: true,
         materialChange: false,
@@ -224,9 +243,9 @@ export class SQLitePersistence implements GameIntelPersistence {
         item.inputKind, item.contentType, item.language, retentionUntil, submittedBy, itemId,
       );
       this.run(
-        `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-        revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, now,
+        `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+        revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, item.title, excerpt, now,
       );
       return {
         id: itemId,
@@ -248,9 +267,9 @@ export class SQLitePersistence implements GameIntelPersistence {
       item.publishedAt, item.inputKind, item.contentType, item.language, retentionUntil, submittedBy, now,
     );
     this.run(
-      `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-      revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, now,
+      `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
+      revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, item.title, excerpt, now,
     );
     return {
       id: itemId,
@@ -312,7 +331,11 @@ export class SQLitePersistence implements GameIntelPersistence {
     this.run("UPDATE evidence SET provenance_family_id = ? WHERE source_item_id = ?", provenanceFamilyId, input.sourceItemId);
     const affectedArticles = this.all<{ article_id: string }>(
       `SELECT DISTINCT article_source.article_id FROM article_sources article_source
-       JOIN claims claim ON claim.id = article_source.claim_id WHERE claim.source_item_id = ?`,
+       JOIN claims claim ON claim.id = article_source.claim_id
+       LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+       JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
+       JOIN evidence linked_evidence ON linked_evidence.claim_id = member.id
+       WHERE linked_evidence.source_item_id = ?`,
       input.sourceItemId,
     );
     for (const article of affectedArticles) await this.refreshArticleConfidence(article.article_id);
@@ -327,37 +350,236 @@ export class SQLitePersistence implements GameIntelPersistence {
     item: NormalizedSourceItem,
     sourceItemId: string,
     sourceItemRevisionId: string,
+    analysisRunId: string,
     provenanceFamilyId: string,
     claim: NormalizedSourceItem["claims"][number],
     lineageId: string,
-  ): Promise<string> {
-    let claimId = this.get<{ id: string }>(
-      "SELECT id FROM claims WHERE source_item_id = ? AND subject = ? AND predicate = ? AND value = ?",
-      sourceItemId, claim.subject, claim.predicate, claim.value,
-    )?.id;
-    if (!claimId) {
+  ): Promise<InsertedClaim> {
+    const claimKey = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, qualifiers: claim.qualifiers });
+    const existingClaim = this.get<{ id: string; canonical_claim_id: string | null; qualifiers: string }>(
+      "SELECT id, canonical_claim_id, qualifiers FROM claims WHERE source_item_id = ? AND claim_key = ?",
+      sourceItemId, claimKey,
+    );
+    let claimId: string;
+    let canonicalClaimId: string;
+    if (existingClaim) {
+      claimId = existingClaim.id;
+      const qualifiers = parseJson<Record<string, string>>(existingClaim.qualifiers);
+      canonicalClaimId = existingClaim.canonical_claim_id ?? this.resolveCanonicalClaimForRow(claimId, item.collectionId, claim.subject, claim.predicate, claim.value, qualifiers);
+    } else {
       claimId = this.ids.generate("clm");
       this.run(
-        `INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unverified', ?)`,
+        `INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, claim_key, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unverified', ?)`,
         claimId, item.collectionId, sourceItemId, claim.subject, claim.predicate, claim.value,
-        json(claim.qualifiers), json(claim.spoilerTags), claim.exploitClass, claim.evidenceLevel,
+        json(claim.qualifiers), claimKey, json(claim.spoilerTags), claim.exploitClass, claim.evidenceLevel,
         claim.attributionType, claim.statement, claim.editorialAssessment, isoNow(),
       );
+      canonicalClaimId = this.resolveCanonicalClaimForRow(claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
     }
     const existingEvidence = this.get<{ id: string }>(
-      "SELECT id FROM evidence WHERE claim_id = ? AND source_item_revision_id = ? LIMIT 1",
-      claimId, sourceItemRevisionId,
+      "SELECT id FROM evidence WHERE claim_id = ? AND analysis_run_id = ? LIMIT 1",
+      claimId, analysisRunId,
     );
     if (!existingEvidence) {
       this.run(
-        `INSERT INTO evidence (id, claim_id, source_item_id, source_item_revision_id, provenance_family_id, stance, evidence_type, excerpt, start_ms, end_ms, lineage_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        this.ids.generate("evd"), claimId, sourceItemId, sourceItemRevisionId, provenanceFamilyId,
+        `INSERT INTO evidence (id, claim_id, source_item_id, source_item_revision_id, analysis_run_id, provenance_family_id, stance, evidence_type, excerpt, start_ms, end_ms, lineage_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        this.ids.generate("evd"), claimId, sourceItemId, sourceItemRevisionId, analysisRunId, provenanceFamilyId,
         claim.stance, claim.evidenceType, claim.excerpt, claim.startMs, claim.endMs, lineageId, isoNow(),
       );
     }
-    return claimId;
+    return { claimId, canonicalClaimId };
+  }
+
+  private resolveCanonicalClaimForRow(
+    claimId: string,
+    collectionId: string,
+    subject: string,
+    predicate: string,
+    value: string,
+    qualifiers: Record<string, string>,
+  ): string {
+    const key = canonicalClaimKey({ subject, predicate, value, qualifiers });
+    const existing = this.get<{ id: string }>(
+      "SELECT id FROM canonical_claims WHERE game_id = ? AND canonical_key = ?",
+      collectionId, key,
+    );
+    const canonicalClaimId = existing?.id ?? this.ids.generate("cc");
+    this.run(
+      `INSERT INTO canonical_claims (id, game_id, subject, predicate, value, qualifiers, canonical_key, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (game_id, canonical_key) DO UPDATE SET canonical_key = excluded.canonical_key`,
+      canonicalClaimId, collectionId, subject, predicate, value, json(qualifiers), key, isoNow(),
+    );
+    this.run("UPDATE claims SET canonical_claim_id = ?, claim_key = ? WHERE id = ?", canonicalClaimId, key, claimId);
+    return canonicalClaimId;
+  }
+
+  private ensureCanonicalClaimsForSourceItem(sourceItemId: string): number {
+    const unresolved = this.all<{ id: string; game_id: string; subject: string; predicate: string; value: string; qualifiers: string }>(
+      "SELECT id, game_id, subject, predicate, value, qualifiers FROM claims WHERE source_item_id = ? AND canonical_claim_id IS NULL",
+      sourceItemId,
+    );
+    for (const claim of unresolved) {
+      this.resolveCanonicalClaimForRow(claim.id, claim.game_id, claim.subject, claim.predicate, claim.value, parseJson<Record<string, string>>(claim.qualifiers));
+    }
+    return unresolved.length;
+  }
+
+  private latestAnalysisRunForRevision(sourceItemRevisionId: string): string | null {
+    return this.get<{ id: string }>(
+      "SELECT id FROM analysis_runs WHERE source_item_revision_id = ? AND status = 'completed' ORDER BY completed_at DESC, id DESC LIMIT 1",
+      sourceItemRevisionId,
+    )?.id ?? null;
+  }
+
+  private parseAnalysisRun(row: Record<string, unknown>): AnalysisRunInfo {
+    return {
+      id: row.id as string,
+      sourceItemRevisionId: row.source_item_revision_id as string,
+      processingVersion: (row.processing_version as string | null) ?? null,
+      normalizationVersion: (row.normalization_version as string | null) ?? null,
+      claimExtractorVersion: (row.claim_extractor_version as string | null) ?? null,
+      confidenceModelVersion: (row.confidence_model_version as string | null) ?? null,
+      status: row.status as "completed" | "superseded",
+      triggeredBy: (row.triggered_by as string | null) ?? null,
+      triggerReason: (row.trigger_reason as string) ?? "",
+      createdAt: new Date(row.created_at as string).toISOString(),
+      completedAt: row.completed_at ? new Date(row.completed_at as string).toISOString() : null,
+    };
+  }
+
+  async getAnalysisRun(sourceItemRevisionId: string, versions: AnalysisVersions): Promise<AnalysisRunInfo | null> {
+    const row = this.get<Record<string, unknown>>(
+      `SELECT * FROM analysis_runs
+       WHERE source_item_revision_id = ? AND status = 'completed'
+          AND normalization_version = ? AND claim_extractor_version = ? AND confidence_model_version = ?
+       LIMIT 1`,
+       sourceItemRevisionId, versions.normalizationVersion, versions.claimExtractorVersion, versions.confidenceModelVersion,
+    );
+    return row ? this.parseAnalysisRun(row) : null;
+  }
+
+  async createAnalysisRun(input: { sourceItemRevisionId: string; versions: AnalysisVersions; triggeredBy?: string | null; triggerReason: string }): Promise<AnalysisRunInfo> {
+    const existing = await this.getAnalysisRun(input.sourceItemRevisionId, input.versions);
+    if (existing) return existing;
+    this.run("UPDATE analysis_runs SET status = 'superseded' WHERE source_item_revision_id = ? AND status = 'completed'", input.sourceItemRevisionId);
+    const runId = this.ids.generate("arun");
+    const now = isoNow();
+    const revision = this.get<{ processing_version: string | null }>("SELECT processing_version FROM source_item_revisions WHERE id = ?", input.sourceItemRevisionId);
+    if (!revision) throw new Error("Source revision not found");
+    this.run(
+      `INSERT INTO analysis_runs (id, source_item_revision_id, processing_version, normalization_version, claim_extractor_version, confidence_model_version, status, triggered_by, trigger_reason, created_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)`,
+      runId, input.sourceItemRevisionId, revision.processing_version, input.versions.normalizationVersion, input.versions.claimExtractorVersion,
+      input.versions.confidenceModelVersion, input.triggeredBy ?? null, input.triggerReason, now, now,
+    );
+    return this.parseAnalysisRun(this.get<Record<string, unknown>>("SELECT * FROM analysis_runs WHERE id = ?", runId)!);
+  }
+
+  async listAnalysisRuns(sourceItemRevisionId: string): Promise<AnalysisRunInfo[]> {
+    return this.all<Record<string, unknown>>(
+      "SELECT * FROM analysis_runs WHERE source_item_revision_id = ? ORDER BY completed_at DESC, id DESC",
+      sourceItemRevisionId,
+    ).map((row) => this.parseAnalysisRun(row));
+  }
+
+  async getRevisionForAnalysis(revisionId: string): Promise<RevisionForAnalysis | null> {
+    const row = this.get<Record<string, unknown>>(
+      `SELECT revision.id, revision.source_item_id, revision.title, revision.content, revision.raw_hash,
+        revision.processing_version, revision.content_purged_at,
+        item.game_id, item.external_id, item.url, item.source_strength, item.publication_mode,
+        item.discovered_at, item.published_at, item.input_kind, item.content_type, item.language,
+        item.lineage_id, item.submitted_by, item.source_id,
+        source.type, source.canonical_url, source.public_citation_url,
+        source.publication_mode AS source_publication_mode, source.policy, source.enabled
+       FROM source_item_revisions revision
+       JOIN source_items item ON item.id = revision.source_item_id
+       JOIN sources source ON source.id = item.source_id
+       WHERE revision.id = ?
+       LIMIT 1`,
+      revisionId,
+    );
+    if (!row) return null;
+    return {
+      id: row.id as string,
+      sourceItemId: row.source_item_id as string,
+      title: (row.title as string | null) ?? "",
+      content: (row.content as string | null) ?? "",
+      rawHash: row.raw_hash as string,
+      processingVersion: (row.processing_version as string | null) ?? null,
+      contentPurged: row.content_purged_at !== null || row.content === null,
+      sourceItem: {
+        collectionId: row.game_id as string,
+        externalId: row.external_id as string,
+        url: row.url as string,
+        sourceStrength: SourceStrengthSchema.parse(row.source_strength),
+        publicationMode: row.publication_mode as import("@gameintel/core").PublicationMode,
+        discoveredAt: new Date(row.discovered_at as string).toISOString(),
+        publishedAt: row.published_at ? new Date(row.published_at as string).toISOString() : null,
+        inputKind: row.input_kind as string,
+        contentType: (row.content_type as string | null) ?? null,
+        language: (row.language as string | null) ?? null,
+        lineageId: row.lineage_id as string,
+        submittedBy: (row.submitted_by as string | null) ?? null,
+      },
+      source: {
+        id: row.source_id as string,
+        type: row.type as string,
+        canonicalUrl: row.canonical_url as string,
+        publicCitationUrl: (row.public_citation_url as string | null) ?? null,
+        sourceStrength: SourceStrengthSchema.parse(row.source_strength),
+        publicationMode: row.source_publication_mode as import("@gameintel/core").PublicationMode,
+        policy: SourcePolicySchema.parse(parseJson(row.policy)),
+        enabled: bool(row.enabled),
+      },
+    };
+  }
+
+  async resolveExistingArticleForCanonicalClaims(canonicalClaimIds: string[]): Promise<string | null> {
+    const unique = [...new Set(canonicalClaimIds)];
+    if (!unique.length) return null;
+    const placeholders = unique.map(() => "?").join(", ");
+    const row = this.get<{ id: string }>(
+      `SELECT DISTINCT article.id
+       FROM articles article
+       JOIN article_sources article_source ON article_source.article_id = article.id
+       JOIN claims claim ON claim.id = article_source.claim_id
+       WHERE COALESCE(claim.canonical_claim_id, claim.id) IN (${placeholders})
+         AND article.status <> 'retracted'
+       ORDER BY article.created_at DESC
+       LIMIT 1`,
+      ...unique,
+    );
+    return row?.id ?? null;
+  }
+
+  async refreshArticlesForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]> {
+    const unique = [...new Set(canonicalClaimIds)];
+    if (!unique.length) return [];
+    const placeholders = unique.map(() => "?").join(", ");
+    const articles = this.all<{ article_id: string }>(
+      `SELECT DISTINCT article_source.article_id
+       FROM article_sources article_source
+       JOIN claims claim ON claim.id = article_source.claim_id
+       WHERE COALESCE(claim.canonical_claim_id, claim.id) IN (${placeholders})`,
+      ...unique,
+    );
+    const articleIds = articles.map((article) => article.article_id);
+    for (const articleId of articleIds) {
+      await this.refreshArticleEvidenceState(articleId);
+      await this.refreshArticleConfidence(articleId);
+      await this.audit("system", auditAction, "article", articleId, auditReason);
+    }
+    return articleIds;
+  }
+
+  async canonicalClaimIdsForSourceItem(sourceItemId: string): Promise<string[]> {
+    return this.all<{ canonical_claim_id: string }>(
+      "SELECT DISTINCT COALESCE(canonical_claim_id, id) AS canonical_claim_id FROM claims WHERE source_item_id = ?",
+      sourceItemId,
+    ).map((row) => row.canonical_claim_id);
   }
 
   private evidenceApprovalState(evidenceId: string, sourceItemRevisionId: string, policy: SourcePolicy): { approved: boolean; latestReviewAt: number; blockedBy: "rejected" | "disputed" | null } {
@@ -383,24 +605,34 @@ export class SQLitePersistence implements GameIntelPersistence {
   }
 
   async calculateClaimConfidence(claimId: string): Promise<number> {
-    const claim = this.get<{ game_id: string; subject: string; predicate: string; value: string; qualifiers: string }>(
-      "SELECT game_id, subject, predicate, value, qualifiers FROM claims WHERE id = ?",
+    const claim = this.get<{ game_id: string; qualifiers: string; canonical_claim_id: string | null }>(
+      "SELECT game_id, qualifiers, canonical_claim_id FROM claims WHERE id = ?",
       claimId,
     );
     if (!claim) throw new Error("Claim not found");
     const qualifiers = parseJson<Record<string, unknown>>(claim.qualifiers);
+    const identity = claim.canonical_claim_id ?? claimId;
     const evidenceRows = this.all<Record<string, unknown>>(
       `SELECT e.id AS evidence_id, e.source_item_id, e.provenance_family_id, e.stance, e.evidence_type, e.excerpt, e.start_ms, e.end_ms, e.lineage_id,
         item.source_strength, source.policy, revision.id AS source_item_revision_id, provenance.relationship AS provenance_relationship
        FROM claims comparable_claim
        JOIN evidence e ON e.claim_id = comparable_claim.id
+       JOIN analysis_runs run ON run.id = e.analysis_run_id
+         AND run.status = 'completed'
+         AND run.id = (
+           SELECT latest_run.id
+           FROM analysis_runs latest_run
+           WHERE latest_run.source_item_revision_id = e.source_item_revision_id AND latest_run.status = 'completed'
+           ORDER BY latest_run.completed_at DESC, latest_run.id DESC
+           LIMIT 1
+         )
        JOIN source_items item ON item.id = e.source_item_id
        JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id AND revision.is_current = 1
        JOIN sources source ON source.id = item.source_id
        LEFT JOIN source_item_provenance provenance ON provenance.source_item_id = e.source_item_id
-       WHERE comparable_claim.game_id = ? AND comparable_claim.subject = ? AND comparable_claim.predicate = ? AND comparable_claim.value = ?
-         AND comparable_claim.qualifiers = ?`,
-      claim.game_id, claim.subject, claim.predicate, claim.value, json(qualifiers),
+       WHERE comparable_claim.game_id = ?
+         AND COALESCE(comparable_claim.canonical_claim_id, comparable_claim.id) = ?`,
+      claim.game_id, identity,
     );
     let strongest: SourceStrength = "UNVERIFIED";
     const approvedEvidence: Array<Evidence & { sourceStrength?: SourceStrength }> = [];
@@ -426,13 +658,26 @@ export class SQLitePersistence implements GameIntelPersistence {
   }
 
   async refreshClaimState(claimId: string): Promise<ClaimState> {
+    const claim = this.get<{ canonical_claim_id: string | null }>("SELECT canonical_claim_id FROM claims WHERE id = ?", claimId);
+    if (!claim) throw new Error("Claim not found");
+    const identity = claim.canonical_claim_id ?? claimId;
     const rows = this.all<Record<string, unknown>>(
       `SELECT e.stance, e.provenance_family_id, item.source_strength, revision.is_current AS current_rev
-       FROM evidence e
+       FROM claims member
+       JOIN evidence e ON e.claim_id = member.id
+       JOIN analysis_runs run ON run.id = e.analysis_run_id
+         AND run.status = 'completed'
+         AND run.id = (
+           SELECT latest_run.id
+           FROM analysis_runs latest_run
+           WHERE latest_run.source_item_revision_id = e.source_item_revision_id AND latest_run.status = 'completed'
+           ORDER BY latest_run.completed_at DESC, latest_run.id DESC
+           LIMIT 1
+         )
        JOIN source_items item ON item.id = e.source_item_id
        JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
-       WHERE e.claim_id = ?`,
-      claimId,
+       WHERE COALESCE(member.canonical_claim_id, member.id) = ?`,
+      identity,
     );
     const currentRows = rows.filter((row) => row.current_rev === 1 || row.current_rev === true);
     const supportingFamilies = new Set<string>();
@@ -453,11 +698,12 @@ export class SQLitePersistence implements GameIntelPersistence {
       hasCurrentEvidence: currentRows.length > 0,
       hasHistoricalEvidence: rows.length > 0,
     });
-    this.run("UPDATE claims SET state = ? WHERE id = ?", state, claimId);
+    this.run("UPDATE claims SET state = ? WHERE COALESCE(canonical_claim_id, id) = ?", state, identity);
     return state;
   }
 
   async refreshClaimStatesForSourceItem(sourceItemId: string): Promise<number> {
+    this.ensureCanonicalClaimsForSourceItem(sourceItemId);
     const claims = this.all<{ id: string }>("SELECT id FROM claims WHERE source_item_id = ?", sourceItemId);
     for (const claim of claims) await this.refreshClaimState(claim.id);
     return claims.length;
@@ -468,7 +714,9 @@ export class SQLitePersistence implements GameIntelPersistence {
       `SELECT DISTINCT article_source.article_id
        FROM article_sources article_source
        JOIN claims claim ON claim.id = article_source.claim_id
-       WHERE claim.source_item_id = ?`,
+       LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+       JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
+       WHERE member.source_item_id = ?`,
       sourceItemId,
     );
     for (const article of articles) {
@@ -482,9 +730,21 @@ export class SQLitePersistence implements GameIntelPersistence {
   async listArticleEvidence(articleId: string): Promise<ArticleEvidenceForReview[]> {
     const rows = this.all<Record<string, unknown>>(
       `SELECT DISTINCT e.id, e.claim_id, e.source_item_id, e.source_item_revision_id, e.excerpt, e.evidence_type,
-        revision.processing_version, COALESCE(revision.is_current, 0) AS current
+        revision.processing_version,
+        COALESCE(revision.is_current, 0) = 1
+          AND e.analysis_run_id IS NOT NULL
+          AND e.analysis_run_id = (
+            SELECT latest_run.id
+            FROM analysis_runs latest_run
+            WHERE latest_run.source_item_revision_id = e.source_item_revision_id AND latest_run.status = 'completed'
+            ORDER BY latest_run.completed_at DESC, latest_run.id DESC
+            LIMIT 1
+          ) AS current
        FROM article_sources article_source
-       JOIN evidence e ON e.claim_id = article_source.claim_id
+       JOIN claims claim ON claim.id = article_source.claim_id
+       LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+       JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
+       JOIN evidence e ON e.claim_id = member.id
        LEFT JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
        WHERE article_source.article_id = ?
        ORDER BY e.id`,
@@ -532,16 +792,26 @@ export class SQLitePersistence implements GameIntelPersistence {
     notes = "",
   ): Promise<void> {
     const evidence = this.get<Record<string, unknown>>(
-      `SELECT e.id, e.source_item_revision_id, revision.is_current AS current, item.submitted_by, source.policy
+      `SELECT e.id, e.source_item_revision_id, revision.is_current AS current, item.submitted_by, source.policy,
+        run.id = (
+          SELECT latest_run.id
+          FROM analysis_runs latest_run
+          WHERE latest_run.source_item_revision_id = revision.id AND latest_run.status = 'completed'
+          ORDER BY latest_run.completed_at DESC, latest_run.id DESC
+          LIMIT 1
+        ) AS analysis_run_current
        FROM evidence e
        JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
+       JOIN analysis_runs run ON run.id = e.analysis_run_id
        JOIN source_items item ON item.id = e.source_item_id
        JOIN sources source ON source.id = item.source_id
        WHERE e.id = ?`,
       evidenceId,
     );
     if (!evidence) throw new Error("Evidence not found or cannot be reviewed without a source revision");
-    if (evidence.current !== 1 && evidence.current !== true) throw new Error("Evidence review requires the current source revision");
+    if ((evidence.current !== 1 && evidence.current !== true) || evidence.analysis_run_current !== 1) {
+      throw new Error("Evidence review requires the current source revision and analysis run");
+    }
     const policy = SourcePolicySchema.parse(parseJson(evidence.policy));
     if (decision === "approved" && policy.evidenceReview.preventSubmitterApproval && evidence.submitted_by === reviewerId) {
       throw new Error("Submitters cannot approve their own evidence");
@@ -556,7 +826,9 @@ export class SQLitePersistence implements GameIntelPersistence {
       `SELECT DISTINCT article_source.article_id
        FROM article_sources article_source
        JOIN claims claim ON claim.id = article_source.claim_id
-       JOIN evidence linked_evidence ON linked_evidence.claim_id = claim.id
+       LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+       JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
+       JOIN evidence linked_evidence ON linked_evidence.claim_id = member.id
        WHERE linked_evidence.id = ?`,
       evidenceId,
     );
@@ -571,12 +843,24 @@ export class SQLitePersistence implements GameIntelPersistence {
     const rows = this.all<Record<string, unknown>>(
       `SELECT
         ass.id AS article_source_id, ass.updated_at AS article_source_updated_at,
-        e.id AS evidence_id, e.source_item_revision_id, e.created_at AS evidence_created_at,
+        e.id AS evidence_id, e.claim_id = claim.id AS direct_evidence,
+        e.source_item_revision_id, e.created_at AS evidence_created_at,
         revision.is_current AS source_item_revision_current, revision.created_at AS source_item_revision_created_at,
+        CASE WHEN run.id IS NULL THEN 0 WHEN run.status = 'completed'
+          AND run.id = (
+            SELECT latest_run.id
+            FROM analysis_runs latest_run
+            WHERE latest_run.source_item_revision_id = revision.id AND latest_run.status = 'completed'
+            ORDER BY latest_run.completed_at DESC, latest_run.id DESC
+            LIMIT 1
+          ) THEN 1 ELSE 0 END AS analysis_run_current,
         source.policy AS source_policy
        FROM article_sources ass
        LEFT JOIN claims claim ON claim.id = ass.claim_id
-       LEFT JOIN evidence e ON e.claim_id = claim.id
+       LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+       LEFT JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
+       LEFT JOIN evidence e ON e.claim_id = member.id
+       LEFT JOIN analysis_runs run ON run.id = e.analysis_run_id
        LEFT JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
        LEFT JOIN source_items item ON item.id = e.source_item_id
        LEFT JOIN sources source ON source.id = item.source_id
@@ -584,7 +868,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       articleId,
     );
     const references = new Map<string, Set<string>>();
-    const evidenceRows = new Map<string, Record<string, unknown>>();
+    const evidenceRows = new Map<string, { row: Record<string, unknown>; directReferenceIds: Set<string> }>();
     let latestChangeAt = 0;
     for (const row of rows) {
       const referenceId = row.article_source_id as string;
@@ -592,22 +876,33 @@ export class SQLitePersistence implements GameIntelPersistence {
       latestChangeAt = Math.max(latestChangeAt, timestamp(row.article_source_updated_at as string));
       const evidenceId = row.evidence_id as string | null;
       if (!evidenceId) continue;
-      references.get(referenceId)!.add(evidenceId);
-      evidenceRows.set(evidenceId, row);
+      const direct = row.direct_evidence === 1 || row.direct_evidence === true;
+      const evidence = evidenceRows.get(evidenceId) ?? { row, directReferenceIds: new Set<string>() };
+      if (direct) evidence.directReferenceIds.add(referenceId);
+      evidenceRows.set(evidenceId, evidence);
     }
     let approvedCount = 0;
-    for (const [evidenceId, row] of evidenceRows) {
+    let directEvidenceCount = 0;
+    let blockedBy: "rejected" | "disputed" | null = null;
+    for (const [evidenceId, evidence] of evidenceRows) {
+      const { row, directReferenceIds } = evidence;
       const sourceItemRevisionId = row.source_item_revision_id as string | null;
       latestChangeAt = Math.max(latestChangeAt, timestamp(row.evidence_created_at as string), timestamp(row.source_item_revision_created_at as string));
-      if (!sourceItemRevisionId || row.source_item_revision_current !== 1 || !row.source_policy) continue;
+      if (!sourceItemRevisionId || (row.source_item_revision_current !== 1 && row.source_item_revision_current !== true)
+        || row.analysis_run_current !== 1 || !row.source_policy) continue;
       const policy = SourcePolicySchema.parse(parseJson(row.source_policy));
       const review = this.evidenceApprovalState(evidenceId, sourceItemRevisionId, policy);
       latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
-      if (review.approved) approvedCount += 1;
+      if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
+      if (directReferenceIds.size) {
+        directEvidenceCount += 1;
+        for (const referenceId of directReferenceIds) references.get(referenceId)!.add(evidenceId);
+        if (review.approved) approvedCount += 1;
+      }
     }
     const sourceCount = references.size;
-    const evidenceCount = evidenceRows.size;
-    const complete = sourceCount > 0 && evidenceCount > 0 && approvedCount === evidenceCount
+    const evidenceCount = directEvidenceCount;
+    const complete = blockedBy === null && sourceCount > 0 && evidenceCount > 0 && approvedCount === evidenceCount
       && [...references.values()].every((evidenceIds) => evidenceIds.size > 0);
     return Promise.resolve({ sourceCount, evidenceCount, approvedCount, complete, latestChangeAt });
   }
@@ -616,15 +911,20 @@ export class SQLitePersistence implements GameIntelPersistence {
     const evidence = await this.articleEvidenceState(articleId);
     this.run(
       `UPDATE articles
-       SET source_review_completed = ?, article_sources_complete = ?, editor_review_completed = 0,
-         approved_by = NULL, approved_at = NULL,
-         status = CASE
-           WHEN status = 'retracted' THEN status
-           WHEN ? THEN 'source_review'
-           ELSE 'draft'
-         END
-       WHERE id = ?`,
-      evidence.complete ? 1 : 0, evidence.sourceCount > 0 ? 1 : 0, evidence.complete ? 1 : 0, articleId,
+       SET source_review_completed = ?, article_sources_complete = ?,
+           editor_review_completed = CASE WHEN ? THEN editor_review_completed ELSE 0 END,
+          approved_by = CASE WHEN ? THEN approved_by ELSE NULL END,
+          approved_at = CASE WHEN ? THEN approved_at ELSE NULL END,
+          status = CASE
+            WHEN status = 'retracted' THEN status
+            WHEN ? AND status IN ('published', 'updated') THEN status
+            WHEN ? THEN 'source_review'
+            ELSE 'draft'
+          END
+        WHERE id = ?`,
+      evidence.complete ? 1 : 0, evidence.sourceCount > 0 ? 1 : 0,
+      evidence.complete ? 1 : 0, evidence.complete ? 1 : 0, evidence.complete ? 1 : 0,
+      evidence.complete ? 1 : 0, evidence.complete ? 1 : 0, articleId,
     );
   }
 
@@ -740,6 +1040,60 @@ const published = await this.getArticle(articleId);
     return articleId;
   }
 
+  async updateExistingArticle(input: {
+    articleId: string;
+    sourceItemId: string;
+    sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
+    body?: ArticleBody | null;
+    changeSummary?: string;
+  }): Promise<void> {
+    const article = this.get<{ id: string; body: string }>("SELECT id, body FROM articles WHERE id = ?", input.articleId);
+    if (!article) throw new Error("Article not found");
+    const maxRevision = this.get<{ revision_number: number | null }>(
+      "SELECT MAX(revision_number) AS revision_number FROM article_revisions WHERE article_id = ?",
+      input.articleId,
+    )?.revision_number ?? 0;
+    const now = isoNow();
+    if (input.body) this.run("UPDATE articles SET body = ?, updated_at = ? WHERE id = ?", json(input.body), now, input.articleId);
+    this.run(
+      "INSERT INTO article_revisions (id, article_id, revision_number, body, change_summary, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      this.ids.generate("rev"), input.articleId, maxRevision + 1, input.body ? json(input.body) : article.body, input.changeSummary ?? "Re-analyzed source revision", now,
+    );
+    this.run(
+      "DELETE FROM article_sources WHERE article_id = ? AND claim_id IN (SELECT id FROM claims WHERE source_item_id = ?)",
+      input.articleId, input.sourceItemId,
+    );
+    for (const source of input.sourceRefs) {
+      this.run(
+        "INSERT INTO article_sources (id, article_id, source_id, claim_id, citation_label, public_citation_url, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        this.ids.generate("arts"), input.articleId, source.sourceId, source.claimId, source.citationLabel, source.publicCitationUrl, now,
+      );
+    }
+    await this.refreshArticleEvidenceState(input.articleId);
+    await this.refreshArticleConfidence(input.articleId);
+  }
+
+  async listClaimsForArticle(articleId: string): Promise<import("@gameintel/contracts").ArticleClaimForDraft[]> {
+    return this.all<Record<string, unknown>>(
+      `SELECT DISTINCT claim.id, claim.source_item_id, claim.subject, claim.predicate, claim.value, claim.evidence_level,
+        claim.attribution_type, claim.statement, claim.editorial_assessment, claim.spoiler_tags
+       FROM article_sources article_source JOIN claims claim ON claim.id = article_source.claim_id
+       WHERE article_source.article_id = ? ORDER BY claim.id`,
+      articleId,
+    ).map((row) => ({
+        id: row.id as string,
+        sourceItemId: row.source_item_id as string,
+      subject: row.subject as string,
+      predicate: row.predicate as string,
+      value: row.value as string,
+      evidenceLevel: row.evidence_level as import("@gameintel/core").EvidenceLevel,
+      attributionType: row.attribution_type as import("@gameintel/core").AttributionType,
+      statement: row.statement as string | null,
+      editorialAssessment: row.editorial_assessment as string | null,
+      spoilerTags: parseJson<string[]>(row.spoiler_tags),
+    }));
+  }
+
   private articleSelect(row: Record<string, unknown>): Article {
     const parsedCover = row.cover_media ? parseJson<Record<string, unknown>>(row.cover_media) : null;
     return ArticleSchema.parse({
@@ -825,8 +1179,8 @@ const published = await this.getArticle(articleId);
       return { eligibleSourceItems: ids.length, purgedSourceItems: 0, purgedRevisions: 0, purgedEvidence: 0, dryRun: !options.execute };
     }
     const revisionResult = this.db.query(
-      "UPDATE source_item_revisions SET excerpt = '' WHERE source_item_id IN (SELECT value FROM json_each(?)) AND excerpt <> ''",
-    ).run(json(ids));
+      "UPDATE source_item_revisions SET excerpt = '', title = '', content = '', content_purged_at = ? WHERE source_item_id IN (SELECT value FROM json_each(?)) AND (excerpt <> '' OR title IS NOT NULL OR content IS NOT NULL)",
+    ).run(Date.now(), json(ids));
     const evidenceResult = this.db.query(
       "UPDATE evidence SET excerpt = '' WHERE source_item_id IN (SELECT value FROM json_each(?)) AND excerpt <> ''",
     ).run(json(ids));

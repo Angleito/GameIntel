@@ -1,12 +1,12 @@
 import { fileURLToPath } from "node:url";
 import { rm } from "node:fs/promises";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { GameProfileSchema } from "@gameintel/core";
+import { CLAIM_EXTRACTOR_VERSION, GameProfileSchema, NORMALIZATION_VERSION, type NormalizedSourceItem } from "@gameintel/core";
 import { IngestionLeaseLostError, type GameIntelPersistence } from "@gameintel/contracts";
 import { createInMemoryRuntime, InMemoryJobQueue, InMemoryPersistence, type InMemoryRuntime, type MemoryStore } from "@gameintel/in-memory";
 import { loadFixture } from "./fixture.ts";
 import { loadRegistry, promotePublicSubmission } from "./ingest.ts";
-import { processFixture, processNormalizedItem } from "./pipeline.ts";
+import { processFixture, processNormalizedItem, reprocessSourceRevision } from "./pipeline.ts";
 
 const fixturePath = fileURLToPath(new URL("../../../fixtures/sources/gta-vi-netflix-tudum.json", import.meta.url));
 const profilePath = fileURLToPath(new URL("../../../profiles/gta-vi/profile.json", import.meta.url));
@@ -760,6 +760,120 @@ describe("Tudum newsroom pipeline", () => {
       expect(article?.description).toEndWith("...");
       expect(article?.description).not.toContain("Serie");
       expect(article?.body.sections.map((section) => section.heading)).toEqual(["Evidence", "What remains unknown"]);
+    });
+  });
+
+  test("converges a URL and a community observation onto one canonical claim", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const urlItem = { ...fixture.item, sourceId: fixture.source.id, inputKind: "url" as const, claims: [] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, urlItem, fixture.source);
+      expect(first.articleId).not.toBeNull();
+
+      // The same fact reported through a different transport resolves to the
+      // same canonical claim instead of spawning a parallel draft.
+      const communitySource = { ...fixture.source, id: "community-observation", sourceStrength: "COMMUNITY" as const, publicationMode: "discussion_only" as const, canonicalUrl: "https://community.example.com", publicCitationUrl: null };
+      const communityItem = { ...fixture.item, sourceId: "community-observation", sourceStrength: "COMMUNITY" as const, inputKind: "pasted_text" as const, claims: [], externalId: "external-community", lineageId: "lineage-community" } as NormalizedSourceItem;
+      const second = await processNormalizedItem(persistence, communityItem, communitySource);
+      expect(second.duplicate).toBe(false);
+      expect(second.articleId).toBeNull(); // discussion-only community evidence never becomes a draft
+
+      const store = storeOf(persistence);
+      const urlClaim = [...store.claims.values()].find((claim) => claim.sourceItemId === first.sourceItemId);
+      const communityClaim = [...store.claims.values()].find((claim) => claim.sourceItemId === second.sourceItemId);
+      expect(urlClaim?.canonicalClaimId).toBe(communityClaim?.canonicalClaimId);
+      expect(urlClaim?.id).not.toBe(communityClaim?.id);
+      expect([...store.canonicalClaims.values()]).toHaveLength(1);
+    });
+  });
+
+  test("keeps discussion-only matching intake from refreshing publication state", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const normalItem = { ...fixture.item, sourceId: fixture.source.id, inputKind: "pasted_text" as const, claims: [] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, normalItem, fixture.source);
+      const article = storeOf(persistence).articles.get(first.articleId!);
+      if (!article) throw new Error("Expected first article");
+      // Deliberately make the existing publication incomplete. A discussion-
+      // only refresh would demote it; intake must not have that authority.
+      article.status = "published";
+
+      const communitySource = { ...fixture.source, id: "community-observation", sourceStrength: "COMMUNITY" as const, publicationMode: "discussion_only" as const, canonicalUrl: "https://community.example.com", publicCitationUrl: null };
+      const communityItem = { ...fixture.item, sourceId: "community-observation", sourceStrength: "COMMUNITY" as const, inputKind: "pasted_text" as const, claims: [], externalId: "external-community", lineageId: "lineage-community" } as NormalizedSourceItem;
+      await processNormalizedItem(persistence, communityItem, communitySource);
+
+      expect(storeOf(persistence).articles.get(first.articleId!)?.status).toBe("published");
+    });
+  });
+
+  test("routes a revised high-newsworthiness source to its existing article via canonical identity", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const item = { ...fixture.item, sourceId: fixture.source.id, inputKind: "pasted_text" as const, claims: [] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, item, fixture.source);
+      expect(first.disposition).toBe("research_new_article");
+      const articleId = first.articleId!;
+      expect((await persistence.listArticles("gta-vi")).map((article) => article.id)).toEqual([articleId]);
+
+      // A material change that preserves the same fact resolves to the
+      // existing article: update_existing, never a parallel draft.
+      const revisedItem = { ...item, text: `${item.text} A materially revised follow-up.` } as NormalizedSourceItem;
+      const revised = await processNormalizedItem(persistence, revisedItem, fixture.source);
+      expect(revised.duplicate).toBe(false);
+      expect(revised.disposition).toBe("update_existing");
+      expect(revised.articleId).toBe(articleId);
+      expect((await persistence.listArticles("gta-vi")).map((article) => article.id)).toEqual([articleId]);
+      const updated = await persistence.getArticle(articleId);
+      expect(updated?.title).toBe(item.title);
+      // The updated article requires fresh evidence review.
+      expect(updated).toMatchObject({ status: "draft", sourceReviewCompleted: false });
+    });
+  });
+
+  test("does not convert an old article when a source revision changes canonical identity", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const claimX = { ...fixture.item.claims[0], value: "Trailer releases September 1" };
+      const item = { ...fixture.item, sourceId: fixture.source.id, inputKind: "pasted_text" as const, text: "Trailer releases September 1.", claims: [claimX] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, item, fixture.source);
+      const claimY = { ...claimX, value: "Online mode launches November 10" };
+      const revised = await processNormalizedItem(persistence, {
+        ...item,
+        text: "Online mode launches November 10.",
+        claims: [claimY],
+      }, fixture.source);
+
+      expect(revised.disposition).toBe("research_new_article");
+      expect(revised.articleId).not.toBe(first.articleId);
+      expect((await persistence.listArticles("gta-vi")).map((article) => article.id)).toEqual(expect.arrayContaining([first.articleId!, revised.articleId!]));
+    });
+  });
+
+  test("does not rerun analysis when only parser audit metadata changes", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const item = { ...fixture.item, sourceId: fixture.source.id, inputKind: "pasted_text" as const, claims: [] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, item, fixture.source);
+      expect(first.duplicate).toBe(false);
+      const revisionId = [...storeOf(persistence).revisions.values()].find((revision) => revision.sourceItemId === first.sourceItemId && revision.isCurrent)!.id;
+
+      // processingVersion records parser/source-extraction audit metadata. It
+      // is deliberately not part of an analysis-run identity, so URL parser
+      // metadata cannot cause reprocess ping-pong with NORMALIZATION_VERSION.
+      const newer = await processNormalizedItem(persistence, { ...item, processingVersion: "2.0" } as NormalizedSourceItem, fixture.source);
+      expect(newer.duplicate).toBe(true);
+      expect(newer.warnings[0]).toContain("already ingested and analyzed");
+      let runs = await persistence.listAnalysisRuns(revisionId);
+      expect(runs).toHaveLength(1);
+      expect(runs[0].normalizationVersion).toBe(NORMALIZATION_VERSION);
+
+      // The same tuple is idempotent through the privileged reprocess path.
+      await expect(reprocessSourceRevision(persistence, { revisionId, triggeredBy: "test-operator" })).rejects.toThrow("already analyzed");
     });
   });
 });

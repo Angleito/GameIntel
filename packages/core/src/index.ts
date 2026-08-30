@@ -65,6 +65,7 @@ export type InputKind = z.infer<typeof InputKindSchema>;
 // current pipeline produce a different result?".
 export const NORMALIZATION_VERSION = "1";
 export const CONFIDENCE_MODEL_VERSION = "1";
+export const CLAIM_EXTRACTOR_VERSION = "1";
 
 export const EvidenceLevelSchema = z.enum(["suspected", "corroborated", "confirmed", "disputed"]);
 export type EvidenceLevel = z.infer<typeof EvidenceLevelSchema>;
@@ -565,6 +566,28 @@ export function calculateConfidence(
 
 export function hashText(value: string): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
+}
+
+// Canonical claim identity (plan section 1). Two source items describing the
+// same real-world fact converge on one canonical claim when their normalized
+// subject/predicate/value and semantic qualifiers agree. Normalization is
+// intentionally conservative (case, whitespace, trailing punctuation) to
+// avoid over-merging; transport details such as URL/RSS/community belong to
+// the source item and provenance, never to the semantic identity.
+export function canonicalizeClaimText(value: string): string {
+  return value.trim().toLowerCase().replaceAll(/\s+/g, " ").replaceAll(/[.!?]+$/g, "").trim();
+}
+
+export function canonicalClaimKey(input: { subject: string; predicate: string; value: string; qualifiers?: Record<string, string> }): string {
+  const qualifierEntries = Object.entries(input.qualifiers ?? {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${canonicalizeClaimText(value)}`);
+  return hashText([
+    canonicalizeClaimText(input.subject),
+    canonicalizeClaimText(input.predicate),
+    canonicalizeClaimText(input.value),
+    ...qualifierEntries,
+  ].join("|"));
 }
 
 export function publicSubmissionFingerprint(submission: PublicSubmission): string {

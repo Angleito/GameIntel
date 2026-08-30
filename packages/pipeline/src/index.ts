@@ -1,5 +1,7 @@
 import {
+  CLAIM_EXTRACTOR_VERSION,
   NormalizedSourceItemSchema,
+  canonicalClaimKey,
   dispositionFor,
   hashText,
   lineageFor,
@@ -7,6 +9,7 @@ import {
   type NormalizedSourceItem,
   type ScoreInput,
 } from "@gameintel/core";
+import { extractClaims } from "./extract.ts";
 
 export type IngestionScoring = Omit<ScoreInput, "collectionRelevance"> & { collectionRelevance: number };
 
@@ -29,3 +32,5 @@ export function prepareIngestion(
   const newsworthiness = scoreNewsworthiness(scoring);
   return { item, rawHash, lineageId, newsworthiness, disposition: dispositionFor(newsworthiness, existingArticleId) };
 }
+
+export { CLAIM_EXTRACTOR_VERSION, canonicalClaimKey, extractClaims };

@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 // Like the in-memory backend it is single-process only: schema versioning uses
 // PRAGMA user_version, timestamps are ISO-8601 strings, JSON columns are TEXT.
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS games (
@@ -31,7 +31,8 @@ CREATE INDEX IF NOT EXISTS source_items_by_hash ON source_items(source_id, raw_h
 CREATE TABLE IF NOT EXISTS source_item_revisions (
   id TEXT PRIMARY KEY, source_item_id TEXT NOT NULL REFERENCES source_items(id),
   raw_hash TEXT NOT NULL, excerpt TEXT NOT NULL, content_type TEXT, http_status INTEGER,
-  is_current INTEGER NOT NULL DEFAULT 0, processing_version TEXT, created_at TEXT NOT NULL
+  is_current INTEGER NOT NULL DEFAULT 0, processing_version TEXT, title TEXT, content TEXT,
+  content_purged_at INTEGER, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS revisions_by_item ON source_item_revisions(source_item_id, is_current);
 CREATE TABLE IF NOT EXISTS provenance_families (
@@ -56,16 +57,31 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS claims (
   id TEXT PRIMARY KEY, game_id TEXT NOT NULL, source_item_id TEXT NOT NULL REFERENCES source_items(id),
   subject TEXT NOT NULL, predicate TEXT NOT NULL, value TEXT NOT NULL,
-  qualifiers TEXT NOT NULL, spoiler_tags TEXT NOT NULL, exploit_class TEXT,
+  qualifiers TEXT NOT NULL, claim_key TEXT, spoiler_tags TEXT NOT NULL, exploit_class TEXT,
   evidence_level TEXT NOT NULL, attribution_type TEXT NOT NULL, statement TEXT, editorial_assessment TEXT,
-  state TEXT NOT NULL, created_at TEXT NOT NULL
+  state TEXT NOT NULL, canonical_claim_id TEXT, created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS claims_canonical_idx ON claims(canonical_claim_id);
+CREATE TABLE IF NOT EXISTS canonical_claims (
+  id TEXT PRIMARY KEY, game_id TEXT NOT NULL, subject TEXT NOT NULL, predicate TEXT NOT NULL,
+  value TEXT NOT NULL, qualifiers TEXT NOT NULL, canonical_key TEXT NOT NULL, created_at TEXT NOT NULL,
+  UNIQUE (game_id, canonical_key)
+);
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  id TEXT PRIMARY KEY, source_item_revision_id TEXT NOT NULL REFERENCES source_item_revisions(id),
+  processing_version TEXT, normalization_version TEXT, claim_extractor_version TEXT, confidence_model_version TEXT,
+  status TEXT NOT NULL DEFAULT 'completed', triggered_by TEXT, trigger_reason TEXT NOT NULL,
+  created_at TEXT NOT NULL, completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS analysis_runs_revision_idx ON analysis_runs(source_item_revision_id, status, completed_at);
 CREATE TABLE IF NOT EXISTS evidence (
   id TEXT PRIMARY KEY, claim_id TEXT NOT NULL REFERENCES claims(id),
   source_item_id TEXT NOT NULL, source_item_revision_id TEXT NOT NULL REFERENCES source_item_revisions(id),
+  analysis_run_id TEXT REFERENCES analysis_runs(id),
   provenance_family_id TEXT NOT NULL, stance TEXT NOT NULL, evidence_type TEXT NOT NULL,
   excerpt TEXT NOT NULL, start_ms INTEGER, end_ms INTEGER, lineage_id TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS evidence_claim_run_idx ON evidence(claim_id, analysis_run_id) WHERE analysis_run_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS evidence_reviews (
   id TEXT PRIMARY KEY, evidence_id TEXT NOT NULL REFERENCES evidence(id),
   source_item_revision_id TEXT NOT NULL, reviewer_id TEXT NOT NULL,
@@ -148,6 +164,16 @@ export function openSqliteDatabase(path: string): Database {
   db.exec("PRAGMA foreign_keys = ON");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
+  // The SQLite portability backend is persistent too. Apply the v3 shape
+  // after the base schema so databases created before claim keys and analysis
+  // normalization can be upgraded without a destructive table rebuild.
+  const columns = db.query("PRAGMA table_info(claims)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "claim_key")) db.exec("ALTER TABLE claims ADD COLUMN claim_key TEXT");
+  const runColumns = db.query("PRAGMA table_info(analysis_runs)").all() as Array<{ name: string }>;
+  if (!runColumns.some((column) => column.name === "normalization_version")) db.exec("ALTER TABLE analysis_runs ADD COLUMN normalization_version TEXT");
+  db.exec("DROP INDEX IF EXISTS analysis_runs_identity_idx");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS claims_source_item_key_idx ON claims(source_item_id, claim_key) WHERE claim_key IS NOT NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS analysis_runs_identity_idx ON analysis_runs(source_item_revision_id, normalization_version, claim_extractor_version, confidence_model_version) WHERE status = 'completed'");
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   return db;
 }

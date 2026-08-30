@@ -66,6 +66,62 @@ pipeline produce a different result?" without refetching. The review surface
 (`listArticleEvidence`) exposes the processing version next to each evidence
 item.
 
+## Analysis runs interpret immutable revisions
+
+A source revision is content history; an analysis run is an interpretation of
+that history. Runs are keyed by the analysis-stage versions that produced them
+(`normalizationVersion`, `claimExtractorVersion`,
+`confidenceModelVersion`). `processingVersion` remains parser/source
+extraction audit metadata and is deliberately not part of run identity, so:
+
+- Re-ingesting unchanged content whose revision was already analyzed by the
+  current versions is a plain duplicate.
+- Re-ingesting unchanged content after a normalization/extractor/confidence-model
+  upgrade automatically reprocesses the stored revision with the new versions;
+  a parser metadata change alone does not cause reprocess ping-pong.
+- An operator can explicitly reprocess any retained revision using the local
+  `reprocess-revision` command; it re-derives claims from stored revision
+  content without refetching.
+
+Evidence belongs to the run that produced it. Only evidence from the latest
+completed run of the current revision influences claim state, confidence, and
+publication eligibility; superseded runs are retained for audit and review.
+New evidence always requires fresh review before it can support publication,
+so reprocessing can never silently re-publish.
+
+Reprocessing requires retained content. Revisions store the title and the
+policy-limited retained text that produced their claims, and retention purges
+clear them; a purged revision cannot be reprocessed.
+
+## Canonical claim identity
+
+Claims are stored per source item, and v1 converges normalized lexical
+identities from different sources on one **canonical claim**. The canonical key is
+derived from the normalized subject/predicate/value plus strictly semantic
+qualifiers (time, platform, build, ...). Transport details such as URL, RSS,
+or pasted text, and review status, belong to the source item and evidence
+provenance — never to the semantic identity — so a URL report and a community
+observation of the same fact resolve to the same canonical claim.
+
+Consequences:
+
+- Confidence aggregates evidence from every member claim of the canonical
+  claim across all current revisions and runs, instead of requiring an exact
+  row match.
+- A current rejection or dispute on any member's evidence demotes every article
+  that references the canonical claim, even when the article cites only a
+  sibling claim. An unreviewed sibling is editorial attention, not a
+  publication blocker; every selected citation still requires current,
+  approved direct evidence from its exact claim and latest analysis run.
+- A revised high-newsworthiness source resolves to its existing article via
+  canonical identity (`update_existing`) only when the new revision still
+  contains a selected canonical claim. Historical claims invalidate their old
+  articles but cannot make a repurposed source URL overwrite an unrelated
+  publication.
+- Discussion-only intake updates internal claims and provenance only. It never
+  mutates article publication state; privileged editorial review refreshes
+  affected publications when a sibling is explicitly rejected or disputed.
+
 ## Claims and uncertainty
 
 Claims support states: `unverified`, `supported`, `contested`, `confirmed`,
