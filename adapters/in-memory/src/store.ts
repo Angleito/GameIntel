@@ -55,7 +55,34 @@ export type RevisionRecord = {
   httpStatus: number | null;
   isCurrent: boolean;
   processingVersion: string | null;
+  title: string;
+  content: string;
+  contentPurgedAt: number | null;
   createdAt: string;
+};
+
+export type CanonicalClaimRecord = {
+  id: string;
+  gameId: string;
+  subject: string;
+  predicate: string;
+  value: string;
+  qualifiers: Record<string, string>;
+  canonicalKey: string;
+  createdAt: string;
+};
+
+export type AnalysisRunRecord = {
+  id: string;
+  sourceItemRevisionId: string;
+  processingVersion: string | null;
+  claimExtractorVersion: string | null;
+  confidenceModelVersion: string | null;
+  status: "completed" | "superseded";
+  triggeredBy: string | null;
+  triggerReason: string;
+  createdAt: string;
+  completedAt: string | null;
 };
 
 export type ProvenanceFamilyRecord = {
@@ -112,6 +139,7 @@ export type ClaimRecord = {
   statement: string | null;
   editorialAssessment: string | null;
   state: ClaimState;
+  canonicalClaimId: string | null;
   createdAt: string;
 };
 
@@ -120,6 +148,7 @@ export type EvidenceRecord = {
   claimId: string;
   sourceItemId: string;
   sourceItemRevisionId: string;
+  analysisRunId: string;
   provenanceFamilyId: string;
   stance: "supports" | "contradicts" | "context";
   evidenceType: NormalizedSourceItem["claims"][number]["evidenceType"];
@@ -307,6 +336,8 @@ export type MemoryStore = {
   sources: Map<string, SourceInput>;
   sourceItems: Map<string, SourceItemRecord>;
   revisions: Map<string, RevisionRecord>;
+  canonicalClaims: Map<string, CanonicalClaimRecord>;
+  analysisRuns: Map<string, AnalysisRunRecord>;
   provenanceFamilies: Map<string, ProvenanceFamilyRecord>;
   sourceItemProvenance: Map<string, SourceItemProvenanceRecord>;
   provenanceRelationships: Map<string, ProvenanceRelationshipRecord>;
@@ -335,6 +366,8 @@ export function createMemoryStore(): MemoryStore {
     sources: new Map(),
     sourceItems: new Map(),
     revisions: new Map(),
+    canonicalClaims: new Map(),
+    analysisRuns: new Map(),
     provenanceFamilies: new Map(),
     sourceItemProvenance: new Map(),
     provenanceRelationships: new Map(),

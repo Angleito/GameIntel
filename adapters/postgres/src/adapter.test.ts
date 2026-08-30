@@ -30,7 +30,12 @@ function cleanupContractData(db: Db): Promise<void> {
     await transaction`DELETE FROM articles WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM events WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM evidence WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'contract-test')`;
+    await transaction`
+      DELETE FROM analysis_runs
+      WHERE source_item_revision_id IN (SELECT id FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'contract-test'))
+    `;
     await transaction`DELETE FROM claims WHERE game_id = 'contract-test'`;
+    await transaction`DELETE FROM canonical_claims WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM media_assets WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM submission_moderation_actions WHERE submission_id IN (SELECT id FROM public_submissions WHERE collection_id = 'contract-test')`;
     await transaction`DELETE FROM public_submissions WHERE collection_id = 'contract-test'`;

@@ -24,6 +24,7 @@ import {
   clearCoverMedia,
   closeDb,
   completeIngestionJob,
+  createAnalysisRun,
   createArticleDraft,
   createDb,
   createEvent,
@@ -33,12 +34,14 @@ import {
   ensureGame,
   ensureSource,
   failIngestionJob,
+  getAnalysisRun,
   getArticle,
   getIngestionJob,
   getIngestionQueueStatus,
   getPublicArticle,
   getPublicSubmissionForModeration,
   getPublicSubmissionForPromotion,
+  getRevisionForAnalysis,
   heartbeatIngestionWorker,
   importMediaCatalog,
   insertClaim,
@@ -46,6 +49,7 @@ import {
   invalidateEvidenceApprovalsForSourceItem,
   inTransaction,
   linkSourceItemProvenance,
+  listAnalysisRuns,
   listArticleEvidence,
   listArticles,
   listCoverCandidates,
@@ -61,16 +65,19 @@ import {
   purgeExpiredSourceContent,
   recommendArticleCover,
   recordSubmissionModerationAction,
+  refreshArticlesForCanonicalClaims,
   refreshClaimState,
   refreshClaimStatesForSourceItem,
   rejectCoverMedia,
   renewIngestionJobLease,
+  resolveExistingArticleForCanonicalClaims,
   reviewArticle,
   reviewEvidence,
   reviewPublicSubmission,
   reviewSource,
   reviewSourcePolicy,
   setCoverMedia,
+  updateExistingArticle,
   type Db,
 } from "./index.ts";
 
@@ -113,13 +120,23 @@ export class PostgresPersistence implements GameIntelPersistence {
     item: Parameters<typeof insertClaim>[1],
     sourceItemId: string,
     sourceItemRevisionId: string,
+    analysisRunId: string,
     provenanceFamilyId: string,
-    claim: Parameters<typeof insertClaim>[5],
+    claim: Parameters<typeof insertClaim>[6],
     lineageId: string,
-  ) => insertClaim(this.handle, item, sourceItemId, sourceItemRevisionId, provenanceFamilyId, claim, lineageId);
+  ) => insertClaim(this.handle, item, sourceItemId, sourceItemRevisionId, analysisRunId, provenanceFamilyId, claim, lineageId);
   refreshClaimState = (claimId: string) => refreshClaimState(this.handle, claimId);
   refreshClaimStatesForSourceItem = (sourceItemId: string) => refreshClaimStatesForSourceItem(this.handle, sourceItemId);
   calculateClaimConfidence = (claimId: string) => calculateClaimConfidence(this.handle, claimId);
+  getAnalysisRun = (sourceItemRevisionId: string, versions: Parameters<typeof getAnalysisRun>[2]) =>
+    getAnalysisRun(this.handle, sourceItemRevisionId, versions);
+  createAnalysisRun = (input: Parameters<typeof createAnalysisRun>[1]) => createAnalysisRun(this.handle, input);
+  listAnalysisRuns = (sourceItemRevisionId: string) => listAnalysisRuns(this.handle, sourceItemRevisionId);
+  getRevisionForAnalysis = (revisionId: string) => getRevisionForAnalysis(this.handle, revisionId);
+  resolveExistingArticleForCanonicalClaims = (canonicalClaimIds: string[]) =>
+    resolveExistingArticleForCanonicalClaims(this.handle, canonicalClaimIds);
+  refreshArticlesForCanonicalClaims = (canonicalClaimIds: string[], auditAction: string, auditReason: string) =>
+    refreshArticlesForCanonicalClaims(this.handle, canonicalClaimIds, auditAction, auditReason);
 
   invalidateEvidenceApprovalsForSourceItem = (sourceItemId: string) => invalidateEvidenceApprovalsForSourceItem(this.handle, sourceItemId);
   listArticleEvidence = (articleId: string) => listArticleEvidence(this.handle, articleId);
@@ -141,6 +158,7 @@ export class PostgresPersistence implements GameIntelPersistence {
   approveArticle = (articleId: string, approver: string) => approveArticle(this.handle, articleId, approver);
 
   createArticleDraft = (input: Parameters<typeof createArticleDraft>[1]) => createArticleDraft(this.handle, input);
+  updateExistingArticle = (input: Parameters<typeof updateExistingArticle>[1]) => updateExistingArticle(this.handle, input);
   getArticle = (idOrSlug: string) => getArticle(this.handle, idOrSlug);
   listArticles = (collectionId: string) => listArticles(this.handle, collectionId);
   getPublicArticle = (idOrSlug: string) => getPublicArticle(this.handle, idOrSlug);

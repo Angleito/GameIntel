@@ -61,10 +61,68 @@ export type SourceInput = {
 
 export type InsertedSourceItem = {
   id: string;
-  revisionId: string | null;
+  // The revision that stores (or already stored) this content. A duplicate
+  // re-fetch returns the current revision id so the pipeline can decide
+  // whether that revision's analysis is up to date with the current
+  // parser/extractor/confidence versions.
+  revisionId: string;
   provenanceFamilyId: string;
   duplicate: boolean;
   materialChange: boolean;
+};
+
+export type InsertedClaim = {
+  claimId: string;
+  canonicalClaimId: string;
+};
+
+// The implementation versions that produced an analysis run. A completed run
+// with identical versions is idempotent; any mismatch means the revision has
+// not been interpreted by the current pipeline and should be reprocessed.
+export type AnalysisVersions = {
+  processingVersion: string;
+  claimExtractorVersion: string;
+  confidenceModelVersion: string;
+};
+
+export type AnalysisRunInfo = {
+  id: string;
+  sourceItemRevisionId: string;
+  processingVersion: string | null;
+  claimExtractorVersion: string | null;
+  confidenceModelVersion: string | null;
+  status: "completed" | "superseded";
+  triggeredBy: string | null;
+  triggerReason: string;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+// Immutable revision content plus the source policy context needed to
+// reprocess it with the current pipeline without refetching.
+export type RevisionForAnalysis = {
+  id: string;
+  sourceItemId: string;
+  title: string;
+  content: string;
+  rawHash: string;
+  processingVersion: string | null;
+  contentPurged: boolean;
+  sourceItem: {
+    collectionId: string;
+    externalId: string;
+    url: string;
+    sourceStrength: SourceStrength;
+    publicationMode: PublicationMode;
+    discoveredAt: string;
+    publishedAt: string | null;
+    inputKind: string;
+    contentType: string | null;
+    language: string | null;
+    lineageId: string;
+    submittedBy: string | null;
+  };
+  source: SourceInput;
 };
 
 export type SourceItemProvenanceInfo = {
@@ -251,13 +309,20 @@ export interface ClaimRepository {
     item: NormalizedSourceItem,
     sourceItemId: string,
     sourceItemRevisionId: string,
+    analysisRunId: string,
     provenanceFamilyId: string,
     claim: NormalizedSourceItem["claims"][number],
     lineageId: string,
-  ): Promise<string>;
+  ): Promise<InsertedClaim>;
   refreshClaimState(claimId: string): Promise<ClaimState>;
   refreshClaimStatesForSourceItem(sourceItemId: string): Promise<number>;
   calculateClaimConfidence(claimId: string): Promise<number>;
+  getAnalysisRun(sourceItemRevisionId: string, versions: AnalysisVersions): Promise<AnalysisRunInfo | null>;
+  createAnalysisRun(input: { sourceItemRevisionId: string; versions: AnalysisVersions; triggeredBy?: string | null; triggerReason: string }): Promise<AnalysisRunInfo>;
+  listAnalysisRuns(sourceItemRevisionId: string): Promise<AnalysisRunInfo[]>;
+  getRevisionForAnalysis(revisionId: string): Promise<RevisionForAnalysis | null>;
+  resolveExistingArticleForCanonicalClaims(canonicalClaimIds: string[]): Promise<string | null>;
+  refreshArticlesForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]>;
 }
 
 export interface EvidenceRepository {
@@ -283,6 +348,21 @@ export interface PublicationRepository {
     confidence: number;
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
   }): Promise<string>;
+  // Refreshes an existing article from a re-analyzed source revision:
+  // replaces the article_sources references owned by that source item,
+  // writes an article_revisions row, and re-derives evidence state and
+  // confidence (a published article demotes to source_review/draft and its
+  // materialized public record is dropped until evidence is re-reviewed).
+  updateExistingArticle(input: {
+    articleId: string;
+    sourceItemId: string;
+    title: string;
+    description: string;
+    body: ArticleBody;
+    newsworthiness: number;
+    confidence: number;
+    sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
+  }): Promise<void>;
   getArticle(idOrSlug: string): Promise<Article | null>;
   listArticles(collectionId: string): Promise<Article[]>;
   // The public article surface: sanitized records (publicSafe + spoiler-safe

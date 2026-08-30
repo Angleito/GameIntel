@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hashText } from "@gameintel/core";
-import { createArticleDraft, createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, getPublicArticle, insertClaim, insertSourceItem, listArticles, listPublicArticles, materializePublicArticle, setCoverMedia, closeDb, createDb, type Db } from "./index.ts";
+import { createAnalysisRun, createArticleDraft, createQuarantinedSubmission, ensureGame, ensureSource, enqueueSourceIngestJob, getArticle, getPublicArticle, insertClaim, insertSourceItem, listArticles, listPublicArticles, materializePublicArticle, setCoverMedia, closeDb, createDb, type Db } from "./index.ts";
 
 // Privilege-boundary tests for the local reference deployment. They assert
 // that the capability roles enforce the plan's hard rule: a public-facing
@@ -58,7 +58,12 @@ describe("PostgreSQL capability role privileges", () => {
         await transaction`DELETE FROM article_revisions WHERE article_id IN (SELECT id FROM articles WHERE game_id = 'privilege-test')`;
         await transaction`DELETE FROM articles WHERE game_id = 'privilege-test'`;
         await transaction`DELETE FROM evidence WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
+        await transaction`
+          DELETE FROM analysis_runs
+          WHERE source_item_revision_id IN (SELECT id FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test'))
+        `;
         await transaction`DELETE FROM claims WHERE game_id = 'privilege-test'`;
+        await transaction`DELETE FROM canonical_claims WHERE game_id = 'privilege-test'`;
         await transaction`DELETE FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
         await transaction`DELETE FROM source_item_provenance WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'privilege-test')`;
         await transaction`DELETE FROM provenance_families WHERE collection_id = 'privilege-test'`;
@@ -172,7 +177,8 @@ describe("PostgreSQL capability role privileges", () => {
         accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, termsReviewedAt: null, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
       }, null);
       if (!inserted.revisionId) throw new Error("Expected a source revision");
-      const claimId = await insertClaim(editor, surfaceItem, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, {
+      const run = await createAnalysisRun(editor, { sourceItemRevisionId: inserted.revisionId, versions: { processingVersion: "1", claimExtractorVersion: "1", confidenceModelVersion: "1" }, triggerReason: "privilege-test" });
+      const claim = await insertClaim(editor, surfaceItem, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, {
         subject: "Subject",
         predicate: "reports",
         value: "Value",
@@ -189,6 +195,7 @@ describe("PostgreSQL capability role privileges", () => {
         startMs: null,
         endMs: null,
       }, "lineage-surface");
+      const claimId = claim.claimId;
       articleId = await createArticleDraft(editor, {
         collectionId: "privilege-test",
         title: "Boundary article",

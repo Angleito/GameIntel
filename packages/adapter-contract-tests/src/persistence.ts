@@ -2,15 +2,22 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { GameIntelPersistence } from "@gameintel/contracts";
-import { hashText, lineageFor } from "@gameintel/core";
+import type { AnalysisVersions, GameIntelPersistence } from "@gameintel/contracts";
+import { CLAIM_EXTRACTOR_VERSION, CONFIDENCE_MODEL_VERSION, NORMALIZATION_VERSION, canonicalClaimKey, hashText, lineageFor } from "@gameintel/core";
 import { testItem, testPolicy, testProfile, testSourceInput } from "./fixtures.ts";
 
 export type PersistenceFactory = () => Promise<{ persistence: GameIntelPersistence; close?: () => Promise<void> }>;
 
+const testVersions: AnalysisVersions = {
+  processingVersion: NORMALIZATION_VERSION,
+  claimExtractorVersion: CLAIM_EXTRACTOR_VERSION,
+  confidenceModelVersion: CONFIDENCE_MODEL_VERSION,
+};
+
 // Behavioral contract every persistence adapter must satisfy: source
-// revisions, transactions, duplicates, evidence relationships, publication
-// invalidation, review gates, audit behavior.
+// revisions, transactions, duplicates, canonical claim identity, analysis
+// runs, evidence relationships, publication invalidation, review gates,
+// audit behavior.
 export function runPersistenceContract(factory: PersistenceFactory): void {
   describe("persistence contract", () => {
     let persistence: GameIntelPersistence;
@@ -26,16 +33,16 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       await close?.();
     });
 
-    async function seeded(): Promise<{ sourceItemId: string; revisionId: string; provenanceFamilyId: string; claimId: string }> {
+    async function seeded(): Promise<{ sourceItemId: string; revisionId: string; provenanceFamilyId: string; claimId: string; canonicalClaimId: string }> {
       await persistence.ensureGame(testProfile());
       await persistence.ensureSource(testSourceInput());
       const item = testItem();
       const rawHash = hashText(`${item.title}\n${item.text}`);
       const lineageId = lineageFor(item);
       const inserted = await persistence.insertSourceItem(item, rawHash, lineageId, testPolicy(), null);
-      if (!inserted.revisionId) throw new Error("Expected a source revision");
-      const claimId = await persistence.insertClaim(item, inserted.id, inserted.revisionId, inserted.provenanceFamilyId, item.claims[0], lineageId);
-      return { sourceItemId: inserted.id, revisionId: inserted.revisionId, provenanceFamilyId: inserted.provenanceFamilyId, claimId };
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: inserted.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const insertedClaim = await persistence.insertClaim(item, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, item.claims[0], lineageId);
+      return { sourceItemId: inserted.id, revisionId: inserted.revisionId, provenanceFamilyId: inserted.provenanceFamilyId, claimId: insertedClaim.claimId, canonicalClaimId: insertedClaim.canonicalClaimId };
     }
 
     test("stores immutable source revisions and deduplicates unchanged content", async () => {
@@ -49,7 +56,9 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(inserted.revisionId).not.toBeNull();
       const duplicate = await persistence.insertSourceItem(item, rawHash, lineageId, testPolicy(), null);
       expect(duplicate.duplicate).toBe(true);
-      expect(duplicate.revisionId).toBeNull();
+      // A duplicate returns the current revision id so the pipeline can
+      // decide whether that revision's analysis is up to date.
+      expect(duplicate.revisionId).toBe(inserted.revisionId);
       const changed = await persistence.insertSourceItem(
         { ...item, text: `${item.text} Material change.` },
         hashText(`${item.title}\n${item.text} Material change.`),
@@ -70,7 +79,8 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       const lineageId = lineageFor(item);
       const inserted = await persistence.insertSourceItem(item, rawHash, lineageId, testPolicy(), null);
       expect(inserted.revisionId).not.toBeNull();
-      const claimId = await persistence.insertClaim(item, inserted.id, inserted.revisionId!, inserted.provenanceFamilyId, item.claims[0], lineageId);
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: inserted.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const insertedClaim = await persistence.insertClaim(item, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, item.claims[0], lineageId);
       const articleId = await persistence.createArticleDraft({
         collectionId: "contract-test",
         title: "Versioned article",
@@ -78,7 +88,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
         body: { summary: "Versioned.", sections: [], unknowns: [] },
         newsworthiness: 0.5,
         confidence: 0.5,
-        sourceRefs: [{ sourceId: "contract-source", claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+        sourceRefs: [{ sourceId: "contract-source", claimId: insertedClaim.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
       });
       const evidence = await persistence.listArticleEvidence(articleId);
       expect(evidence).toHaveLength(1);
@@ -91,6 +101,156 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
         null,
       );
       expect(changed.revisionId).not.toBe(inserted.revisionId);
+    });
+
+    test("converges semantically identical claims from different sources onto one canonical claim", async () => {
+      await persistence.ensureGame(testProfile());
+      await persistence.ensureSource(testSourceInput());
+      const urlItem = testItem("contract-source", { inputKind: "url", externalId: "external-url-source", lineageId: "lineage-url-source" });
+      const textItem = testItem("contract-source", { inputKind: "pasted_text", externalId: "external-text-source", lineageId: "lineage-text-source" });
+      const first = await persistence.insertSourceItem(urlItem, hashText(`${urlItem.title}\n${urlItem.text}`), urlItem.lineageId!, testPolicy(), null);
+      const second = await persistence.insertSourceItem(textItem, hashText(`${textItem.title}\n${textItem.text}`), textItem.lineageId!, testPolicy(), null);
+      const firstRun = await persistence.createAnalysisRun({ sourceItemRevisionId: first.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const secondRun = await persistence.createAnalysisRun({ sourceItemRevisionId: second.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const firstClaim = await persistence.insertClaim(urlItem, first.id, first.revisionId, firstRun.id, first.provenanceFamilyId, urlItem.claims[0], urlItem.lineageId!);
+      const secondClaim = await persistence.insertClaim(textItem, second.id, second.revisionId, secondRun.id, second.provenanceFamilyId, textItem.claims[0], textItem.lineageId!);
+      // Same normalized fact, different transport kind: same canonical claim.
+      expect(firstClaim.canonicalClaimId).toBe(secondClaim.canonicalClaimId);
+      expect(firstClaim.claimId).not.toBe(secondClaim.claimId);
+      // Confidence aggregates evidence from both member claims.
+      const confidence = await persistence.calculateClaimConfidence(firstClaim.claimId);
+      expect(confidence).toBeGreaterThan(0);
+    });
+
+    test("propagates a rejected or disputed review across canonical claim members", async () => {
+      const first = await seeded();
+      await persistence.ensureSource(testSourceInput({ id: "second-source", canonicalUrl: "https://second.example.com", publicCitationUrl: "https://second.example.com/report" }));
+      const sibling = testItem("second-source", { inputKind: "pasted_text", externalId: "external-sibling", lineageId: "lineage-sibling" });
+      const inserted = await persistence.insertSourceItem(sibling, hashText(`${sibling.title}\n${sibling.text}`), sibling.lineageId!, testPolicy(), null);
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: inserted.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const siblingClaim = await persistence.insertClaim(sibling, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, sibling.claims[0], sibling.lineageId!);
+      expect(siblingClaim.canonicalClaimId).toBe(first.canonicalClaimId);
+
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Canonical article",
+        description: "Canonical.",
+        body: { summary: "Canonical.", sections: [], unknowns: [] },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId: first.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      const evidence = await persistence.listArticleEvidence(articleId);
+      expect(evidence).toHaveLength(2);
+      const ownEvidence = evidence.find((item) => item.claimId === first.claimId)!;
+      const siblingEvidence = evidence.find((item) => item.claimId === siblingClaim.claimId)!;
+      await persistence.reviewEvidence(ownEvidence.id, "reviewer-a", "approved", "Approves");
+      await persistence.reviewEvidence(siblingEvidence.id, "reviewer-a", "approved", "Approves");
+      await persistence.reviewArticle(articleId, "editor", "Editorial review");
+      await persistence.approveArticle(articleId, "approver");
+      expect((await persistence.getArticle(articleId))?.status).toBe("approved");
+
+      // A dispute on the sibling's evidence (semantically the same claim)
+      // demotes the article that only references the first member claim.
+      await persistence.reviewEvidence(siblingEvidence.id, "reviewer-b", "disputed", "Conflicting conditions");
+      expect(await persistence.getArticle(articleId)).toMatchObject({ status: "draft", sourceReviewCompleted: false, approvedBy: null });
+      await expect(persistence.reviewArticle(articleId, "editor", "Blocked")).rejects.toThrow("current evidence approval");
+    });
+
+    test("analysis runs are idempotent per version tuple and supersede prior runs on rerun", async () => {
+      const seededResult = await seeded();
+      const rerun = await persistence.getAnalysisRun(seededResult.revisionId, testVersions);
+      expect(rerun).not.toBeNull();
+      const runs = await persistence.listAnalysisRuns(seededResult.revisionId);
+      expect(runs).toHaveLength(1);
+      expect(runs[0].status).toBe("completed");
+
+      const newVersions: AnalysisVersions = { ...testVersions, claimExtractorVersion: "2" };
+      const rerunRun = await persistence.createAnalysisRun({ sourceItemRevisionId: seededResult.revisionId, versions: newVersions, triggeredBy: "operator", triggerReason: "extractor-upgrade" });
+      expect(rerunRun.claimExtractorVersion).toBe("2");
+      const after = await persistence.listAnalysisRuns(seededResult.revisionId);
+      expect(after).toHaveLength(2);
+      expect(after.find((run) => run.status === "completed")?.id).toBe(rerunRun.id);
+      expect(after.find((run) => run.status === "superseded")?.id).toBe(runs[0].id);
+      // Same version tuple is idempotent.
+      const again = await persistence.getAnalysisRun(seededResult.revisionId, newVersions);
+      expect(again?.id).toBe(rerunRun.id);
+    });
+
+    test("reprocessing a revision binds new evidence to the new run and supersedes the old", async () => {
+      const seededResult = await seeded();
+      const item = testItem();
+      const initialRun = await persistence.getAnalysisRun(seededResult.revisionId, testVersions);
+      const insertedClaim = await persistence.insertClaim(item, seededResult.sourceItemId, seededResult.revisionId, initialRun!.id, seededResult.provenanceFamilyId, item.claims[0], "lineage-rerun");
+      expect(insertedClaim.claimId).toBe(seededResult.claimId);
+      expect(insertedClaim.canonicalClaimId).toBe(seededResult.canonicalClaimId);
+
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Rerun article",
+        description: "Rerun.",
+        body: { summary: "Rerun.", sections: [], unknowns: [] },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId: seededResult.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      expect(await persistence.listArticleEvidence(articleId)).toHaveLength(1);
+      const versionBump: AnalysisVersions = { ...testVersions, confidenceModelVersion: "2" };
+      const rerunRun = await persistence.createAnalysisRun({ sourceItemRevisionId: seededResult.revisionId, versions: versionBump, triggeredBy: "operator", triggerReason: "confidence-model-upgrade" });
+      await persistence.insertClaim(item, seededResult.sourceItemId, seededResult.revisionId, rerunRun.id, seededResult.provenanceFamilyId, item.claims[0], "lineage-rerun-2");
+      // The old evidence row still exists but is no longer current.
+      const evidence = await persistence.listArticleEvidence(articleId);
+      expect(evidence).toHaveLength(2);
+      expect(evidence.filter((row) => row.current)).toHaveLength(1);
+      await persistence.refreshArticlesForCanonicalClaims([seededResult.canonicalClaimId], "analysis_run.completed", "Rerun refresh");
+      expect(await persistence.getArticle(articleId)).toMatchObject({ status: "draft", sourceReviewCompleted: false });
+    });
+
+    test("resolves an existing article from canonical claim identity and supports update_existing", async () => {
+      await persistence.ensureGame(testProfile());
+      await persistence.ensureSource(testSourceInput());
+      const item = testItem();
+      const rawHash = hashText(`${item.title}\n${item.text}`);
+      const lineageId = lineageFor(item);
+      const inserted = await persistence.insertSourceItem(item, rawHash, lineageId, testPolicy(), null);
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: inserted.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const claim = await persistence.insertClaim(item, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, item.claims[0], lineageId);
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Resolvable article",
+        description: "Resolvable.",
+        body: { summary: "Resolvable.", sections: [], unknowns: [] },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId: claim.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      expect(await persistence.resolveExistingArticleForCanonicalClaims([claim.canonicalClaimId])).toBe(articleId);
+      expect(await persistence.resolveExistingArticleForCanonicalClaims([canonicalClaimKey({ subject: "Unrelated", predicate: "is", value: "nothing" })])).toBeNull();
+
+      // A material change to the same source item produces a different
+      // claim; update_existing replaces the article's references for that
+      // source item with the new claim.
+      const changedItem = { ...item, text: `${item.text} Revised observation.` } as typeof item;
+      changedItem.claims = [{ ...item.claims[0], value: "a different observation" }];
+      const changed = await persistence.insertSourceItem(changedItem, hashText(`${changedItem.title}\n${changedItem.text}`), lineageId, testPolicy(), null);
+      expect(changed.materialChange).toBe(true);
+      const changedRun = await persistence.createAnalysisRun({ sourceItemRevisionId: changed.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const changedClaim = await persistence.insertClaim(changedItem, changed.id, changed.revisionId, changedRun.id, changed.provenanceFamilyId, changedItem.claims[0], lineageId);
+      expect(changedClaim.canonicalClaimId).not.toBe(claim.canonicalClaimId);
+      await persistence.updateExistingArticle({
+        articleId,
+        sourceItemId: changed.id,
+        title: "Resolvable article (revised)",
+        description: "Resolved.",
+        body: { summary: "Resolved.", sections: [], unknowns: [] },
+        newsworthiness: 0.6,
+        confidence: 0.6,
+        sourceRefs: [{ sourceId: "contract-source", claimId: changedClaim.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      const updated = await persistence.getArticle(articleId);
+      expect(updated).toMatchObject({ title: "Resolvable article (revised)", status: "draft" });
+      // The old reference was replaced; only the revised claim's evidence remains.
+      expect((await persistence.listArticleEvidence(articleId)).map((row) => row.claimId)).toEqual([changedClaim.claimId]);
     });
 
     test("rolls back all writes when the transaction callback throws", async () => {
@@ -249,8 +409,9 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       const item = testItem();
       const lineageId = lineageFor(item);
       const first = await persistence.insertSourceItem(item, hashText(`${item.title}\n${item.text}`), lineageId, testPolicy(), null);
-      if (!first.revisionId) throw new Error("Expected a source revision");
-      const claimId = await persistence.insertClaim(item, first.id, first.revisionId, first.provenanceFamilyId, item.claims[0], lineageId);
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: first.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const insertedClaim = await persistence.insertClaim(item, first.id, first.revisionId, run.id, first.provenanceFamilyId, item.claims[0], lineageId);
+      const claimId = insertedClaim.claimId;
       const articleId = await persistence.createArticleDraft({
         collectionId: "contract-test",
         title: "Staleness article",
