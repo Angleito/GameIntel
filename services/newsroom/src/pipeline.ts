@@ -1,5 +1,6 @@
 import {
   effectivePublicationMode,
+  NORMALIZATION_VERSION,
   PublicationModeSchema,
   SourcePolicySchema,
   SourceStrengthSchema,
@@ -68,6 +69,11 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
   source = { ...source, sourceStrength, publicationMode, policy };
   item = {
     ...item,
+    // Every stored revision records which pipeline implementation produced
+    // it. Paths that compose a parser version (URL ingestion) stamp a richer
+    // "<parser>.<normalization>" value; everything else defaults to the
+    // current normalization version.
+    processingVersion: item.processingVersion ?? NORMALIZATION_VERSION,
     sourceStrength,
     publicationMode,
     claims: item.claims.map((claim) => ({

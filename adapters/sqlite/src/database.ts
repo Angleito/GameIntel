@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS source_items_by_hash ON source_items(source_id, raw_h
 CREATE TABLE IF NOT EXISTS source_item_revisions (
   id TEXT PRIMARY KEY, source_item_id TEXT NOT NULL REFERENCES source_items(id),
   raw_hash TEXT NOT NULL, excerpt TEXT NOT NULL, content_type TEXT, http_status INTEGER,
-  is_current INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL
+  is_current INTEGER NOT NULL DEFAULT 0, processing_version TEXT, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS revisions_by_item ON source_item_revisions(source_item_id, is_current);
 CREATE TABLE IF NOT EXISTS provenance_families (

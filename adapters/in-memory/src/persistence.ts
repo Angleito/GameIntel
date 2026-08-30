@@ -214,6 +214,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
         contentType: item.contentType,
         httpStatus: item.inputKind === "url" || item.inputKind === "rss" ? 200 : null,
         isCurrent: true,
+        processingVersion: item.processingVersion ?? null,
         createdAt: now,
       });
       return {
@@ -258,6 +259,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       contentType: item.contentType,
       httpStatus: item.inputKind === "url" || item.inputKind === "rss" ? 200 : null,
       isCurrent: true,
+      processingVersion: item.processingVersion ?? null,
       createdAt: now,
     });
     return {
@@ -531,6 +533,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
         claimId: record.claimId,
         sourceItemId: record.sourceItemId,
         sourceItemRevisionId: record.sourceItemRevisionId,
+        processingVersion: this.store.revisions.get(record.sourceItemRevisionId)?.processingVersion ?? null,
         excerpt: record.excerpt,
         evidenceType: record.evidenceType,
         current: this.store.revisions.get(record.sourceItemRevisionId)?.isCurrent === true,

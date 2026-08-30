@@ -260,8 +260,8 @@ export async function insertSourceItem(
       WHERE id = ${itemId}
     `;
     await db`
-      INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current)
-      VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${item.inputKind === "url" || item.inputKind === "rss" ? 200 : null}, true)
+      INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version)
+      VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${item.inputKind === "url" || item.inputKind === "rss" ? 200 : null}, true, ${item.processingVersion ?? null})
     `;
     return {
       id: itemId,
@@ -278,8 +278,8 @@ export async function insertSourceItem(
     VALUES (${itemId}, ${item.sourceId}, ${item.collectionId}, ${item.externalId}, ${item.url}, ${item.url.startsWith("urn:") ? null : item.url}, ${item.title}, ${excerpt}, ${rawHash}, ${lineageId}, ${item.sourceStrength}, ${item.publicationMode}, false, ${item.discoveredAt}, ${item.publishedAt}, ${item.inputKind}, ${item.contentType}, ${item.language}, ${retentionUntil(policy)}, 'normalized', ${submittedBy})
   `;
   await db`
-    INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current)
-    VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${item.inputKind === "url" || item.inputKind === "rss" ? 200 : null}, true)
+    INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version)
+    VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${item.inputKind === "url" || item.inputKind === "rss" ? 200 : null}, true, ${item.processingVersion ?? null})
   `;
   return {
     id: itemId,
@@ -1170,7 +1170,7 @@ export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceIte
 export async function listArticleEvidence(db: Db, articleId: string): Promise<ArticleEvidenceForReview[]> {
   const rows = await db`
     SELECT DISTINCT e.id, e.claim_id, e.source_item_id, e.source_item_revision_id, e.excerpt, e.evidence_type,
-      COALESCE(revision.is_current, false) AS current
+      revision.processing_version, COALESCE(revision.is_current, false) AS current
     FROM article_sources article_source
     JOIN evidence e ON e.claim_id = article_source.claim_id
     LEFT JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
@@ -1182,6 +1182,7 @@ export async function listArticleEvidence(db: Db, articleId: string): Promise<Ar
     claimId: row.claim_id as string,
     sourceItemId: row.source_item_id as string,
     sourceItemRevisionId: row.source_item_revision_id as string | null,
+    processingVersion: (row.processing_version as string | null) ?? null,
     excerpt: row.excerpt as string,
     evidenceType: row.evidence_type as string,
     current: row.current === true,

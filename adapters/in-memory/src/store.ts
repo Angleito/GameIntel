@@ -54,6 +54,7 @@ export type RevisionRecord = {
   contentType: string | null;
   httpStatus: number | null;
   isCurrent: boolean;
+  processingVersion: string | null;
   createdAt: string;
 };
 

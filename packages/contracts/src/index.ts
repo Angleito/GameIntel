@@ -184,6 +184,9 @@ export type ArticleEvidenceForReview = {
   claimId: string;
   sourceItemId: string;
   sourceItemRevisionId: string | null;
+  // Version of the parser/normalization/claim-extraction implementation that
+  // produced the source revision this evidence is tied to.
+  processingVersion: string | null;
   excerpt: string;
   evidenceType: string;
   current: boolean;
