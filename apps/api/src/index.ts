@@ -9,7 +9,7 @@ import {
 } from "@gameintel/core";
 import { SubmissionRateLimitError } from "@gameintel/contracts";
 import { loadCollectionProfile, loadProjectConfig, loadSourceRegistry, profilePath, sourceRegistryPath } from "@gameintel/config";
-import { ingestText, promotePublicSubmission } from "@gameintel/newsroom";
+import { ingestText, promotePublicSubmission, reprocessSourceRevision } from "@gameintel/newsroom";
 import { LocalAbuseProtection, StaticOperatorIdentityProvider, SubmissionIdentityError } from "@gameintel/newsroom/identity";
 import { createServiceRuntime } from "@gameintel/newsroom/runtime";
 import { createPublicOutputArtifact } from "@gameintel/output";
@@ -32,6 +32,10 @@ const SubmissionReviewSchema = z.object({
 }).strict();
 const SubmissionPromotionSchema = z.object({
   notes: z.string().trim().max(2_000).optional(),
+}).strict();
+const ReprocessSchema = z.object({
+  revisionId: z.string().min(1).max(256),
+  reason: z.string().trim().max(2_000).optional(),
 }).strict();
 
 function requireEnv(name: string): string {
@@ -250,6 +254,27 @@ app.post("/internal/operator/submissions/:submissionId/promote", async (c) => {
 app.get("/internal/operator/jobs/:jobKey", async (c) => {
   const job = await operatorRuntime.jobQueue.getIngestionJob(c.req.param("jobKey"));
   return job ? c.json(job) : c.json({ error: "Job not found" }, 404);
+});
+app.post("/internal/operator/reprocess", async (c) => {
+  let payload: unknown;
+  try {
+    payload = await readJsonBody(c.req.raw, 4_096);
+  } catch (error) {
+    if (error instanceof RequestBodyError) return c.json({ error: error.message }, error.status);
+    return c.json({ error: "Unable to read request body" }, 400);
+  }
+  const parsed = ReprocessSchema.safeParse(payload);
+  if (!parsed.success) return c.json({ error: "A source revision id is required" }, 400);
+  try {
+    const result = await reprocessSourceRevision(operatorRuntime.persistence, {
+      revisionId: parsed.data.revisionId,
+      triggeredBy: currentOperatorId,
+      reason: parsed.data.reason,
+    });
+    return c.json(result, 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unable to reprocess revision" }, 400);
+  }
 });
 app.post("/internal/operator/ingest/url", async (c) => {
   let payload: unknown;

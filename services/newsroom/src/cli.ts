@@ -3,7 +3,7 @@ import { loadProjectConfig } from "@gameintel/config";
 import { PublicSubmissionReviewDecisionSchema } from "@gameintel/core";
 import { loadFixture } from "./fixture.ts";
 import { ingestText, promotePublicSubmission } from "./ingest.ts";
-import { processFixture } from "./pipeline.ts";
+import { processFixture, reprocessSourceRevision } from "./pipeline.ts";
 import { createRuntime } from "./runtime.ts";
 
 const runtime = createRuntime();
@@ -73,6 +73,16 @@ try {
       notes: typeof commandOptions.notes === "string" ? commandOptions.notes : undefined,
       profileId,
     }), null, 2));
+  } else if (command === "list-analysis-runs") {
+    if (!args[0]) throw new Error("Usage: newsroom list-analysis-runs <source-revision-id>");
+    console.log(JSON.stringify(await runtime.persistence.listAnalysisRuns(args[0]), null, 2));
+  } else if (command === "reprocess-revision") {
+    if (!args[0]) throw new Error("Usage: newsroom reprocess-revision <source-revision-id> [--reason <text>]");
+    console.log(JSON.stringify(await reprocessSourceRevision(runtime.persistence, {
+      revisionId: args[0],
+      triggeredBy: operator,
+      reason: typeof commandOptions.reason === "string" ? commandOptions.reason : undefined,
+    }), null, 2));
   } else if (command === "list") {
     console.log(JSON.stringify(await runtime.persistence.listArticles(profileId), null, 2));
   } else if (command === "import-media") {
@@ -133,7 +143,7 @@ try {
   } else if (command === "public-snapshot") {
     console.log(JSON.stringify(await runtime.persistence.publicArticles(profileId), null, 2));
   } else {
-    console.log("Commands: ingest <fixture.json> --allow-fixtures, ingest-url --collection <profile-id> --source <id> --url <url> [--profile <profile-id>], ingest-text --collection <profile-id> --source <id> --title <title> --text-file <path> [--citation-url <url>] [--profile <profile-id>], list-submissions [--profile <profile-id>], review-submission <submission-id> --decision under_review|rejected|blocked [--notes <text>], promote-submission <submission-id> [--notes <text>] [--profile <profile-id>], list [--profile <profile-id>], import-media <catalog.json>, list-cover-candidates <article-id>, set-cover <article-id> <media-id>, approve-media <media-id> | approve-media --all [--profile <profile-id>], approve-cover <article-id>, reject-cover <article-id>, clear-cover <article-id>, review-source <id>, list-evidence <article-id>, review-evidence <id> [--decision approved|rejected|disputed], review-article <id>, approve <id>, publish <id>, public-snapshot [--profile <profile-id>]");
+    console.log("Commands: ingest <fixture.json> --allow-fixtures, ingest-url --collection <profile-id> --source <id> --url <url> [--profile <profile-id>], ingest-text --collection <profile-id> --source <id> --title <title> --text-file <path> [--citation-url <url>] [--profile <profile-id>], list-submissions [--profile <profile-id>], review-submission <submission-id> --decision under_review|rejected|blocked [--notes <text>], promote-submission <submission-id> [--notes <text>] [--profile <profile-id>], list [--profile <profile-id>], import-media <catalog.json>, list-cover-candidates <article-id>, set-cover <article-id> <media-id>, approve-media <media-id> | approve-media --all [--profile <profile-id>], approve-cover <article-id>, reject-cover <article-id>, clear-cover <article-id>, review-source <id>, list-evidence <article-id>, review-evidence <id> [--decision approved|rejected|disputed], review-article <id>, approve <id>, publish <id>, public-snapshot [--profile <profile-id>], list-analysis-runs <source-revision-id>, reprocess-revision <source-revision-id> [--reason <text>]");
   }
 } finally {
   await runtime.close();
