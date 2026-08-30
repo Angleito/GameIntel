@@ -111,8 +111,8 @@ Consequences:
 - A current rejection or dispute on any member's evidence demotes every article
   that references the canonical claim, even when the article cites only a
   sibling claim. An unreviewed sibling is editorial attention, not a
-  publication blocker; completeness is based on direct evidence for the
-  article's selected claim.
+  publication blocker; every selected citation still requires current,
+  approved direct evidence from its exact claim and latest analysis run.
 - A revised high-newsworthiness source resolves to its existing article via
   canonical identity (`update_existing`) only when the new revision still
   contains a selected canonical claim. Historical claims invalidate their old

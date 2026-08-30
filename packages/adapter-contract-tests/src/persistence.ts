@@ -168,6 +168,51 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       await expect(persistence.reviewArticle(articleId, "editor", "Blocked")).rejects.toThrow("current evidence approval");
     });
 
+    test("requires current direct evidence for every selected source reference", async () => {
+      await persistence.ensureGame(testProfile());
+      await persistence.ensureSource(testSourceInput());
+      await persistence.ensureSource(testSourceInput({ id: "second-source", canonicalUrl: "https://second.example.com", publicCitationUrl: "https://second.example.com/report" }));
+      const sourceA = testItem("contract-source", { externalId: "stale-source-a", lineageId: "stale-lineage-a" });
+      const insertedA = await persistence.insertSourceItem(sourceA, hashText(`${sourceA.title}\n${sourceA.text}`), sourceA.lineageId!, testPolicy(), null);
+      const runA = await persistence.createAnalysisRun({ sourceItemRevisionId: insertedA.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const claimA = await persistence.insertClaim(sourceA, insertedA.id, insertedA.revisionId, runA.id, insertedA.provenanceFamilyId, sourceA.claims[0], sourceA.lineageId!);
+      const sourceB = testItem("second-source", { externalId: "stale-source-b", lineageId: "stale-lineage-b" });
+      const insertedB = await persistence.insertSourceItem(sourceB, hashText(`${sourceB.title}\n${sourceB.text}`), sourceB.lineageId!, testPolicy(), null);
+      const runB = await persistence.createAnalysisRun({ sourceItemRevisionId: insertedB.revisionId, versions: testVersions, triggerReason: "contract-test" });
+      const claimB = await persistence.insertClaim(sourceB, insertedB.id, insertedB.revisionId, runB.id, insertedB.provenanceFamilyId, sourceB.claims[0], sourceB.lineageId!);
+      expect(claimB.canonicalClaimId).toBe(claimA.canonicalClaimId);
+
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Two source article",
+        description: "Two source article.",
+        body: { summary: "Two source article.", sections: [], unknowns: [] },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [
+          { sourceId: "contract-source", claimId: claimA.claimId, citationLabel: "Source A", publicCitationUrl: "https://contract.example.com/report" },
+          { sourceId: "second-source", claimId: claimB.claimId, citationLabel: "Source B", publicCitationUrl: "https://second.example.com/report" },
+        ],
+      });
+      const evidence = await persistence.listArticleEvidence(articleId);
+      await persistence.reviewEvidence(evidence.find((item) => item.claimId === claimA.claimId)!.id, "reviewer-a", "approved", "Approves A");
+      await persistence.reviewEvidence(evidence.find((item) => item.claimId === claimB.claimId)!.id, "reviewer-a", "approved", "Approves B");
+      await persistence.reviewArticle(articleId, "editor", "Editorial review");
+      await persistence.approveArticle(articleId, "approver");
+      expect((await persistence.getArticle(articleId))?.status).toBe("approved");
+
+      const claimY = { ...sourceA.claims[0], value: "an unrelated revised observation" };
+      const changedA = { ...sourceA, text: `${sourceA.text} Materially revised.`, claims: [claimY] };
+      const changed = await persistence.insertSourceItem(changedA, hashText(`${changedA.title}\n${changedA.text}`), sourceA.lineageId!, testPolicy(), null);
+      expect(changed.materialChange).toBe(true);
+      const changedRun = await persistence.createAnalysisRun({ sourceItemRevisionId: changed.revisionId, versions: testVersions, triggerReason: "material-change" });
+      const changedClaim = await persistence.insertClaim(changedA, changed.id, changed.revisionId, changedRun.id, changed.provenanceFamilyId, claimY, sourceA.lineageId!);
+      await persistence.refreshArticlesForCanonicalClaims([claimA.canonicalClaimId, changedClaim.canonicalClaimId], "analysis_run.completed", "Source A changed from X to Y");
+
+      expect(await persistence.getArticle(articleId)).toMatchObject({ status: "draft", sourceReviewCompleted: false, approvedBy: null });
+      await expect(persistence.reviewArticle(articleId, "editor", "Stale citation")).rejects.toThrow("current evidence approval");
+    });
+
     test("analysis runs are idempotent per version tuple and supersede prior runs on rerun", async () => {
       const seededResult = await seeded();
       const rerun = await persistence.getAnalysisRun(seededResult.revisionId, testVersions);

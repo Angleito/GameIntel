@@ -868,7 +868,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       articleId,
     );
     const references = new Map<string, Set<string>>();
-    const evidenceRows = new Map<string, { row: Record<string, unknown>; direct: boolean }>();
+    const evidenceRows = new Map<string, { row: Record<string, unknown>; directReferenceIds: Set<string> }>();
     let latestChangeAt = 0;
     for (const row of rows) {
       const referenceId = row.article_source_id as string;
@@ -877,14 +877,15 @@ export class SQLitePersistence implements GameIntelPersistence {
       const evidenceId = row.evidence_id as string | null;
       if (!evidenceId) continue;
       const direct = row.direct_evidence === 1 || row.direct_evidence === true;
-      if (direct) references.get(referenceId)!.add(evidenceId);
-      evidenceRows.set(evidenceId, { row, direct });
+      const evidence = evidenceRows.get(evidenceId) ?? { row, directReferenceIds: new Set<string>() };
+      if (direct) evidence.directReferenceIds.add(referenceId);
+      evidenceRows.set(evidenceId, evidence);
     }
     let approvedCount = 0;
     let directEvidenceCount = 0;
     let blockedBy: "rejected" | "disputed" | null = null;
     for (const [evidenceId, evidence] of evidenceRows) {
-      const { row, direct } = evidence;
+      const { row, directReferenceIds } = evidence;
       const sourceItemRevisionId = row.source_item_revision_id as string | null;
       latestChangeAt = Math.max(latestChangeAt, timestamp(row.evidence_created_at as string), timestamp(row.source_item_revision_created_at as string));
       if (!sourceItemRevisionId || (row.source_item_revision_current !== 1 && row.source_item_revision_current !== true)
@@ -893,8 +894,9 @@ export class SQLitePersistence implements GameIntelPersistence {
       const review = this.evidenceApprovalState(evidenceId, sourceItemRevisionId, policy);
       latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
       if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
-      if (direct) {
+      if (directReferenceIds.size) {
         directEvidenceCount += 1;
+        for (const referenceId of directReferenceIds) references.get(referenceId)!.add(evidenceId);
         if (review.approved) approvedCount += 1;
       }
     }

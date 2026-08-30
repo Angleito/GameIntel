@@ -1349,7 +1349,7 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
   // dispute, but an unreviewed sibling must not demote an already reviewed
   // article simply because it joined the same canonical knowledge object.
   const references = new Map<string, Set<string>>();
-  const evidenceRows = new Map<string, { row: Record<string, unknown>; direct: boolean }>();
+  const evidenceRows = new Map<string, { row: Record<string, unknown>; directReferenceIds: Set<string> }>();
   let latestChangeAt = 0;
   for (const row of rows as Array<Record<string, unknown>>) {
     const referenceId = row.article_source_id as string;
@@ -1358,15 +1358,16 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
     const evidenceId = row.evidence_id as string | null;
     if (!evidenceId) continue;
     const direct = row.direct_evidence === true;
-    if (direct) references.get(referenceId)!.add(evidenceId);
-    evidenceRows.set(evidenceId, { row, direct });
+    const evidence = evidenceRows.get(evidenceId) ?? { row, directReferenceIds: new Set<string>() };
+    if (direct) evidence.directReferenceIds.add(referenceId);
+    evidenceRows.set(evidenceId, evidence);
   }
 
   let approvedCount = 0;
   let directEvidenceCount = 0;
   let blockedBy: "rejected" | "disputed" | null = null;
   for (const [evidenceId, evidence] of evidenceRows) {
-    const { row, direct } = evidence;
+    const { row, directReferenceIds } = evidence;
     const sourceItemRevisionId = row.source_item_revision_id as string | null;
     latestChangeAt = Math.max(
       latestChangeAt,
@@ -1378,8 +1379,9 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
     const review = await evidenceApprovalState(db, evidenceId, sourceItemRevisionId, policy);
     latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
     if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
-    if (direct) {
+    if (directReferenceIds.size) {
       directEvidenceCount += 1;
+      for (const referenceId of directReferenceIds) references.get(referenceId)!.add(evidenceId);
       if (review.approved) approvedCount += 1;
     }
   }
