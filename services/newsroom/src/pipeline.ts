@@ -253,14 +253,25 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     }
     await transaction.refreshClaimStatesForSourceItem(inserted.id);
 
-    // Claims from superseded revisions remain relevant to existing article
-    // resolution and invalidation. A material change with zero newly-extracted
-    // claims must still demote articles that cite its older knowledge.
+    // Historical claims invalidate affected articles, but they cannot select
+    // one for continuity. A source URL can be repurposed from X to unrelated
+    // Y; only claims produced by this revision can update an X/Y article.
+    // The historical union still matters for X -> no claims and X -> Y
+    // invalidation.
     const sourceCanonicalClaimIds = await transaction.canonicalClaimIdsForSourceItem(inserted.id);
     const affectedCanonicalClaimIds = [...new Set([...canonicalClaimIds, ...sourceCanonicalClaimIds])];
-    const existingArticleId = await resolveArticleForClaims(transaction, affectedCanonicalClaimIds);
+    const existingArticleId = await resolveArticleForClaims(transaction, canonicalClaimIds);
     const score = prepared.newsworthiness;
     const disposition = existingArticleId ? "update_existing" : prepared.disposition;
+    const mayRefreshPublication = source.publicationMode === "normal";
+
+    // Before a normal-source revision can update/create a publication, demote
+    // every article whose current evidence references an old or new member.
+    // Discussion-only intake remains knowledge-only under the operator role.
+    const refreshedForMaterialChange = inserted.materialChange && mayRefreshPublication;
+    if (refreshedForMaterialChange) {
+      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source materially changed; articles referencing old or new canonical claims were refreshed");
+    }
 
     // Unchanged content whose analysis run is stale: the revision was just
     // reprocessed with the current pipeline, but no event is recorded for a
@@ -269,7 +280,9 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     // evidence (which needs fresh review) and any changed claim set
     // propagate to publication state.
     if (inserted.duplicate) {
-      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source unchanged; analysis rerun with current pipeline versions");
+      if (mayRefreshPublication) {
+        await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source unchanged; analysis rerun with current pipeline versions");
+      }
       return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: ["Source content unchanged; analysis rerun with current pipeline versions"] };
     }
 
@@ -293,7 +306,9 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     }
 
     if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal" || claimIds.length === 0) {
-      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source evidence changed; articles referencing its canonical claims were refreshed");
+      if (mayRefreshPublication && !refreshedForMaterialChange) {
+        await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source evidence changed; articles referencing its canonical claims were refreshed");
+      }
       const warning = claimIds.length === 0
         ? "No claims were extracted from the source item"
         : "Source policy or public citation does not permit article output";
@@ -403,7 +418,11 @@ export async function reprocessSourceRevision(persistence: GameIntelPersistence,
     await transaction.refreshClaimStatesForSourceItem(revision.sourceItemId);
     const sourceCanonicalClaimIds = await transaction.canonicalClaimIdsForSourceItem(revision.sourceItemId);
     const affectedCanonicalClaimIds = [...new Set([...canonicalClaimIds, ...sourceCanonicalClaimIds])];
-    const existingArticleId = await resolveArticleForClaims(transaction, affectedCanonicalClaimIds);
+    // The CLI uses the privileged runtime, so it can invalidate publications
+    // before resolving continuity. As above, only the re-extracted claims can
+    // select an existing article; historical claims are invalidation-only.
+    await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source revision reprocessed with the current pipeline");
+    const existingArticleId = await resolveArticleForClaims(transaction, canonicalClaimIds);
     if (existingArticleId && claimIds.length > 0 && revision.source.publicationMode === "normal" && revision.source.publicCitationUrl) {
       const publicCitationUrl = revision.source.publicCitationUrl;
       const sourceRefs = claimIds.map((claimId, index) => ({
@@ -424,8 +443,6 @@ export async function reprocessSourceRevision(persistence: GameIntelPersistence,
         body: buildBodyFromClaims(bodyClaims),
         changeSummary: "Reprocessed source revision",
       });
-    } else {
-      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source revision reprocessed with the current pipeline");
     }
     return { runId: run.id, claimCount: claimIds.length, sourceItemId: revision.sourceItemId, articleId: existingArticleId };
   });

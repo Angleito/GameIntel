@@ -368,6 +368,68 @@ describe("PostgreSQL capability role privileges", () => {
     }
   });
 
+  test("operator role can supersede an analysis run without article write access", async () => {
+    await cleanup();
+    await setup();
+    const runtime = createDb(runtimeUrl);
+    let revisionId = "";
+    try {
+      await ensureSource(runtime, {
+        id: "privilege-source",
+        type: "operator-note",
+        canonicalUrl: "urn:gameintelgg:source:privilege-source",
+        publicCitationUrl: null,
+        sourceStrength: "COMMUNITY",
+        publicationMode: "discussion_only",
+        policy: { accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true } },
+        enabled: true,
+      });
+      const item = {
+        sourceId: "privilege-source",
+        collectionId: "privilege-test",
+        externalId: "operator-analysis-run",
+        url: "urn:gameintelgg:manual:operator-analysis-run",
+        title: "Operator analysis run",
+        text: "Retained operator intake text.",
+        sourceStrength: "COMMUNITY" as const,
+        publicationMode: "discussion_only" as const,
+        discoveredAt: new Date().toISOString(),
+        publishedAt: null,
+        lineageId: null,
+        inputKind: "pasted_text" as const,
+        contentType: "text/plain",
+        language: null,
+        processingVersion: "1",
+        claims: [],
+      };
+      const inserted = await insertSourceItem(runtime, item, hashText("operator-analysis-run"), "operator-analysis-lineage", {
+        accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, termsReviewedAt: null, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
+      }, null);
+      revisionId = inserted.revisionId;
+      await createAnalysisRun(runtime, {
+        sourceItemRevisionId: revisionId,
+        versions: { normalizationVersion: "1", claimExtractorVersion: "1", confidenceModelVersion: "1" },
+        triggerReason: "privilege-test",
+      });
+    } finally {
+      await closeDb(runtime);
+    }
+
+    const operator = createDb(operatorUrl);
+    try {
+      const v2 = await createAnalysisRun(operator, {
+        sourceItemRevisionId: revisionId,
+        versions: { normalizationVersion: "2", claimExtractorVersion: "1", confidenceModelVersion: "1" },
+        triggerReason: "operator-analysis-upgrade",
+      });
+      expect(v2.normalizationVersion).toBe("2");
+      await denied(() => operator`UPDATE articles SET confidence = 1 WHERE id = 'none'`);
+    } finally {
+      await closeDb(operator);
+      await cleanup();
+    }
+  });
+
   test("bootstrap logins are members of exactly one capability group", async () => {
     const appUsername = new URL(runtimeUrl).username;
     const operatorUsername = new URL(operatorUrl).username;

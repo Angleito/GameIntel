@@ -788,6 +788,26 @@ describe("Tudum newsroom pipeline", () => {
     });
   });
 
+  test("keeps discussion-only matching intake from refreshing publication state", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const normalItem = { ...fixture.item, sourceId: fixture.source.id, inputKind: "pasted_text" as const, claims: [] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, normalItem, fixture.source);
+      const article = storeOf(persistence).articles.get(first.articleId!);
+      if (!article) throw new Error("Expected first article");
+      // Deliberately make the existing publication incomplete. A discussion-
+      // only refresh would demote it; intake must not have that authority.
+      article.status = "published";
+
+      const communitySource = { ...fixture.source, id: "community-observation", sourceStrength: "COMMUNITY" as const, publicationMode: "discussion_only" as const, canonicalUrl: "https://community.example.com", publicCitationUrl: null };
+      const communityItem = { ...fixture.item, sourceId: "community-observation", sourceStrength: "COMMUNITY" as const, inputKind: "pasted_text" as const, claims: [], externalId: "external-community", lineageId: "lineage-community" } as NormalizedSourceItem;
+      await processNormalizedItem(persistence, communityItem, communitySource);
+
+      expect(storeOf(persistence).articles.get(first.articleId!)?.status).toBe("published");
+    });
+  });
+
   test("routes a revised high-newsworthiness source to its existing article via canonical identity", async () => {
     await inRolledBackTransaction(async (persistence) => {
       await persistence.ensureGame(profile);
@@ -810,6 +830,26 @@ describe("Tudum newsroom pipeline", () => {
       expect(updated?.title).toBe(item.title);
       // The updated article requires fresh evidence review.
       expect(updated).toMatchObject({ status: "draft", sourceReviewCompleted: false });
+    });
+  });
+
+  test("does not convert an old article when a source revision changes canonical identity", async () => {
+    await inRolledBackTransaction(async (persistence) => {
+      await persistence.ensureGame(profile);
+      const fixture = await testFixture();
+      const claimX = { ...fixture.item.claims[0], value: "Trailer releases September 1" };
+      const item = { ...fixture.item, sourceId: fixture.source.id, inputKind: "pasted_text" as const, text: "Trailer releases September 1.", claims: [claimX] } as NormalizedSourceItem;
+      const first = await processNormalizedItem(persistence, item, fixture.source);
+      const claimY = { ...claimX, value: "Online mode launches November 10" };
+      const revised = await processNormalizedItem(persistence, {
+        ...item,
+        text: "Online mode launches November 10.",
+        claims: [claimY],
+      }, fixture.source);
+
+      expect(revised.disposition).toBe("research_new_article");
+      expect(revised.articleId).not.toBe(first.articleId);
+      expect((await persistence.listArticles("gta-vi")).map((article) => article.id)).toEqual(expect.arrayContaining([first.articleId!, revised.articleId!]));
     });
   });
 

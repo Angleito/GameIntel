@@ -114,9 +114,13 @@ Consequences:
   publication blocker; completeness is based on direct evidence for the
   article's selected claim.
 - A revised high-newsworthiness source resolves to its existing article via
-  canonical identity (`update_existing`): the article's references are
-  replaced and its evidence state is refreshed, instead of spawning a
-  parallel `research_new_article` draft.
+  canonical identity (`update_existing`) only when the new revision still
+  contains a selected canonical claim. Historical claims invalidate their old
+  articles but cannot make a repurposed source URL overwrite an unrelated
+  publication.
+- Discussion-only intake updates internal claims and provenance only. It never
+  mutates article publication state; privileged editorial review refreshes
+  affected publications when a sibling is explicitly rejected or disputed.
 
 ## Claims and uncertainty
 

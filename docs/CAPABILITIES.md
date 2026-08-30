@@ -167,6 +167,9 @@ The knowledge layer is versioned and convergent across normalized lexical identi
   revision content. Only the latest completed run of the current revision is
   current for review gates and confidence; new evidence always needs fresh
   review before it can support publication.
+- The operator intake role may supersede analysis runs but cannot write article
+  tables. Discussion-only intake is knowledge-only; publication refreshes are
+  reserved for normal-source processing and privileged editorial review.
 
 All adapters implement these as part of the shared persistence contract
 (`runPersistenceContract`), so the in-memory, SQLite, and PostgreSQL
