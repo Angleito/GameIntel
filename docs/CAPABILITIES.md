@@ -147,3 +147,25 @@ profile format       config schema (zod-validated)
 
 This prevents future contributors from accidentally relying on unstable
 internal behavior.
+
+## Canonical claims and analysis runs
+
+The knowledge layer is versioned and convergent across sources:
+
+- `canonicalClaimKey` derives a canonical identity from the normalized
+  subject/predicate/value plus semantic qualifiers. Transport details never
+  enter the key, so a URL report and a community observation of the same fact
+  resolve to one canonical claim. Confidence, claim state, and contradiction
+  propagation operate on canonical identity rather than exact claim rows.
+- `CLAIM_EXTRACTOR_VERSION`, `NORMALIZATION_VERSION`, and
+  `CONFIDENCE_MODEL_VERSION` together key every `analysis_runs` row. A
+  completed run with identical versions is idempotent; any version mismatch
+  (automatic on the next fetch of unchanged content, or an explicit
+  `reprocess-revision`) supersedes prior runs and re-interprets the retained
+  revision content. Only the latest completed run of the current revision is
+  current for review gates and confidence; new evidence always needs fresh
+  review before it can support publication.
+
+All adapters implement these as part of the shared persistence contract
+(`runPersistenceContract`), so the in-memory, SQLite, and PostgreSQL
+backends behave identically.

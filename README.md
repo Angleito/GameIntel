@@ -38,6 +38,14 @@ WHITELISTED INPUTS -> Continuous Ingestion -> Source Revisions
 - **Source revisions are immutable**; evidence points to the exact revision it
   came from, so a changed source can invalidate exactly the evidence it
   affects.
+- **Canonical claims** are the cross-source identity: semantically identical
+  claims from a URL report and a community observation converge on one
+  canonical claim, so confidence aggregates across sources and a rejection or
+  dispute on any member's evidence propagates to every referencing article.
+- **Analysis runs** interpret immutable revisions: each run records the
+  parser/extractor/confidence versions that produced it, reprocessing a
+  revision (automatically on version change, or explicitly on demand)
+  supersedes prior runs, and only the latest completed run is current.
 - **Provenance families** stop echo-count inflation: 100 copies of one report
   are one lineage, and independent evidence matters more than repetition.
 - **Uncertainty is first-class**: claims are `unverified`, `supported`,
