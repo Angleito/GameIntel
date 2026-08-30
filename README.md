@@ -300,8 +300,7 @@ See `docs/RELEASE_CHECKLIST.md`.
 ## Scope And Data Rights
 
 The code is MIT licensed. Source content, fixtures, trademarks, and generated
-publication data may have separate rights and provider terms. Do not host,
-embed, reproduce, or directly link to leaked game data or footage.
+publication data may have separate rights and provider terms.
 
 ## Further Reading
 
