@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { rm } from "node:fs/promises";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { CLAIM_EXTRACTOR_VERSION, GameProfileSchema, type NormalizedSourceItem } from "@gameintel/core";
+import { CLAIM_EXTRACTOR_VERSION, GameProfileSchema, NORMALIZATION_VERSION, type NormalizedSourceItem } from "@gameintel/core";
 import { IngestionLeaseLostError, type GameIntelPersistence } from "@gameintel/contracts";
 import { createInMemoryRuntime, InMemoryJobQueue, InMemoryPersistence, type InMemoryRuntime, type MemoryStore } from "@gameintel/in-memory";
 import { loadFixture } from "./fixture.ts";
@@ -813,7 +813,7 @@ describe("Tudum newsroom pipeline", () => {
     });
   });
 
-  test("reruns analysis when versions change and reprocesses revisions on demand", async () => {
+  test("does not rerun analysis when only parser audit metadata changes", async () => {
     await inRolledBackTransaction(async (persistence) => {
       await persistence.ensureGame(profile);
       const fixture = await testFixture();
@@ -822,27 +822,17 @@ describe("Tudum newsroom pipeline", () => {
       expect(first.duplicate).toBe(false);
       const revisionId = [...storeOf(persistence).revisions.values()].find((revision) => revision.sourceItemId === first.sourceItemId && revision.isCurrent)!.id;
 
-      // Unchanged content ingested with a newer processing version is not a
-      // plain duplicate: the stale run is superseded by a fresh run.
+      // processingVersion records parser/source-extraction audit metadata. It
+      // is deliberately not part of an analysis-run identity, so URL parser
+      // metadata cannot cause reprocess ping-pong with NORMALIZATION_VERSION.
       const newer = await processNormalizedItem(persistence, { ...item, processingVersion: "2.0" } as NormalizedSourceItem, fixture.source);
       expect(newer.duplicate).toBe(true);
-      expect(newer.warnings[0]).toContain("analysis rerun");
+      expect(newer.warnings[0]).toContain("already ingested and analyzed");
       let runs = await persistence.listAnalysisRuns(revisionId);
-      expect(runs).toHaveLength(2);
-      expect(runs.find((run) => run.status === "completed")?.processingVersion).toBe("2.0");
-      expect(runs.find((run) => run.status === "superseded")?.processingVersion).toBe(item.processingVersion);
+      expect(runs).toHaveLength(1);
+      expect(runs[0].normalizationVersion).toBe(NORMALIZATION_VERSION);
 
-      // The current pipeline versions have not interpreted this revision
-      // yet, so an operator-triggered reprocess runs a fresh analysis.
-      const reprocessed = await reprocessSourceRevision(persistence, { revisionId, triggeredBy: "test-operator", reason: "verify extractor v1 output" });
-      expect(reprocessed.claimCount).toBe(1);
-      expect(reprocessed.sourceItemId).toBe(first.sourceItemId);
-      runs = await persistence.listAnalysisRuns(revisionId);
-      expect(runs).toHaveLength(3);
-      const completed = runs.filter((run) => run.status === "completed");
-      expect(completed).toHaveLength(1);
-      expect(completed[0].claimExtractorVersion).toBe(CLAIM_EXTRACTOR_VERSION);
-      expect(runs.filter((run) => run.status === "superseded")).toHaveLength(2);
+      // The same tuple is idempotent through the privileged reprocess path.
       await expect(reprocessSourceRevision(persistence, { revisionId, triggeredBy: "test-operator" })).rejects.toThrow("already analyzed");
     });
   });

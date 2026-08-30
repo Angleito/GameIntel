@@ -76,11 +76,16 @@ export type InsertedClaim = {
   canonicalClaimId: string;
 };
 
-// The implementation versions that produced an analysis run. A completed run
-// with identical versions is idempotent; any mismatch means the revision has
-// not been interpreted by the current pipeline and should be reprocessed.
+// The implementation versions that produced an analysis run. Only the
+// analysis stages participate in run identity: normalization, claim
+// extraction, and the confidence model. The parser version belongs to the
+// immutable source-extraction stage (stored revision content is already
+// parser output), so it never appears here; it is retained as audit
+// metadata on the revision and the run. A completed run with identical
+// versions is idempotent; any mismatch means the revision has not been
+// interpreted by the current pipeline and should be reprocessed.
 export type AnalysisVersions = {
-  processingVersion: string;
+  normalizationVersion: string;
   claimExtractorVersion: string;
   confidenceModelVersion: string;
 };
@@ -89,6 +94,7 @@ export type AnalysisRunInfo = {
   id: string;
   sourceItemRevisionId: string;
   processingVersion: string | null;
+  normalizationVersion: string | null;
   claimExtractorVersion: string | null;
   confidenceModelVersion: string | null;
   status: "completed" | "superseded";
@@ -96,6 +102,22 @@ export type AnalysisRunInfo = {
   triggerReason: string;
   createdAt: string;
   completedAt: string | null;
+};
+
+// The claim fields needed to regenerate an article draft from its currently
+// referenced claims (subject/predicate/value, editorial metadata, and the
+// evidence level/attribution already derived from source trust).
+export type ArticleClaimForDraft = {
+  id: string;
+  sourceItemId: string;
+  subject: string;
+  predicate: string;
+  value: string;
+  evidenceLevel: import("@gameintel/core").EvidenceLevel;
+  attributionType: import("@gameintel/core").AttributionType;
+  statement: string | null;
+  editorialAssessment: string | null;
+  spoilerTags: string[];
 };
 
 // Immutable revision content plus the source policy context needed to
@@ -323,6 +345,11 @@ export interface ClaimRepository {
   getRevisionForAnalysis(revisionId: string): Promise<RevisionForAnalysis | null>;
   resolveExistingArticleForCanonicalClaims(canonicalClaimIds: string[]): Promise<string | null>;
   refreshArticlesForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]>;
+  // Canonical claim identity of EVERY claim belonging to the source item,
+  // including claims from superseded revisions. Refreshing through the
+  // union of old and new canonical ids is what makes a material source
+  // change invalidate articles that cite the source item's earlier claims.
+  canonicalClaimIdsForSourceItem(sourceItemId: string): Promise<string[]>;
 }
 
 export interface EvidenceRepository {
@@ -348,21 +375,24 @@ export interface PublicationRepository {
     confidence: number;
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
   }): Promise<string>;
-  // Refreshes an existing article from a re-analyzed source revision:
-  // replaces the article_sources references owned by that source item,
-  // writes an article_revisions row, and re-derives evidence state and
-  // confidence (a published article demotes to source_review/draft and its
-  // materialized public record is dropped until evidence is re-reviewed).
+  // Refreshes an existing article from a re-analyzed source revision.
+  // Knowledge update: replaces the article_sources references owned by that
+  // source item, writes an article_revisions row, and re-derives evidence
+  // state and confidence (a published article demotes to source_review/draft
+  // and its materialized public record is dropped until evidence is
+  // re-reviewed). When `body` is provided it is a draft regenerated from
+  // ALL currently referenced claims — never from a single newly arrived
+  // source — and is written in the same transaction; otherwise the article
+  // content is left untouched for editorial rework.
   updateExistingArticle(input: {
     articleId: string;
     sourceItemId: string;
-    title: string;
-    description: string;
-    body: ArticleBody;
-    newsworthiness: number;
-    confidence: number;
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
+    body?: ArticleBody | null;
+    changeSummary?: string;
   }): Promise<void>;
+  // Claims currently referenced by the article, for draft regeneration.
+  listClaimsForArticle(articleId: string): Promise<ArticleClaimForDraft[]>;
   getArticle(idOrSlug: string): Promise<Article | null>;
   listArticles(collectionId: string): Promise<Article[]>;
   // The public article surface: sanitized records (publicSafe + spoiler-safe

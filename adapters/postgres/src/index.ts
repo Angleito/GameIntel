@@ -333,18 +333,23 @@ export async function createEvent(db: Db, input: { collectionId: string; sourceI
 
 // Resolves (or creates) the canonical claim for a claim row and links it.
 // Claims are the per-source-item records; canonical claims are the stable
-// cross-source identity. Legacy claim rows without a canonical link resolve
+// cross-source identity. The claim key is the same canonical key derivation
+// used for cross-source identity, so per-source and cross-source identity
+// share one rule. Legacy claim rows without a key/canonical link resolve
 // lazily here on their next touch.
 async function resolveCanonicalClaimForRow(db: Db, claimId: string, collectionId: string, subject: string, predicate: string, value: string, qualifiers: Record<string, string>): Promise<string> {
   const key = canonicalClaimKey({ subject, predicate, value, qualifiers });
-  const canonical = await db`
+  const inserted = await db`
     INSERT INTO canonical_claims (id, game_id, subject, predicate, value, qualifiers, canonical_key)
     VALUES (${id("cc")}, ${collectionId}, ${subject}, ${predicate}, ${value}, ${JSON.stringify(qualifiers)}, ${key})
-    ON CONFLICT (game_id, canonical_key) DO UPDATE SET canonical_key = EXCLUDED.canonical_key
+    ON CONFLICT (game_id, canonical_key) DO NOTHING
     RETURNING id
   `;
-  const canonicalClaimId = canonical[0].id as string;
-  await db`UPDATE claims SET canonical_claim_id = ${canonicalClaimId} WHERE id = ${claimId}`;
+  const canonicalClaimId = inserted[0]?.id as string | undefined ?? (await db`
+    SELECT id FROM canonical_claims WHERE game_id = ${collectionId} AND canonical_key = ${key}
+  `)[0]?.id as string | undefined;
+  if (!canonicalClaimId) throw new Error("Canonical claim could not be resolved");
+  await db`UPDATE claims SET canonical_claim_id = ${canonicalClaimId}, claim_key = ${key} WHERE id = ${claimId}`;
   return canonicalClaimId;
 }
 
@@ -374,19 +379,46 @@ export async function insertClaim(
   claim: NormalizedSourceItem["claims"][number],
   lineageId: string,
 ): Promise<{ claimId: string; canonicalClaimId: string }> {
-  let claimId = id("clm");
-  const existing = await db`SELECT id, canonical_claim_id, qualifiers FROM claims WHERE source_item_id = ${sourceItemId} AND subject = ${claim.subject} AND predicate = ${claim.predicate} AND value = ${claim.value}`;
+  // Per-source claim identity is qualifier-aware: the claim key includes
+  // semantic qualifiers, so {time: night} and {time: day} are distinct
+  // claims even with the same subject/predicate/value.
+  const key = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, qualifiers: claim.qualifiers });
+  let claimId: string;
   let canonicalClaimId: string;
+  let existing = await db`SELECT id, canonical_claim_id, qualifiers FROM claims WHERE source_item_id = ${sourceItemId} AND claim_key = ${key} LIMIT 1`;
+  if (!existing.length) {
+    // Legacy fallback: a pre-key row with the same subject/predicate/value
+    // is the same claim only when its stored qualifiers produce the same
+    // key; otherwise it is a genuinely different claim.
+    const legacy = await db`
+      SELECT id, canonical_claim_id, qualifiers
+      FROM claims
+      WHERE source_item_id = ${sourceItemId}
+        AND subject = ${claim.subject} AND predicate = ${claim.predicate} AND value = ${claim.value}
+        AND claim_key IS NULL
+      LIMIT 1
+    `;
+    if (legacy.length) {
+      const legacyQualifiers = typeof (legacy[0] as Record<string, unknown>).qualifiers === "string"
+        ? JSON.parse((legacy[0] as Record<string, unknown>).qualifiers as string)
+        : (legacy[0] as Record<string, unknown>).qualifiers as Record<string, string>;
+      if (canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, qualifiers: legacyQualifiers }) === key) {
+        await db`UPDATE claims SET claim_key = ${key} WHERE id = ${legacy[0].id as string}`;
+        existing = legacy;
+      }
+    }
+  }
   if (existing.length) {
     claimId = existing[0].id as string;
-    const qualifiers = typeof (existing[0] as Record<string, unknown>).qualifiers === "string"
+    const storedQualifiers = typeof (existing[0] as Record<string, unknown>).qualifiers === "string"
       ? JSON.parse((existing[0] as Record<string, unknown>).qualifiers as string)
       : (existing[0] as Record<string, unknown>).qualifiers as Record<string, string>;
-    canonicalClaimId = (existing[0].canonical_claim_id as string | null) ?? await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, qualifiers);
+    canonicalClaimId = (existing[0].canonical_claim_id as string | null) ?? await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, storedQualifiers);
   } else {
+    claimId = id("clm");
     await db`
-      INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state)
-      VALUES (${claimId}, ${item.collectionId}, ${sourceItemId}, ${claim.subject}, ${claim.predicate}, ${claim.value}, ${JSON.stringify(claim.qualifiers)}, ${JSON.stringify(claim.spoilerTags)}, ${claim.exploitClass}, ${claim.evidenceLevel}, ${claim.attributionType}, ${claim.statement}, ${claim.editorialAssessment}, 'unverified')
+      INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, claim_key, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state)
+      VALUES (${claimId}, ${item.collectionId}, ${sourceItemId}, ${claim.subject}, ${claim.predicate}, ${claim.value}, ${JSON.stringify(claim.qualifiers)}, ${key}, ${JSON.stringify(claim.spoilerTags)}, ${claim.exploitClass}, ${claim.evidenceLevel}, ${claim.attributionType}, ${claim.statement}, ${claim.editorialAssessment}, 'unverified')
     `;
     canonicalClaimId = await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
   }
@@ -409,6 +441,7 @@ function parseAnalysisRun(row: Record<string, unknown>): import("@gameintel/cont
     id: row.id as string,
     sourceItemRevisionId: row.source_item_revision_id as string,
     processingVersion: (row.processing_version as string | null) ?? null,
+    normalizationVersion: (row.normalization_version as string | null) ?? null,
     claimExtractorVersion: (row.claim_extractor_version as string | null) ?? null,
     confidenceModelVersion: (row.confidence_model_version as string | null) ?? null,
     status: row.status as "completed" | "superseded",
@@ -429,7 +462,7 @@ export async function getAnalysisRun(
     FROM analysis_runs
     WHERE source_item_revision_id = ${sourceItemRevisionId}
       AND status = 'completed'
-      AND processing_version = ${versions.processingVersion}
+      AND normalization_version = ${versions.normalizationVersion}
       AND claim_extractor_version = ${versions.claimExtractorVersion}
       AND confidence_model_version = ${versions.confidenceModelVersion}
     LIMIT 1
@@ -450,9 +483,11 @@ export async function createAnalysisRun(
     WHERE source_item_revision_id = ${input.sourceItemRevisionId} AND status = 'completed'
   `;
   await db`
-    INSERT INTO analysis_runs (id, source_item_revision_id, processing_version, claim_extractor_version, confidence_model_version, status, triggered_by, trigger_reason, completed_at)
-    VALUES (${runId}, ${input.sourceItemRevisionId}, ${input.versions.processingVersion}, ${input.versions.claimExtractorVersion}, ${input.versions.confidenceModelVersion}, 'completed', ${input.triggeredBy ?? null}, ${input.triggerReason}, now())
-    ON CONFLICT (source_item_revision_id, processing_version, claim_extractor_version, confidence_model_version) WHERE status = 'completed' DO NOTHING
+    INSERT INTO analysis_runs (id, source_item_revision_id, processing_version, normalization_version, claim_extractor_version, confidence_model_version, status, triggered_by, trigger_reason, completed_at)
+    SELECT ${runId}, revision.id, revision.processing_version, ${input.versions.normalizationVersion}, ${input.versions.claimExtractorVersion}, ${input.versions.confidenceModelVersion}, 'completed', ${input.triggeredBy ?? null}, ${input.triggerReason}, now()
+    FROM source_item_revisions revision
+    WHERE revision.id = ${input.sourceItemRevisionId}
+    ON CONFLICT (source_item_revision_id, normalization_version, claim_extractor_version, confidence_model_version) WHERE status = 'completed' DO NOTHING
   `;
   const rows = await db`
     SELECT *
@@ -460,7 +495,7 @@ export async function createAnalysisRun(
     WHERE id = ${runId} OR (
       source_item_revision_id = ${input.sourceItemRevisionId}
         AND status = 'completed'
-        AND processing_version = ${input.versions.processingVersion}
+        AND normalization_version = ${input.versions.normalizationVersion}
         AND claim_extractor_version = ${input.versions.claimExtractorVersion}
         AND confidence_model_version = ${input.versions.confidenceModelVersion}
     )
@@ -505,7 +540,9 @@ export async function getRevisionForAnalysis(db: Db, revisionId: string): Promis
     content: (row.content as string | null) ?? "",
     rawHash: row.raw_hash as string,
     processingVersion: (row.processing_version as string | null) ?? null,
-    contentPurged: row.content_purged_at !== null,
+    // NULL content means this legacy revision was never retained. Treat it
+    // exactly like purged content instead of running an empty extraction.
+    contentPurged: row.content_purged_at !== null || row.content === null,
     sourceItem: {
       collectionId: row.game_id as string,
       externalId: row.external_id as string,
@@ -575,6 +612,15 @@ export async function refreshArticlesForCanonicalClaims(db: Db, canonicalClaimId
     await audit(db, "system", auditAction, "article", articleId, auditReason);
   }
   return articleIds;
+}
+
+export async function canonicalClaimIdsForSourceItem(db: Db, sourceItemId: string): Promise<string[]> {
+  const rows = await db`
+    SELECT DISTINCT COALESCE(canonical_claim_id, id) AS canonical_claim_id
+    FROM claims
+    WHERE source_item_id = ${sourceItemId}
+  `;
+  return rows.map((row) => row.canonical_claim_id as string);
 }
 
 export async function linkSourceItemProvenance(db: Db, input: {
@@ -979,31 +1025,27 @@ export async function createArticleDraft(db: Db, input: {
 export async function updateExistingArticle(db: Db, input: {
   articleId: string;
   sourceItemId: string;
-  title: string;
-  description: string;
-  body: ArticleBody;
-  newsworthiness: number;
-  confidence: number;
   sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
+  body?: ArticleBody | null;
+  changeSummary?: string;
 }): Promise<void> {
   await inTransaction(db, async (transaction) => {
     await lockArticle(transaction, input.articleId);
+    const current = await transaction`SELECT body FROM articles WHERE id = ${input.articleId} FOR UPDATE`;
+    if (!current.length) throw new Error("Article not found");
+    const body = input.body ?? ArticleBodySchema.parse(typeof current[0].body === "string" ? JSON.parse(current[0].body as string) : current[0].body);
     const maxRevision = await transaction`
       SELECT COALESCE(max(revision_number), 0) AS revision_number
       FROM article_revisions
       WHERE article_id = ${input.articleId}
     `;
     const revisionNumber = Number((maxRevision[0] as Record<string, unknown> | undefined)?.revision_number ?? 0) + 1;
-    await transaction`
-      UPDATE articles
-      SET title = ${input.title}, seo_title = ${input.title}, description = ${input.description},
-        body = ${JSON.stringify(input.body)}, newsworthiness = ${input.newsworthiness},
-        confidence = ${input.confidence}, updated_at = now()
-      WHERE id = ${input.articleId}
-    `;
+    if (input.body) {
+      await transaction`UPDATE articles SET body = ${JSON.stringify(input.body)}, updated_at = now() WHERE id = ${input.articleId}`;
+    }
     await transaction`
       INSERT INTO article_revisions (id, article_id, revision_number, body, change_summary)
-      VALUES (${id("rev")}, ${input.articleId}, ${revisionNumber}, ${JSON.stringify(input.body)}, 'Re-analyzed source revision')
+      VALUES (${id("rev")}, ${input.articleId}, ${revisionNumber}, ${JSON.stringify(body)}, ${input.changeSummary ?? 'Re-analyzed source revision'})
     `;
     await transaction`
       DELETE FROM article_sources
@@ -1019,6 +1061,30 @@ export async function updateExistingArticle(db: Db, input: {
     await refreshArticleEvidenceState(transaction, input.articleId);
     await refreshArticleConfidence(transaction, input.articleId);
   });
+}
+
+export async function listClaimsForArticle(db: Db, articleId: string): Promise<import("@gameintel/contracts").ArticleClaimForDraft[]> {
+  const rows = await db`
+    SELECT DISTINCT claim.id, claim.source_item_id, claim.subject, claim.predicate, claim.value,
+      claim.evidence_level, claim.attribution_type, claim.statement,
+      claim.editorial_assessment, claim.spoiler_tags
+    FROM article_sources article_source
+    JOIN claims claim ON claim.id = article_source.claim_id
+    WHERE article_source.article_id = ${articleId}
+    ORDER BY claim.id
+  `;
+  return rows.map((row) => ({
+    id: row.id as string,
+    sourceItemId: row.source_item_id as string,
+    subject: row.subject as string,
+    predicate: row.predicate as string,
+    value: row.value as string,
+    evidenceLevel: row.evidence_level as import("@gameintel/core").EvidenceLevel,
+    attributionType: row.attribution_type as import("@gameintel/core").AttributionType,
+    statement: row.statement as string | null,
+    editorialAssessment: row.editorial_assessment as string | null,
+    spoilerTags: typeof row.spoiler_tags === "string" ? JSON.parse(row.spoiler_tags as string) : row.spoiler_tags as string[],
+  }));
 }
 
 function parseArticle(row: Record<string, unknown>): Article {
@@ -1251,8 +1317,9 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
   const rows = await db`
     SELECT
       ass.id AS article_source_id,
-      ass.updated_at AS article_source_updated_at,
-      e.id AS evidence_id,
+       ass.updated_at AS article_source_updated_at,
+       e.id AS evidence_id,
+       e.claim_id = claim.id AS direct_evidence,
       e.source_item_revision_id,
       e.created_at AS evidence_created_at,
       revision.is_current AS source_item_revision_current,
@@ -1277,8 +1344,12 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
     LEFT JOIN sources source ON source.id = item.source_id
     WHERE ass.article_id = ${articleId}
   `;
+  // Direct evidence belongs to the exact claim selected by the article.
+  // Sibling canonical-member evidence can block on a current rejection or
+  // dispute, but an unreviewed sibling must not demote an already reviewed
+  // article simply because it joined the same canonical knowledge object.
   const references = new Map<string, Set<string>>();
-  const evidenceRows = new Map<string, Record<string, unknown>>();
+  const evidenceRows = new Map<string, { row: Record<string, unknown>; direct: boolean }>();
   let latestChangeAt = 0;
   for (const row of rows as Array<Record<string, unknown>>) {
     const referenceId = row.article_source_id as string;
@@ -1286,12 +1357,16 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
     latestChangeAt = Math.max(latestChangeAt, timestamp(row.article_source_updated_at));
     const evidenceId = row.evidence_id as string | null;
     if (!evidenceId) continue;
-    references.get(referenceId)!.add(evidenceId);
-    evidenceRows.set(evidenceId, row);
+    const direct = row.direct_evidence === true;
+    if (direct) references.get(referenceId)!.add(evidenceId);
+    evidenceRows.set(evidenceId, { row, direct });
   }
 
   let approvedCount = 0;
-  for (const [evidenceId, row] of evidenceRows) {
+  let directEvidenceCount = 0;
+  let blockedBy: "rejected" | "disputed" | null = null;
+  for (const [evidenceId, evidence] of evidenceRows) {
+    const { row, direct } = evidence;
     const sourceItemRevisionId = row.source_item_revision_id as string | null;
     latestChangeAt = Math.max(
       latestChangeAt,
@@ -1302,12 +1377,17 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
     const policy = SourcePolicySchema.parse(typeof row.source_policy === "string" ? JSON.parse(row.source_policy) : row.source_policy);
     const review = await evidenceApprovalState(db, evidenceId, sourceItemRevisionId, policy);
     latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
-    if (review.approved) approvedCount += 1;
+    if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
+    if (direct) {
+      directEvidenceCount += 1;
+      if (review.approved) approvedCount += 1;
+    }
   }
 
   const sourceCount = references.size;
-  const evidenceCount = evidenceRows.size;
-  const complete = sourceCount > 0
+  const evidenceCount = directEvidenceCount;
+  const complete = blockedBy === null
+    && sourceCount > 0
     && evidenceCount > 0
     && approvedCount === evidenceCount
     && [...references.values()].every((evidenceIds) => evidenceIds.size > 0);
@@ -1327,11 +1407,12 @@ async function refreshArticleEvidenceState(db: Db, articleId: string): Promise<A
     UPDATE articles
     SET source_review_completed = ${evidence.complete},
       article_sources_complete = ${evidence.sourceCount > 0},
-      editor_review_completed = false,
-      approved_by = NULL,
-      approved_at = NULL,
+      editor_review_completed = CASE WHEN ${evidence.complete} THEN editor_review_completed ELSE false END,
+      approved_by = CASE WHEN ${evidence.complete} THEN approved_by ELSE NULL END,
+      approved_at = CASE WHEN ${evidence.complete} THEN approved_at ELSE NULL END,
       status = CASE
         WHEN status = 'retracted' THEN status
+        WHEN ${evidence.complete} AND status IN ('published', 'updated') THEN status
         WHEN ${evidence.complete} THEN 'source_review'
         ELSE 'draft'
       END

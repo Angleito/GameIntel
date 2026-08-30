@@ -76,6 +76,7 @@ export type AnalysisRunRecord = {
   id: string;
   sourceItemRevisionId: string;
   processingVersion: string | null;
+  normalizationVersion: string | null;
   claimExtractorVersion: string | null;
   confidenceModelVersion: string | null;
   status: "completed" | "superseded";
@@ -132,6 +133,7 @@ export type ClaimRecord = {
   predicate: string;
   value: string;
   qualifiers: Record<string, string>;
+  claimKey: string | null;
   spoilerTags: string[];
   exploitClass: string | null;
   evidenceLevel: EvidenceLevel;

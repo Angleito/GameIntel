@@ -136,6 +136,36 @@ function buildDraftContent(
   };
 }
 
+function buildBodyFromClaims(claims: Array<{
+  id: string;
+  subject: string;
+  predicate: string;
+  value: string;
+  evidenceLevel: EvidenceLevel;
+  attributionType: AttributionType;
+  statement: string | null;
+  editorialAssessment: string | null;
+  spoilerTags: string[];
+}>): import("@gameintel/core").ArticleBody {
+  const safeClaims = claims.filter((claim) => claim.spoilerTags.length === 0);
+  return {
+    summary: safeClaims.map((claim) => claim.statement ?? `${claim.subject} ${claim.predicate.replaceAll("_", " ")} ${claim.value}.`).join(" ").slice(0, 280),
+    sections: [{
+      heading: "Evidence",
+      paragraphs: safeClaims.map((claim) => ({
+        text: claim.statement ?? `${claim.subject} ${claim.predicate.replaceAll("_", " ")} ${claim.value}.`,
+        evidenceLevel: claim.evidenceLevel,
+        attributionType: claim.attributionType,
+        claimIds: [claim.id],
+        editorialAssessment: claim.editorialAssessment ?? defaultAssessment(claim.evidenceLevel),
+      })),
+      publicSafe: safeClaims.length > 0,
+      spoilerTags: [],
+    }],
+    unknowns: ["The full set of platform and build conditions has not been independently reproduced."],
+  };
+}
+
 export type LeaseFence = { jobKey: string; leaseToken: string };
 
 // Canonical claim resolution: the newest non-retracted article referencing
@@ -188,11 +218,11 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     const currentRevisionId = inserted.revisionId;
 
     // An analysis run interprets the immutable revision with the current
-    // parser/normalization/extractor/confidence versions. Unchanged content
+    // normalization/extractor/confidence versions. Unchanged content
     // that was already interpreted by these exact versions is a duplicate;
     // unchanged content with a version mismatch is reprocessed in place.
     const versions: AnalysisVersions = {
-      processingVersion: item.processingVersion ?? NORMALIZATION_VERSION,
+      normalizationVersion: NORMALIZATION_VERSION,
       claimExtractorVersion: CLAIM_EXTRACTOR_VERSION,
       confidenceModelVersion: CONFIDENCE_MODEL_VERSION,
     };
@@ -223,7 +253,12 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     }
     await transaction.refreshClaimStatesForSourceItem(inserted.id);
 
-    const existingArticleId = await resolveArticleForClaims(transaction, canonicalClaimIds);
+    // Claims from superseded revisions remain relevant to existing article
+    // resolution and invalidation. A material change with zero newly-extracted
+    // claims must still demote articles that cite its older knowledge.
+    const sourceCanonicalClaimIds = await transaction.canonicalClaimIdsForSourceItem(inserted.id);
+    const affectedCanonicalClaimIds = [...new Set([...canonicalClaimIds, ...sourceCanonicalClaimIds])];
+    const existingArticleId = await resolveArticleForClaims(transaction, affectedCanonicalClaimIds);
     const score = prepared.newsworthiness;
     const disposition = existingArticleId ? "update_existing" : prepared.disposition;
 
@@ -234,36 +269,31 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     // evidence (which needs fresh review) and any changed claim set
     // propagate to publication state.
     if (inserted.duplicate) {
-      await transaction.refreshArticlesForCanonicalClaims(canonicalClaimIds, "analysis_run.completed", "Source unchanged; analysis rerun with current pipeline versions");
+      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source unchanged; analysis rerun with current pipeline versions");
       return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: ["Source content unchanged; analysis rerun with current pipeline versions"] };
     }
 
     const eventId = await transaction.createEvent({ collectionId: item.collectionId, sourceItemId: inserted.id, newsworthiness: score, disposition, existingArticleId });
 
-    if (disposition === "update_existing" && existingArticleId && source.publicationMode === "normal" && claimIds.length > 0) {
-      const current = await transaction.getArticle(existingArticleId);
-      if (!current) throw new Error("Resolved article not found");
+    if (disposition === "update_existing" && existingArticleId && source.publicationMode === "normal" && source.publicCitationUrl && claimIds.length > 0) {
       const content = buildDraftContent(item, source, claimIds, null);
-      const claimConfidences: number[] = [];
-      for (const claimId of claimIds) claimConfidences.push(await transaction.calculateClaimConfidence(claimId));
-      const confidence = claimConfidences.length
-        ? Math.round((claimConfidences.reduce((sum, value) => sum + value, 0) / claimConfidences.length) * 100) / 100
-        : 0;
+      const existingClaims = await transaction.listClaimsForArticle(existingArticleId);
+      const bodyClaims = [
+        ...existingClaims.filter((claim) => claim.sourceItemId !== inserted.id),
+        ...item.claims.map((claim, index) => ({ ...claim, id: claimIds[index] })),
+      ];
       await transaction.updateExistingArticle({
         articleId: existingArticleId,
         sourceItemId: inserted.id,
-        title: content.title,
-        description: content.description,
-        body: content.body,
-        newsworthiness: score,
-        confidence,
         sourceRefs: content.sourceRefs,
+        body: buildBodyFromClaims(bodyClaims),
+        changeSummary: "Re-analyzed source revision",
       });
       return { sourceItemId: inserted.id, eventId, articleId: existingArticleId, disposition, duplicate: false, warnings: [] };
     }
 
     if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal" || claimIds.length === 0) {
-      await transaction.refreshArticlesForCanonicalClaims(canonicalClaimIds, "analysis_run.completed", "Source evidence changed; articles referencing its canonical claims were refreshed");
+      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source evidence changed; articles referencing its canonical claims were refreshed");
       const warning = claimIds.length === 0
         ? "No claims were extracted from the source item"
         : "Source policy or public citation does not permit article output";
@@ -328,7 +358,6 @@ export async function reprocessSourceRevision(persistence: GameIntelPersistence,
     const revision = await transaction.getRevisionForAnalysis(input.revisionId);
     if (!revision) throw new Error(`Source revision ${input.revisionId} not found`);
     if (revision.contentPurged) throw new Error("Source revision content was purged by retention; reprocessing is unavailable");
-    const policy = SourcePolicySchema.parse(revision.source.policy);
     const item: NormalizedSourceItem = {
       sourceId: revision.source.id,
       collectionId: revision.sourceItem.collectionId,
@@ -348,7 +377,7 @@ export async function reprocessSourceRevision(persistence: GameIntelPersistence,
       processingVersion: NORMALIZATION_VERSION,
     };
     const versions: AnalysisVersions = {
-      processingVersion: item.processingVersion,
+      normalizationVersion: NORMALIZATION_VERSION,
       claimExtractorVersion: CLAIM_EXTRACTOR_VERSION,
       confidenceModelVersion: CONFIDENCE_MODEL_VERSION,
     };
@@ -364,35 +393,39 @@ export async function reprocessSourceRevision(persistence: GameIntelPersistence,
     const canonicalClaimIds: string[] = [];
     const provenance = await transaction.getSourceItemProvenance(revision.sourceItemId);
     const provenanceFamilyId = provenance?.provenanceFamilyId ?? revision.sourceItem.lineageId;
-    for (const claim of extractClaims(item, revision.sourceItem.sourceStrength)) {
+    const extracted = extractClaims(item, revision.sourceItem.sourceStrength);
+    for (const claim of extracted) {
       const insertedClaim = await transaction.insertClaim(item, revision.sourceItemId, revision.id, run.id, provenanceFamilyId, claim, revision.sourceItem.lineageId);
       claimIds.push(insertedClaim.claimId);
       canonicalClaimIds.push(insertedClaim.canonicalClaimId);
     }
+    const analyzedItem = { ...item, claims: extracted };
     await transaction.refreshClaimStatesForSourceItem(revision.sourceItemId);
-    const existingArticleId = await resolveArticleForClaims(transaction, canonicalClaimIds);
-    if (existingArticleId && claimIds.length > 0) {
-      const current = await transaction.getArticle(existingArticleId);
-      if (current) {
-        const sourceRefs = claimIds.map((claimId, index) => ({
-          sourceId: revision.source.id,
-          claimId,
-          citationLabel: citationLabel(item.claims[index]?.attributionType ?? "trusted_secondary", revision.source.type),
-          publicCitationUrl: revision.source.publicCitationUrl ?? "https://gameintel.gg/",
-        }));
-        await transaction.updateExistingArticle({
-          articleId: existingArticleId,
-          sourceItemId: revision.sourceItemId,
-          title: current.title,
-          description: current.description,
-          body: current.body,
-          newsworthiness: current.newsworthiness,
-          confidence: current.confidence,
-          sourceRefs,
-        });
-      }
+    const sourceCanonicalClaimIds = await transaction.canonicalClaimIdsForSourceItem(revision.sourceItemId);
+    const affectedCanonicalClaimIds = [...new Set([...canonicalClaimIds, ...sourceCanonicalClaimIds])];
+    const existingArticleId = await resolveArticleForClaims(transaction, affectedCanonicalClaimIds);
+    if (existingArticleId && claimIds.length > 0 && revision.source.publicationMode === "normal" && revision.source.publicCitationUrl) {
+      const publicCitationUrl = revision.source.publicCitationUrl;
+      const sourceRefs = claimIds.map((claimId, index) => ({
+        sourceId: revision.source.id,
+        claimId,
+        citationLabel: citationLabel(analyzedItem.claims[index]?.attributionType ?? "trusted_secondary", revision.source.type),
+        publicCitationUrl,
+      }));
+      const existingClaims = await transaction.listClaimsForArticle(existingArticleId);
+      const bodyClaims = [
+        ...existingClaims.filter((claim) => claim.sourceItemId !== revision.sourceItemId),
+        ...analyzedItem.claims.map((claim, index) => ({ ...claim, id: claimIds[index] })),
+      ];
+      await transaction.updateExistingArticle({
+        articleId: existingArticleId,
+        sourceItemId: revision.sourceItemId,
+        sourceRefs,
+        body: buildBodyFromClaims(bodyClaims),
+        changeSummary: "Reprocessed source revision",
+      });
     } else {
-      await transaction.refreshArticlesForCanonicalClaims(canonicalClaimIds, "analysis_run.completed", "Source revision reprocessed with the current pipeline");
+      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source revision reprocessed with the current pipeline");
     }
     return { runId: run.id, claimCount: claimIds.length, sourceItemId: revision.sourceItemId, articleId: existingArticleId };
   });

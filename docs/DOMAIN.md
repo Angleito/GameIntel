@@ -69,18 +69,19 @@ item.
 ## Analysis runs interpret immutable revisions
 
 A source revision is content history; an analysis run is an interpretation of
-that history. Runs are keyed by the exact implementation versions that
-produced them (`processingVersion`, `claimExtractorVersion`,
-`confidenceModelVersion`), so:
+that history. Runs are keyed by the analysis-stage versions that produced them
+(`normalizationVersion`, `claimExtractorVersion`,
+`confidenceModelVersion`). `processingVersion` remains parser/source
+extraction audit metadata and is deliberately not part of run identity, so:
 
 - Re-ingesting unchanged content whose revision was already analyzed by the
   current versions is a plain duplicate.
-- Re-ingesting unchanged content after a parser/extractor/confidence-model
-  upgrade automatically reprocesses the stored revision with the new
-  versions, superseding the old run.
-- An operator can explicitly reprocess any retained revision
-  (`reprocess-revision`, `POST /internal/operator/reprocess`); it re-derives
-  claims from the stored revision content without refetching.
+- Re-ingesting unchanged content after a normalization/extractor/confidence-model
+  upgrade automatically reprocesses the stored revision with the new versions;
+  a parser metadata change alone does not cause reprocess ping-pong.
+- An operator can explicitly reprocess any retained revision using the local
+  `reprocess-revision` command; it re-derives claims from stored revision
+  content without refetching.
 
 Evidence belongs to the run that produced it. Only evidence from the latest
 completed run of the current revision influences claim state, confidence, and
@@ -94,8 +95,8 @@ clear them; a purged revision cannot be reprocessed.
 
 ## Canonical claim identity
 
-Claims are stored per source item, but semantically identical claims from
-different sources converge on one **canonical claim**. The canonical key is
+Claims are stored per source item, and v1 converges normalized lexical
+identities from different sources on one **canonical claim**. The canonical key is
 derived from the normalized subject/predicate/value plus strictly semantic
 qualifiers (time, platform, build, ...). Transport details such as URL, RSS,
 or pasted text, and review status, belong to the source item and evidence
@@ -107,9 +108,11 @@ Consequences:
 - Confidence aggregates evidence from every member claim of the canonical
   claim across all current revisions and runs, instead of requiring an exact
   row match.
-- A rejection or dispute on any member's evidence demotes every article that
-  references the canonical claim, even when the article cites only a sibling
-  claim.
+- A current rejection or dispute on any member's evidence demotes every article
+  that references the canonical claim, even when the article cites only a
+  sibling claim. An unreviewed sibling is editorial attention, not a
+  publication blocker; completeness is based on direct evidence for the
+  article's selected claim.
 - A revised high-newsworthiness source resolves to its existing article via
   canonical identity (`update_existing`): the article's references are
   replaced and its evidence state is refreshed, instead of spawning a

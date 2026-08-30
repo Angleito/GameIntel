@@ -19,7 +19,8 @@ import {
   approveMediaCollection,
   assertIngestionJobLeaseHeld,
   audit,
-  calculateClaimConfidence,
+    calculateClaimConfidence,
+    canonicalClaimIdsForSourceItem,
   claimIngestionJob,
   clearCoverMedia,
   closeDb,
@@ -50,7 +51,8 @@ import {
   inTransaction,
   linkSourceItemProvenance,
   listAnalysisRuns,
-  listArticleEvidence,
+    listArticleEvidence,
+    listClaimsForArticle,
   listArticles,
   listCoverCandidates,
   listIngestionWorkerHeartbeats,
@@ -128,6 +130,7 @@ export class PostgresPersistence implements GameIntelPersistence {
   refreshClaimState = (claimId: string) => refreshClaimState(this.handle, claimId);
   refreshClaimStatesForSourceItem = (sourceItemId: string) => refreshClaimStatesForSourceItem(this.handle, sourceItemId);
   calculateClaimConfidence = (claimId: string) => calculateClaimConfidence(this.handle, claimId);
+  canonicalClaimIdsForSourceItem = (sourceItemId: string) => canonicalClaimIdsForSourceItem(this.handle, sourceItemId);
   getAnalysisRun = (sourceItemRevisionId: string, versions: Parameters<typeof getAnalysisRun>[2]) =>
     getAnalysisRun(this.handle, sourceItemRevisionId, versions);
   createAnalysisRun = (input: Parameters<typeof createAnalysisRun>[1]) => createAnalysisRun(this.handle, input);
@@ -159,6 +162,7 @@ export class PostgresPersistence implements GameIntelPersistence {
 
   createArticleDraft = (input: Parameters<typeof createArticleDraft>[1]) => createArticleDraft(this.handle, input);
   updateExistingArticle = (input: Parameters<typeof updateExistingArticle>[1]) => updateExistingArticle(this.handle, input);
+  listClaimsForArticle = (articleId: string) => listClaimsForArticle(this.handle, articleId);
   getArticle = (idOrSlug: string) => getArticle(this.handle, idOrSlug);
   listArticles = (collectionId: string) => listArticles(this.handle, collectionId);
   getPublicArticle = (idOrSlug: string) => getPublicArticle(this.handle, idOrSlug);

@@ -177,7 +177,7 @@ describe("PostgreSQL capability role privileges", () => {
         accessMode: "manual", requestsPerMinute: 1, retainRawTextDays: 7, mayStoreFullText: false, attributionRequired: true, termsReviewedAt: null, evidenceReview: { minimumApprovals: 1, preventSubmitterApproval: true },
       }, null);
       if (!inserted.revisionId) throw new Error("Expected a source revision");
-      const run = await createAnalysisRun(editor, { sourceItemRevisionId: inserted.revisionId, versions: { processingVersion: "1", claimExtractorVersion: "1", confidenceModelVersion: "1" }, triggerReason: "privilege-test" });
+      const run = await createAnalysisRun(editor, { sourceItemRevisionId: inserted.revisionId, versions: { normalizationVersion: "1", claimExtractorVersion: "1", confidenceModelVersion: "1" }, triggerReason: "privilege-test" });
       const claim = await insertClaim(editor, surfaceItem, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, {
         subject: "Subject",
         predicate: "reports",

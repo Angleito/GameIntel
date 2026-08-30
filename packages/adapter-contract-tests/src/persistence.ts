@@ -9,7 +9,7 @@ import { testItem, testPolicy, testProfile, testSourceInput } from "./fixtures.t
 export type PersistenceFactory = () => Promise<{ persistence: GameIntelPersistence; close?: () => Promise<void> }>;
 
 const testVersions: AnalysisVersions = {
-  processingVersion: NORMALIZATION_VERSION,
+  normalizationVersion: NORMALIZATION_VERSION,
   claimExtractorVersion: CLAIM_EXTRACTOR_VERSION,
   confidenceModelVersion: CONFIDENCE_MODEL_VERSION,
 };
@@ -103,7 +103,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(changed.revisionId).not.toBe(inserted.revisionId);
     });
 
-    test("converges semantically identical claims from different sources onto one canonical claim", async () => {
+    test("converges identical normalized claims from different sources onto one canonical claim", async () => {
       await persistence.ensureGame(testProfile());
       await persistence.ensureSource(testSourceInput());
       const urlItem = testItem("contract-source", { inputKind: "url", externalId: "external-url-source", lineageId: "lineage-url-source" });
@@ -120,6 +120,16 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       // Confidence aggregates evidence from both member claims.
       const confidence = await persistence.calculateClaimConfidence(firstClaim.claimId);
       expect(confidence).toBeGreaterThan(0);
+    });
+
+    test("keeps qualifier-differentiated claims distinct within one source item", async () => {
+      const seededResult = await seeded();
+      const item = testItem();
+      const run = await persistence.getAnalysisRun(seededResult.revisionId, testVersions);
+      const qualified = { ...item.claims[0], qualifiers: { time: "night" } };
+      const inserted = await persistence.insertClaim(item, seededResult.sourceItemId, seededResult.revisionId, run!.id, seededResult.provenanceFamilyId, qualified, "lineage-qualified");
+      expect(inserted.claimId).not.toBe(seededResult.claimId);
+      expect(inserted.canonicalClaimId).not.toBe(seededResult.canonicalClaimId);
     });
 
     test("propagates a rejected or disputed review across canonical claim members", async () => {
@@ -145,7 +155,8 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       const ownEvidence = evidence.find((item) => item.claimId === first.claimId)!;
       const siblingEvidence = evidence.find((item) => item.claimId === siblingClaim.claimId)!;
       await persistence.reviewEvidence(ownEvidence.id, "reviewer-a", "approved", "Approves");
-      await persistence.reviewEvidence(siblingEvidence.id, "reviewer-a", "approved", "Approves");
+      // Unreviewed sibling evidence is editorial attention, not a gate on an
+      // article that directly cites the reviewed member claim.
       await persistence.reviewArticle(articleId, "editor", "Editorial review");
       await persistence.approveArticle(articleId, "approver");
       expect((await persistence.getArticle(articleId))?.status).toBe("approved");
@@ -240,15 +251,11 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       await persistence.updateExistingArticle({
         articleId,
         sourceItemId: changed.id,
-        title: "Resolvable article (revised)",
-        description: "Resolved.",
         body: { summary: "Resolved.", sections: [], unknowns: [] },
-        newsworthiness: 0.6,
-        confidence: 0.6,
         sourceRefs: [{ sourceId: "contract-source", claimId: changedClaim.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
       });
       const updated = await persistence.getArticle(articleId);
-      expect(updated).toMatchObject({ title: "Resolvable article (revised)", status: "draft" });
+      expect(updated).toMatchObject({ title: "Resolvable article", status: "draft" });
       // The old reference was replaced; only the revised claim's evidence remains.
       expect((await persistence.listArticleEvidence(articleId)).map((row) => row.claimId)).toEqual([changedClaim.claimId]);
     });

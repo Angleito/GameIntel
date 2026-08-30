@@ -150,7 +150,7 @@ internal behavior.
 
 ## Canonical claims and analysis runs
 
-The knowledge layer is versioned and convergent across sources:
+The knowledge layer is versioned and convergent across normalized lexical identities:
 
 - `canonicalClaimKey` derives a canonical identity from the normalized
   subject/predicate/value plus semantic qualifiers. Transport details never
@@ -158,7 +158,9 @@ The knowledge layer is versioned and convergent across sources:
   resolve to one canonical claim. Confidence, claim state, and contradiction
   propagation operate on canonical identity rather than exact claim rows.
 - `CLAIM_EXTRACTOR_VERSION`, `NORMALIZATION_VERSION`, and
-  `CONFIDENCE_MODEL_VERSION` together key every `analysis_runs` row. A
+  `CONFIDENCE_MODEL_VERSION` together key every `analysis_runs` row.
+  Parser/source-extraction `processingVersion` is audit metadata, not run
+  identity. A
   completed run with identical versions is idempotent; any version mismatch
   (automatic on the next fetch of unchanged content, or an explicit
   `reprocess-revision`) supersedes prior runs and re-interprets the retained
