@@ -1,4 +1,4 @@
-import type { GameProfile, NormalizedSourceItem, SourcePolicy } from "@gameintel/core";
+import { NORMALIZATION_VERSION, type GameProfile, type NormalizedSourceItem, type SourcePolicy } from "@gameintel/core";
 import type { SourceInput } from "@gameintel/contracts";
 
 export function testProfile(): GameProfile {
@@ -62,6 +62,7 @@ export function testItem(sourceId = "contract-source", overrides: Partial<Normal
     inputKind: "url",
     contentType: "text/html",
     language: "en",
+    processingVersion: NORMALIZATION_VERSION,
     claims: [
       {
         subject: "Vehicle",

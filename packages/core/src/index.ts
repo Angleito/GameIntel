@@ -58,6 +58,14 @@ export type SourcePolicy = z.infer<typeof SourcePolicySchema>;
 export const InputKindSchema = z.enum(["url", "rss", "pasted_text", "local_file", "manual_fixture"]);
 export type InputKind = z.infer<typeof InputKindSchema>;
 
+// Processing versions record which implementation produced a source revision
+// and which model computes claim confidence. Bump them when the corresponding
+// behavior changes so stored revisions and review surfaces can answer "why
+// does GameIntel currently believe this?" and "would reprocessing with the
+// current pipeline produce a different result?".
+export const NORMALIZATION_VERSION = "1";
+export const CONFIDENCE_MODEL_VERSION = "1";
+
 export const EvidenceLevelSchema = z.enum(["suspected", "corroborated", "confirmed", "disputed"]);
 export type EvidenceLevel = z.infer<typeof EvidenceLevelSchema>;
 
@@ -283,6 +291,10 @@ export const NormalizedSourceItemSchema = z.object({
   inputKind: InputKindSchema.default("manual_fixture"),
   contentType: z.string().nullable().default(null),
   language: z.string().nullable().default(null),
+  // Version of the parser/normalization/claim-extraction implementation that
+  // produced this item. Stored per source revision so evidence can be traced
+  // to the exact processing code that created it.
+  processingVersion: z.string().min(1).default(NORMALIZATION_VERSION),
   claims: z.array(z.object({
     subject: z.string(),
     predicate: z.string(),

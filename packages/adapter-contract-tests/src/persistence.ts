@@ -62,6 +62,37 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(changed.revisionId).not.toBe(inserted.revisionId);
     });
 
+    test("records the processing version on each source revision", async () => {
+      await persistence.ensureGame(testProfile());
+      await persistence.ensureSource(testSourceInput());
+      const item = testItem("contract-source", { processingVersion: "2.3" });
+      const rawHash = hashText(`${item.title}\n${item.text}`);
+      const lineageId = lineageFor(item);
+      const inserted = await persistence.insertSourceItem(item, rawHash, lineageId, testPolicy(), null);
+      expect(inserted.revisionId).not.toBeNull();
+      const claimId = await persistence.insertClaim(item, inserted.id, inserted.revisionId!, inserted.provenanceFamilyId, item.claims[0], lineageId);
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Versioned article",
+        description: "Versioned.",
+        body: { summary: "Versioned.", sections: [], unknowns: [] },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      const evidence = await persistence.listArticleEvidence(articleId);
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0].processingVersion).toBe("2.3");
+      const changed = await persistence.insertSourceItem(
+        { ...item, text: `${item.text} Reprocessed with a newer pipeline.` },
+        hashText(`${item.title}\n${item.text} Reprocessed with a newer pipeline.`),
+        lineageId,
+        testPolicy(),
+        null,
+      );
+      expect(changed.revisionId).not.toBe(inserted.revisionId);
+    });
+
     test("rolls back all writes when the transaction callback throws", async () => {
       await persistence.ensureGame(testProfile());
       await persistence.ensureSource(testSourceInput());

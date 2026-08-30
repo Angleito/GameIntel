@@ -165,6 +165,7 @@ describe("PostgreSQL capability role privileges", () => {
         inputKind: "pasted_text" as const,
         contentType: "text/plain",
         language: null,
+        processingVersion: "1",
         claims: [],
       };
       const inserted = await insertSourceItem(editor, surfaceItem, hashText("surface"), "lineage-surface", {

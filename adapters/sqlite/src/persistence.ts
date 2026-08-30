@@ -224,9 +224,9 @@ export class SQLitePersistence implements GameIntelPersistence {
         item.inputKind, item.contentType, item.language, retentionUntil, submittedBy, itemId,
       );
       this.run(
-        `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-        revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, now,
+        `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+        revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, now,
       );
       return {
         id: itemId,
@@ -248,9 +248,9 @@ export class SQLitePersistence implements GameIntelPersistence {
       item.publishedAt, item.inputKind, item.contentType, item.language, retentionUntil, submittedBy, now,
     );
     this.run(
-      `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-      revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, now,
+      `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, now,
     );
     return {
       id: itemId,
@@ -482,7 +482,7 @@ export class SQLitePersistence implements GameIntelPersistence {
   async listArticleEvidence(articleId: string): Promise<ArticleEvidenceForReview[]> {
     const rows = this.all<Record<string, unknown>>(
       `SELECT DISTINCT e.id, e.claim_id, e.source_item_id, e.source_item_revision_id, e.excerpt, e.evidence_type,
-        COALESCE(revision.is_current, 0) AS current
+        revision.processing_version, COALESCE(revision.is_current, 0) AS current
        FROM article_sources article_source
        JOIN evidence e ON e.claim_id = article_source.claim_id
        LEFT JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
@@ -495,6 +495,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       claimId: row.claim_id as string,
       sourceItemId: row.source_item_id as string,
       sourceItemRevisionId: row.source_item_revision_id as string | null,
+      processingVersion: (row.processing_version as string | null) ?? null,
       excerpt: row.excerpt as string,
       evidenceType: row.evidence_type as string,
       current: row.current === 1 || row.current === true,

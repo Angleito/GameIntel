@@ -59,6 +59,13 @@ Raw/source material is stored separately from interpretation. A future parser
 or normalizer improvement can reprocess already-collected data without
 refetching the internet.
 
+Every revision records the processing version that produced it (parser +
+normalization implementation, e.g. `1.1`), so GameIntel can answer "why does
+this revision say what it says?" and "would reprocessing with the current
+pipeline produce a different result?" without refetching. The review surface
+(`listArticleEvidence`) exposes the processing version next to each evidence
+item.
+
 ## Claims and uncertainty
 
 Claims support states: `unverified`, `supported`, `contested`, `confirmed`,

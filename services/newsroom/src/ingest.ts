@@ -1,5 +1,6 @@
 import {
   effectivePublicationMode,
+  NORMALIZATION_VERSION,
   PublicHttpUrlSchema,
   trustClassificationFor,
   type NormalizedSourceItem,
@@ -86,6 +87,7 @@ export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId
     title: parsed.title, text: parsed.text, sourceStrength: entry.source_strength, publicationMode: source.publicationMode,
     discoveredAt: new Date().toISOString(), publishedAt: null, lineageId: null, inputKind: "url" as const,
     contentType: fetched.contentType, language: parsed.language, claims: [],
+    processingVersion: `${parsed.parserVersion}.${NORMALIZATION_VERSION}`,
   } as NormalizedSourceItem;
   item.claims = [candidateClaim(item, entry.source_strength)];
   return processNormalizedItem(runtime.persistence, item, source, { leaseFence: fence ?? null });
