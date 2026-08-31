@@ -10,7 +10,6 @@ export const PublicFactSchema = z.object({
   text: z.string(),
   evidenceLevel: EvidenceLevelSchema,
   attributionType: AttributionTypeSchema,
-  claimIds: z.array(z.string()),
   editorialAssessment: z.string().nullable(),
   citations: z.array(z.number().int().positive()),
 }).strict();

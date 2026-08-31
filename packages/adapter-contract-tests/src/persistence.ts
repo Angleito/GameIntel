@@ -132,6 +132,29 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(inserted.canonicalClaimId).not.toBe(seededResult.canonicalClaimId);
     });
 
+    test("confirms primary claims only after current evidence approval", async () => {
+      await persistence.ensureGame(testProfile());
+      await persistence.ensureSource(testSourceInput({ sourceStrength: "PRIMARY" }));
+      const item = testItem("contract-source", { sourceStrength: "PRIMARY" });
+      const inserted = await persistence.insertSourceItem(item, hashText(`${item.title}\n${item.text}`), item.lineageId!, testPolicy(), null);
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: inserted.revisionId, versions: testVersions, triggerReason: "claim-state-review" });
+      const claim = await persistence.insertClaim(item, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, item.claims[0], item.lineageId!);
+
+      expect(await persistence.refreshClaimState(claim.claimId)).toBe("supported");
+      const articleId = await persistence.createArticleDraft({
+        collectionId: "contract-test",
+        title: "Primary claim",
+        description: "Primary claim.",
+        body: { summary: "Primary claim.", sections: [], unknowns: [] },
+        newsworthiness: 0.5,
+        confidence: 0.5,
+        sourceRefs: [{ sourceId: "contract-source", claimId: claim.claimId, citationLabel: "Contract source", publicCitationUrl: "https://contract.example.com/report" }],
+      });
+      const evidence = await persistence.listArticleEvidence(articleId);
+      await persistence.reviewEvidence(evidence[0]!.id, "reviewer-a", "approved", "Approves primary evidence");
+      expect(await persistence.refreshClaimState(claim.claimId)).toBe("confirmed");
+    });
+
     test("propagates a rejected or disputed review across canonical claim members", async () => {
       const first = await seeded();
       await persistence.ensureSource(testSourceInput({ id: "second-source", canonicalUrl: "https://second.example.com", publicCitationUrl: "https://second.example.com/report" }));

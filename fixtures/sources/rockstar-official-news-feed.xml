@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Rockstar Games Newswire</title>
+    <link>https://www.rockstargames.com/newswire/feed</link>
+    <description>Synthetic official-source fixture for the GTA VI newsroom; not real Rockstar content.</description>
+    <language>en</language>
+    <item>
+      <guid>https://www.rockstargames.com/newswire/article/1-gta-online-the-chop-shop</guid>
+      <link>https://www.rockstargames.com/newswire/article/1-gta-online-the-chop-shop</link>
+      <title>GTA Online: The Chop Shop</title>
+      <pubDate>Wed, 13 Dec 2023 14:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <guid>https://www.rockstargames.com/newswire/article/2-gta-online-cluckin-bell-farm-raid</guid>
+      <link>https://www.rockstargames.com/newswire/article/2-gta-online-cluckin-bell-farm-raid</link>
+      <title>GTA Online: The Cluckin' Bell Farm Raid</title>
+      <pubDate>Thu, 07 Mar 2024 15:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <guid>https://www.rockstargames.com/newswire/article/3-gta-online-bottom-dollar-bounties</guid>
+      <link>https://www.rockstargames.com/newswire/article/3-gta-online-bottom-dollar-bounties</link>
+      <title>GTA Online: Bottom Dollar Bounties</title>
+      <pubDate>Thu, 20 Jun 2024 16:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

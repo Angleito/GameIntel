@@ -142,8 +142,24 @@ try {
     console.log(`Article ${article.id} published. Run 'bun run build' to build Astro.`);
   } else if (command === "public-snapshot") {
     console.log(JSON.stringify(await runtime.persistence.publicArticles(profileId), null, 2));
+  } else if (command === "source-health") {
+    console.log(JSON.stringify(await runtime.sourceHealth.listSourceHealth(), null, 2));
+  } else if (command === "disable-source") {
+    const sourceId = args[0];
+    if (!sourceId) throw new Error("Missing source id");
+    const reason = required(commandOptions, "reason");
+    await runtime.sourceHealth.setSourceDisabled(sourceId, true, reason, operator);
+    await runtime.persistence.audit(operator, "disable-source", "source", sourceId, reason);
+    console.log(`Disabled source ${sourceId}: ${reason}`);
+  } else if (command === "enable-source") {
+    const sourceId = args[0];
+    if (!sourceId) throw new Error("Missing source id");
+    const reason = required(commandOptions, "reason");
+    await runtime.sourceHealth.setSourceDisabled(sourceId, false, reason, operator);
+    await runtime.persistence.audit(operator, "enable-source", "source", sourceId, reason);
+    console.log(`Enabled source ${sourceId}: ${reason}`);
   } else {
-    console.log("Commands: ingest <fixture.json> --allow-fixtures, ingest-url --collection <profile-id> --source <id> --url <url> [--profile <profile-id>], ingest-text --collection <profile-id> --source <id> --title <title> --text-file <path> [--citation-url <url>] [--profile <profile-id>], list-submissions [--profile <profile-id>], review-submission <submission-id> --decision under_review|rejected|blocked [--notes <text>], promote-submission <submission-id> [--notes <text>] [--profile <profile-id>], list [--profile <profile-id>], import-media <catalog.json>, list-cover-candidates <article-id>, set-cover <article-id> <media-id>, approve-media <media-id> | approve-media --all [--profile <profile-id>], approve-cover <article-id>, reject-cover <article-id>, clear-cover <article-id>, review-source <id>, list-evidence <article-id>, review-evidence <id> [--decision approved|rejected|disputed], review-article <id>, approve <id>, publish <id>, public-snapshot [--profile <profile-id>], list-analysis-runs <source-revision-id>, reprocess-revision <source-revision-id> [--reason <text>]");
+    console.log("Commands: ingest <fixture.json> --allow-fixtures, ingest-url --collection <profile-id> --source <id> --url <url> [--profile <profile-id>], ingest-text --collection <profile-id> --source <id> --title <title> --text-file <path> [--citation-url <url>] [--profile <profile-id>], list-submissions [--profile <profile-id>], review-submission <submission-id> --decision under_review|rejected|blocked [--notes <text>], promote-submission <submission-id> [--notes <text>] [--profile <profile-id>], list [--profile <profile-id>], import-media <catalog.json>, list-cover-candidates <article-id>, set-cover <article-id> <media-id>, approve-media <media-id> | approve-media --all [--profile <profile-id>], approve-cover <article-id>, reject-cover <article-id>, clear-cover <article-id>, review-source <id>, list-evidence <article-id>, review-evidence <id> [--decision approved|rejected|disputed], review-article <id>, approve <id>, publish <id>, public-snapshot [--profile <profile-id>], list-analysis-runs <source-revision-id>, reprocess-revision <source-revision-id> [--reason <text>], source-health, disable-source <id> --reason <text>, enable-source <id> --reason <text>");
   }
 } finally {
   await runtime.close();

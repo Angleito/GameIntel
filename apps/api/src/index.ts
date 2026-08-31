@@ -60,6 +60,7 @@ const abuseProtection = new LocalAbuseProtection({
   secret: process.env.SUBMISSION_IDENTITY_SECRET ?? "",
   trustProxy: process.env.SUBMISSION_TRUST_PROXY === "true",
   trustedIpHeader: process.env.SUBMISSION_TRUSTED_IP_HEADER,
+  trustedProxyToken: process.env.SUBMISSION_TRUSTED_PROXY_TOKEN,
 });
 
 class RequestBodyError extends Error {
@@ -138,6 +139,9 @@ app.get("/v1/search", async (c) => {
 app.post("/v1/submissions", async (c) => {
   c.header("Cache-Control", "no-store");
   if (!publicSubmissionsEnabled()) return c.json({ error: "Public submissions are not enabled" }, 503);
+  if (!abuseProtection.isTrustedSubmissionProxy(c.req.raw.headers.get("x-gameintel-proxy-token"))) {
+    return c.json({ error: "Public submission identity is unavailable" }, 503);
+  }
   let payload: unknown;
   try {
     payload = await readJsonBody(c.req.raw, 16_384);

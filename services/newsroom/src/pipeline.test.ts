@@ -126,7 +126,7 @@ describe("Tudum newsroom pipeline", () => {
       expect(claims.map((claim) => claim.lineage_id)).toEqual(Array(6).fill("fixture-lineage-gta-vi-netflix-tudum"));
       expect(claims.map((claim) => claim.value)).toContain("November 19");
       expect(claims.map((claim) => claim.excerpt)).toContain("An extended GTA VI look is available to Netflix subscribers.");
-      expect(claims.map((claim) => claim.evidence_level)).toEqual(Array(6).fill("confirmed"));
+      expect(claims.map((claim) => claim.evidence_level)).toEqual(Array(6).fill("suspected"));
       expect(claims.map((claim) => claim.attribution_type)).toEqual(Array(6).fill("trusted_secondary"));
 
       const second = await processFixture(persistence, fixture, { allowFixture: true });
@@ -171,7 +171,7 @@ describe("Tudum newsroom pipeline", () => {
       expect(article).not.toHaveProperty("confidence");
       expect(JSON.stringify(article)).not.toContain("<script");
       expect(article.body.sections.length).toBeGreaterThan(0);
-      expect(article.body.sections[0].paragraphs[0]).toMatchObject({ evidenceLevel: "confirmed", citations: [1] });
+      expect(article.body.sections[0].paragraphs[0]).toMatchObject({ evidenceLevel: "suspected", citations: [1] });
     });
   });
 
@@ -224,7 +224,7 @@ describe("Tudum newsroom pipeline", () => {
       fixture.item.text = `${fixture.item.text} Official confirmation added.`;
       const primary = await processFixture(persistence, fixture, { allowFixture: true });
       expect(primary.duplicate).toBe(false);
-      expect(await states(primary.sourceItemId)).toEqual(["confirmed"]);
+      expect(await states(primary.sourceItemId)).toEqual(["supported"]);
 
       fixture.source.sourceStrength = "COMMUNITY";
       fixture.item.sourceStrength = "COMMUNITY";

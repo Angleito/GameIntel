@@ -3,7 +3,28 @@ import { isIP } from "node:net";
 import type { SourcePolicy } from "@gameintel/core";
 import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
-export type { DnsResolver, FetchPolicy, RegisteredSource };
+// Typed source-availability failures. `source_unavailable` counts against
+// source health: permanent source-DNS resolution failure (ENOTFOUND/ENODATA/
+// EAI_NONAME — the hostname does not exist or has no address records) and
+// HTTP >= 500 (origin unreachable through the proxy). `transport_unavailable`
+// is any fetch() rejection through the configured egress proxy — proxy
+// outage, proxy connection failure, TLS, abort/timeout — plus transient DNS
+// resolver failures (EAI_AGAIN, resolver timeout/server failure): never a
+// proven origin outage, and never counted. `url_not_found` (4xx) is a bad
+// URL, `response` (redirect/content-type/size violations) is a malformed
+// response — neither counts. Policy errors stay plain `Error`.
+export type SourceFetchErrorKind = "source_unavailable" | "transport_unavailable" | "url_not_found" | "response";
+
+export class SourceFetchError extends Error {
+  readonly kind: SourceFetchErrorKind;
+  readonly status: number | null;
+  constructor(kind: SourceFetchErrorKind, message: string, options: { status?: number; cause?: unknown } = {}) {
+    super(message, { cause: options.cause });
+    this.name = "SourceFetchError";
+    this.kind = kind;
+    this.status = options.status ?? null;
+  }
+}
 
 const privateV4 = (ip: string): boolean => {
   const parts = ip.split(".").map(Number);
@@ -51,7 +72,23 @@ const defaultResolver: DnsResolver = (hostname) => lookup(hostname, { all: true 
 
 export async function assertPublicHost(hostname: string, resolver: DnsResolver = defaultResolver): Promise<void> {
   if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) throw new Error("Private hostnames are not permitted");
-  const records = await resolver(hostname);
+  let records: Array<{ address: string; family: number }>;
+  try {
+    records = await resolver(hostname);
+  } catch (error) {
+    // Permanent DNS failures — the hostname does not exist or has no address
+    // records (ENOTFOUND, ENODATA, EAI_NONAME) — mean the source itself is
+    // unavailable and count against source health. Transient resolver
+    // failures (EAI_AGAIN, resolver timeouts/server failures, and uncoded
+    // errors) are infrastructure problems, not a proven origin outage, and
+    // never count (transport_unavailable).
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    throw new SourceFetchError(
+      code === "ENOTFOUND" || code === "ENODATA" || code === "EAI_NONAME" ? "source_unavailable" : "transport_unavailable",
+      `Source DNS resolution failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
   if (!records.length || records.some((record) => privateIp(record.address))) throw new Error("Private or link-local address is not permitted");
 }
 
@@ -109,26 +146,37 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy, reso
   while (true) {
     await assertPublicHost(url.hostname, resolver);
     await limiterFor(policy.source.id).wait(policy.sourcePolicy.requestsPerMinute);
-    const response = await fetch(url, {
-      redirect: "manual",
-      headers: { accept: "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, text/xml", "user-agent": policy.userAgent ?? policy.source.userAgent ?? "gameintelgg/0.1" },
-      signal: AbortSignal.timeout(policy.timeoutMs ?? 15_000),
-      proxy: proxy.toString(),
-    } as RequestInit & { proxy: string });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        redirect: "manual",
+        headers: { accept: "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, text/xml", "user-agent": policy.userAgent ?? policy.source.userAgent ?? "gameintelgg/0.1" },
+        signal: AbortSignal.timeout(policy.timeoutMs ?? 15_000),
+        proxy: proxy.toString(),
+      } as RequestInit & { proxy: string });
+    } catch (error) {
+      // Every request goes through the configured egress proxy; a rejection
+      // here is proxy/infrastructure/local transport failure (proxy
+      // unreachable or refused, TLS, abort/timeout) — never a proven origin
+      // outage. Origin failures surface as proxy HTTP responses and are
+      // classified by status above. Transport failures never count against
+      // source health.
+      throw new SourceFetchError("transport_unavailable", `Source fetch failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
     if (response.status >= 300 && response.status < 400) {
-      if (++redirects > (policy.maxRedirects ?? 3)) throw new Error("Too many redirects");
+      if (++redirects > (policy.maxRedirects ?? 3)) throw new SourceFetchError("response", "Too many redirects");
       const location = response.headers.get("location");
-      if (!location) throw new Error("Redirect has no location");
+      if (!location) throw new SourceFetchError("response", "Redirect has no location");
       url = assertRegisteredUrl(new URL(location, url).toString(), policy.source);
       continue;
     }
-    if (!response.ok) throw new Error(`Source fetch failed with HTTP ${response.status}`);
+    if (!response.ok) throw new SourceFetchError(response.status >= 500 ? "source_unavailable" : "url_not_found", `Source fetch failed with HTTP ${response.status}`, { status: response.status });
     const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
     const accepted = ["text/html", "application/xhtml+xml", "application/rss+xml", "application/atom+xml", "text/xml"].includes(contentType);
-    if (!accepted) throw new Error(`Unsupported source content type: ${contentType || "unknown"}`);
+    if (!accepted) throw new SourceFetchError("response", `Unsupported source content type: ${contentType || "unknown"}`);
     const maxBytes = policy.maxBytes ?? 1_500_000;
     const declaredSize = Number(response.headers.get("content-length") ?? 0);
-    if (declaredSize > maxBytes) throw new Error("Source response exceeds size limit");
+    if (declaredSize > maxBytes) throw new SourceFetchError("response", "Source response exceeds size limit");
     const reader = response.body?.getReader();
     if (!reader) return { url: url.toString(), contentType, status: response.status, text: "" };
     const chunks: Uint8Array[] = [];
@@ -137,7 +185,7 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy, reso
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > maxBytes) { await reader.cancel(); throw new Error("Source response exceeds size limit"); }
+      if (size > maxBytes) { await reader.cancel(); throw new SourceFetchError("response", "Source response exceeds size limit"); }
       chunks.push(chunk.value);
     }
     const bytes = new Uint8Array(size);

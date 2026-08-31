@@ -48,6 +48,7 @@ export type LocalAbuseProtectionOptions = {
   secret: string;
   trustProxy: boolean;
   trustedIpHeader?: string;
+  trustedProxyToken?: string;
 };
 
 // Local community-intake protection: HMAC identity hashing of the session and
@@ -57,11 +58,13 @@ export class LocalAbuseProtection implements AbuseProtection {
   private readonly secret: string;
   private readonly trustProxy: boolean;
   private readonly trustedIpHeader: string;
+  private readonly trustedProxyToken: string;
 
   constructor(options: LocalAbuseProtectionOptions) {
     this.secret = options.secret;
     this.trustProxy = options.trustProxy;
     this.trustedIpHeader = options.trustedIpHeader ?? "cf-connecting-ip";
+    this.trustedProxyToken = options.trustedProxyToken ?? "";
   }
 
   async hashSubmissionIdentity(input: { session: string; ip: string; accountId?: string | null }): Promise<{ sessionHash: string; ipHash: string }> {
@@ -76,6 +79,16 @@ export class LocalAbuseProtection implements AbuseProtection {
     if (!isIP(input.ip)) throw new SubmissionIdentityError("A trusted client IP is required");
     const hash = (kind: string, value: string) => createHmac("sha256", this.secret).update(`${kind}:${value}`).digest("hex");
     return { sessionHash: hash("session", session), ipHash: hash("ip", input.ip) };
+  }
+
+  // A client must not be able to opt into a trusted IP header. The ingress
+  // authenticates itself with this secret and is responsible for stripping any
+  // client-supplied copies of the configured IP header before forwarding.
+  isTrustedSubmissionProxy(token: string | null): boolean {
+    if (!this.trustProxy || this.trustedProxyToken.length < 32 || token === null) return false;
+    const expected = new TextEncoder().encode(this.trustedProxyToken);
+    const received = new TextEncoder().encode(token);
+    return received.length === expected.length && timingSafeEqual(received, expected);
   }
 
   trustedClientIpHeader(): string {

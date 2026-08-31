@@ -18,7 +18,7 @@ import type {
   SourceInput,
 } from "@gameintel/contracts";
 import { CLAIM_EXTRACTOR_VERSION, extractClaims, prepareIngestion } from "@gameintel/pipeline";
-import { OpenCodeRuntime, type ArticleDraft } from "@gameintel/ai-runtime";
+import { PiArticleDraftRuntime, type ArticleDraft } from "@gameintel/agent-runtime";
 import type { Fixture } from "@gameintel/source-sdk";
 
 const authority: Record<NormalizedSourceItem["sourceStrength"], number> = {
@@ -196,6 +196,9 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
       ...claim,
       attributionType: trust.attributionType,
       evidenceType: trust.evidenceType,
+      // Ingestion creates candidate observations only. Evidence review and
+      // collection policy determine any later corroborated/confirmed status.
+      evidenceLevel: "suspected",
     })),
   };
 
@@ -322,11 +325,11 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
       : 0;
    const safeClaims = item.claims.map((claim, index) => ({ claim, claimId: claimIds[index] })).filter(({ claim }) => claim.spoilerTags.length === 0);
    let aiDraft: ArticleDraft | null = null;
-   if (process.env.OPENCODE_ENABLED === "true") {
-     aiDraft = await new OpenCodeRuntime().draft({
+    if (process.env.PI_ENABLED === "true") {
+      aiDraft = await new PiArticleDraftRuntime().draft({
        jobId: eventId,
        collectionId: item.collectionId,
-       sourceItems: [{ id: inserted.id, title: item.title, excerpt: item.text.slice(0, 4_000), publicCitationUrl: source.publicCitationUrl!, lineageId }],
+        sourceItems: [{ id: inserted.id, title: item.title, excerpt: retainedText(item.text, policy), publicCitationUrl: source.publicCitationUrl!, lineageId }],
        claims: item.claims.map((claim) => ({ subject: claim.subject, predicate: claim.predicate, value: claim.value, evidenceSourceId: inserted.id })),
      });
    }

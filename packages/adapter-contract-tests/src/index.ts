@@ -4,6 +4,8 @@ export { runQueueContract } from "./job-queue.ts";
 export type { QueueFactory } from "./job-queue.ts";
 export { runObjectStoreContract } from "./object-store.ts";
 export type { ObjectStoreFactory } from "./object-store.ts";
+export { runSourceHealthContract } from "./source-health.ts";
+export type { SourceHealthFactory } from "./source-health.ts";
 export { runFetchTransportContract } from "./fetch-transport.ts";
 export type { FetchTransportFactory } from "./fetch-transport.ts";
 export { testItem, testPolicy, testProfile, testSourceInput } from "./fixtures.ts";

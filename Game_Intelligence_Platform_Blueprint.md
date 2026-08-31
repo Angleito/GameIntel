@@ -1,5 +1,10 @@
 # Game Intelligence Platform Blueprint
 
+> **Runtime update:** OpenCode-specific sections in this historical blueprint
+> are superseded by `docs/AGENT_RUNTIME.md`. GameIntel now uses Pi directly
+> through `packages/agent-runtime`; no OpenCode server or credentials are part
+> of the supported runtime.
+
 **Human-reviewed AI gaming newsroom, structured knowledge platform, and interactive game-world publication**  
 Version 2.1 — August 27, 2026  
 _Open-source-first design. Docker-first deployment. Public sources only where permitted. Self-hostable core._
@@ -376,7 +381,7 @@ type Discovery = {
   confidence: number; // 0..1, evidence-derived
   newsworthiness: number; // 0..100, editorial triage only
   platforms: string[];
-  gameBuilds: string[];
+  gameBuilds: GameBuildRef[]; // { buildId, version, platform, mode, region } — one applicability context per discovery
   progressionContext: unknown | null;
   firstSeenAt: string;
   lastValidatedAt: string | null;

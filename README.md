@@ -168,7 +168,7 @@ OpenCode settings. R2 credentials and other host-only integration values from
 ## Configuration
 
 `.env` is local-only. The public template deliberately leaves credentials
-blank. `OPENCODE_*` is optional and remains disabled by default. R2 values are
+blank. The no-tool Pi writer (`PI_*`) is optional and remains disabled by default. R2 values are
 required only for `bun run media:publish --publish` and must remain in local
 secret storage. The Cloudflare Worker secret `DAILY_SHUFFLE_SECRET` must be
 set with `wrangler secret put`, not placed in `wrangler.jsonc`, `.dev.vars`,
@@ -306,6 +306,7 @@ publication data may have separate rights and provider terms.
 
 - `docs/DOMAIN.md` — Layer 1: domain model, evidence, provenance, publication
   boundary
+- `docs/AGENT_RUNTIME.md` — controlled Pi roles, limits, and capability model
 - `docs/CAPABILITIES.md` — Layer 2: capability contracts and adapters
 - `docs/SOURCE_ADAPTERS.md` — implementing source adapters, polling, discovery
 - `docs/API.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md`,

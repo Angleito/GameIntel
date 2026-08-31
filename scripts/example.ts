@@ -1,9 +1,9 @@
-import { readFile } from "node:fs/promises";
 import { prepareIngestion } from "@gameintel/pipeline";
 import { createOutputArtifact, writeJsonArtifact } from "@gameintel/output";
+import { loadFixture } from "../services/newsroom/src/fixture.ts";
 
-const input = JSON.parse(await readFile(new URL("../examples/software-release/source-item.json", import.meta.url), "utf8"));
-const prepared = prepareIngestion(input, {
+const fixture = await loadFixture(new URL("../fixtures/sources/software-release.json", import.meta.url).pathname);
+const prepared = prepareIngestion({ ...fixture.item, sourceId: fixture.source.id }, {
   sourceAuthority: 1,
   novelty: 0.8,
   readerUsefulness: 0.8,

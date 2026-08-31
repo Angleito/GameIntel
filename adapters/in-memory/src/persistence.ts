@@ -701,11 +701,15 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const supportingFamilies = new Set<string>();
     const contradictingFamilies = new Set<string>();
     let strongest: SourceStrength = "UNVERIFIED";
+    let strongestApproved: SourceStrength = "UNVERIFIED";
     for (const row of currentRows) {
       const item = this.store.sourceItems.get(row.sourceItemId);
       if (!item) continue;
       const strength = SourceStrengthSchema.parse(item.sourceStrength);
       if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
+      const source = this.store.sources.get(item.sourceId);
+      if (source && this.evidenceApprovalState(row.id, row.sourceItemRevisionId, parsePolicy(source.policy)).approved
+        && sourceStrengthOrder[strength] > sourceStrengthOrder[strongestApproved]) strongestApproved = strength;
       if (!row.provenanceFamilyId) continue;
       if (row.stance === "contradicts") contradictingFamilies.add(row.provenanceFamilyId);
       else supportingFamilies.add(row.provenanceFamilyId);
@@ -714,6 +718,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       supportingFamilies: supportingFamilies.size,
       contradictingFamilies: contradictingFamilies.size,
       strongestStrength: strongest,
+      strongestApprovedStrength: strongestApproved,
       hasCurrentEvidence: currentRows.length > 0,
       hasHistoricalEvidence: rows.length > 0,
     });
@@ -831,6 +836,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       seq,
       createdAt: this.clock.nowIso(),
     });
+    await this.refreshClaimState(record.claimId);
     const affectedArticles = new Set<string>();
     const claim = this.store.claims.get(record.claimId);
     if (claim) {

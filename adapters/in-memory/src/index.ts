@@ -14,12 +14,14 @@ import { InMemoryJobQueue, MemoryLeaseRegistry } from "./job-queue.ts";
 import { InMemoryObjectStore } from "./object-store.ts";
 import { InMemoryPacingStore } from "./pacing.ts";
 import { InMemoryPersistence } from "./persistence.ts";
+import { InMemorySourceHealthStore } from "./source-health.ts";
 import { createMemoryStore, type MemoryStore } from "./store.ts";
 
 export * from "./job-queue.ts";
 export * from "./object-store.ts";
 export * from "./pacing.ts";
 export * from "./persistence.ts";
+export * from "./source-health.ts";
 export * from "./store.ts";
 export { RegistryPollingScheduler } from "@gameintel/contracts";
 
@@ -44,6 +46,7 @@ export function createInMemoryRuntime(options: {
     persistence,
     jobQueue,
     pacing: new InMemoryPacingStore(clock),
+    sourceHealth: new InMemorySourceHealthStore(clock),
     fetchTransport: options.fetchTransport ?? new UnconfiguredFetchTransport(),
     scheduler,
     objectStore: options.objectStore ?? null,

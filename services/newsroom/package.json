@@ -12,7 +12,7 @@
     "typecheck": "bunx tsc --noEmit -p tsconfig.json"
   },
 "dependencies": {
-    "@gameintel/ai-runtime": "workspace:*",
+    "@gameintel/agent-runtime": "workspace:*",
     "@gameintel/config": "workspace:*",
     "@gameintel/contracts": "workspace:*",
     "@gameintel/controlled-fetch": "workspace:*",

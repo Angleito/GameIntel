@@ -3,6 +3,7 @@ import { ingestUrl } from "@gameintel/newsroom";
 import { createServiceRuntime } from "@gameintel/newsroom/runtime";
 import { processDiscoveryJob } from "./discover.ts";
 import { runWorkerLoop, retryableWorkerError } from "./worker-loop.ts";
+import { recordJobHealth } from "./job-health.ts";
 
 function workerId(): string {
   return process.env.INGESTION_WORKER_ID ?? `ingest-worker-${crypto.randomUUID().slice(0, 8)}`;
@@ -28,8 +29,8 @@ function sourceIngestPayload(value: unknown): Parameters<typeof ingestUrl>[1] {
   };
 }
 
-if (process.env.OPENCODE_ENABLED === "true") {
-  throw new Error("The ingestion worker must not run AI drafting; use a separately isolated AI worker");
+if (process.env.PI_ENABLED === "true") {
+  throw new Error("The ingestion worker must not run Pi drafting; use a separately isolated AI worker");
 }
 if (!process.env.SOURCE_FETCH_PROXY_URL) {
   throw new Error("SOURCE_FETCH_PROXY_URL is required for the ingestion worker");
@@ -64,11 +65,23 @@ try {
     processJob: async (job: IngestionJob, isLeaseLost: () => boolean) => {
       if (job.jobType !== "source_ingest" && job.jobType !== "source_discover") throw new Error("Unsupported ingestion job");
       if (isLeaseLost()) throw new IngestionLeaseLostError(job.jobKey);
+      const payload = job.payload as Record<string, unknown> | null;
+      const sourceId = payload && typeof payload.sourceId === "string" ? payload.sourceId : null;
+      if (!sourceId) throw new Error("Source ingestion job payload is invalid");
       const fence = { jobKey: job.jobKey, leaseToken: job.leaseToken ?? "" };
-      if (job.jobType === "source_discover") {
-        return processDiscoveryJob(runtime, job, fence);
+      try {
+        const result = job.jobType === "source_discover"
+          ? await processDiscoveryJob(runtime, job, fence)
+          : await ingestUrl(runtime, sourceIngestPayload(job.payload), fence);
+        await recordJobHealth({ sourceHealth: runtime.sourceHealth, clock: runtime.clock, sourceId, job });
+        return result;
+      } catch (error) {
+        // Only typed source-availability failures from the controlled-fetch
+        // layer count against source health, and only on a job's first
+        // execution; policy and application errors never touch the record.
+        await recordJobHealth({ sourceHealth: runtime.sourceHealth, clock: runtime.clock, sourceId, job, error }).catch(() => undefined);
+        throw error;
       }
-      return ingestUrl(runtime, sourceIngestPayload(job.payload), fence);
     },
   });
 } finally {
