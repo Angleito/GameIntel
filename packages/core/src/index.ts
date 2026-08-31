@@ -84,6 +84,8 @@ export type ClaimStateInput = {
   supportingFamilies: number;
   contradictingFamilies: number;
   strongestStrength: SourceStrength;
+  // Confirmation requires a current evidence review that passes its source policy.
+  strongestApprovedStrength: SourceStrength;
   hasCurrentEvidence: boolean;
   hasHistoricalEvidence?: boolean;
   retracted?: boolean;
@@ -92,12 +94,13 @@ export type ClaimStateInput = {
 // Claim states describe what GameIntel currently believes, not permanent
 // truth. Evidence tied to superseded source revisions moves the claim to
 // superseded; contradictions make it contested; an explicit retraction wins.
+// Primary and direct evidence become confirmed only after current approval.
 export function deriveClaimState(input: ClaimStateInput): ClaimState {
   if (input.retracted) return "retracted";
   if (!input.hasCurrentEvidence) return input.hasHistoricalEvidence ? "superseded" : "unverified";
   if (input.contradictingFamilies > 0) return "contested";
   if (input.supportingFamilies === 0) return "unverified";
-  if (input.strongestStrength === "PRIMARY" || input.strongestStrength === "DIRECT_EVIDENCE") return "confirmed";
+  if (input.strongestApprovedStrength === "PRIMARY" || input.strongestApprovedStrength === "DIRECT_EVIDENCE") return "confirmed";
   return "supported";
 }
 
@@ -111,6 +114,98 @@ export const AttributionTypeSchema = z.enum([
 ]);
 export type AttributionType = z.infer<typeof AttributionTypeSchema>;
 
+// Qualifier vocabulary (TASK-002). Keys stay open snake_case identifiers —
+// profiles supply their own ontology — but values are normalized so
+// semantically identical claims converge on one canonical identity regardless
+// of how reporters typed them.
+export const QualifierKeySchema = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/, "Expected a snake_case semantic qualifier key");
+export const QualifiersSchema = z.record(QualifierKeySchema, z.string().max(256));
+export type Qualifiers = z.infer<typeof QualifiersSchema>;
+
+export const SEMANTIC_QUALIFIER_KEYS = [
+  "platform", "mode", "build", "region", "time_of_day", "weather", "mission", "progression", "wanted_level", "inventory",
+] as const;
+export type SemanticQualifierKey = (typeof SEMANTIC_QUALIFIER_KEYS)[number];
+
+const QUALIFIER_VALUE_NORMALIZERS: Record<SemanticQualifierKey, (value: string) => string> = {
+  platform: (v) => v.trim().replaceAll(/\s+/g, " "),
+  mode: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  build: (v) => v.trim().replaceAll(/\s+/g, " "),
+  region: (v) => v.trim().toUpperCase().replaceAll(/\s+/g, "_"),
+  time_of_day: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  weather: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  mission: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  progression: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  wanted_level: (v) => String(Number(v.trim())),
+  inventory: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+};
+
+export function normalizeQualifiers(input: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    const key = rawKey.trim().toLowerCase();
+    const value = rawValue.trim().replaceAll(/\s+/g, " ");
+    const normalize = (QUALIFIER_VALUE_NORMALIZERS as Record<string, (v: string) => string>)[key];
+    out[key] = normalize ? normalize(value) : value;
+  }
+  return out;
+}
+
+// Structured applicability model (TASK-002): the build/version view of a
+// claim plus the profile's registered builds. Build versions compare
+// segment-wise ("1.10.0" > "1.4.0") so a claim can be flagged superseded
+// once an active build moves past it.
+export const ClaimApplicabilitySchema = z.object({
+  platform: z.string().nullable().default(null),
+  build: z.string().nullable().default(null),
+  mode: z.string().nullable().default(null),
+  region: z.string().nullable().default(null),
+  progressionContext: z.string().nullable().default(null),
+}).strict();
+export type ClaimApplicability = z.infer<typeof ClaimApplicabilitySchema>;
+
+export function applicabilityFromQualifiers(qualifiers: Record<string, string>): ClaimApplicability {
+  const q = normalizeQualifiers(qualifiers);
+  return {
+    platform: q.platform ?? null,
+    build: q.build ?? null,
+    mode: q.mode ?? null,
+    region: q.region ?? null,
+    progressionContext: q.progression ?? q.mission ?? null,
+  };
+}
+
+export const GameBuildSchema = z.object({
+  id: z.string().min(1),
+  platform: z.string().nullable().default(null),
+  mode: z.string().nullable().default(null),
+  region: z.string().nullable().default(null),
+  version: z.string().min(1),
+  releasedAt: z.string().datetime().nullable().default(null),
+  active: z.boolean().default(true),
+});
+export type GameBuild = z.infer<typeof GameBuildSchema>;
+
+export function compareBuildVersions(left: string, right: string): number {
+  const segments = (value: string) => value.split(".").map((part) => {
+    const number = Number.parseInt(part, 10);
+    return Number.isNaN(number) ? 0 : number;
+  });
+  const a = segments(left);
+  const b = segments(right);
+  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+    const diff = (a[index] ?? 0) - (b[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+export function claimBuildStatus(claimBuild: string | null, currentBuild: string | null): "current" | "superseded" | "unknown" {
+  if (!claimBuild) return "unknown";
+  if (!currentBuild) return "current";
+  return compareBuildVersions(claimBuild, currentBuild) < 0 ? "superseded" : "current";
+}
+
 export const CollectionProfileSchema = z.object({
   id: z.string().min(1),
   canonicalName: z.string().min(1),
@@ -122,6 +217,7 @@ export const CollectionProfileSchema = z.object({
   defaultExploitMode: z.string().optional(),
   platforms: z.array(z.string()).default([]),
   sourceQueries: z.array(z.string()).default([]),
+  builds: z.array(GameBuildSchema).default([]),
 });
 export type CollectionProfile = z.infer<typeof CollectionProfileSchema>;
 
@@ -266,7 +362,7 @@ export const ClaimSchema = z.object({
   subject: z.string().min(1),
   predicate: z.string().min(1),
   value: z.string().min(1),
-  qualifiers: z.record(z.string()),
+  qualifiers: QualifiersSchema,
   spoilerTags: z.array(z.string()),
   exploitClass: z.string().nullable(),
   evidenceLevel: EvidenceLevelSchema.default("suspected"),
@@ -300,7 +396,7 @@ export const NormalizedSourceItemSchema = z.object({
     subject: z.string(),
     predicate: z.string(),
     value: z.string(),
-    qualifiers: z.record(z.string()).default({}),
+    qualifiers: QualifiersSchema.default({}),
     spoilerTags: z.array(z.string()).default([]),
      exploitClass: z.string().nullable().default(null),
      evidenceLevel: EvidenceLevelSchema.default("suspected"),
@@ -312,7 +408,7 @@ export const NormalizedSourceItemSchema = z.object({
     excerpt: z.string().max(1000),
     startMs: z.number().nonnegative().nullable().default(null),
     endMs: z.number().nonnegative().nullable().default(null),
-  })).default([]),
+  })).default([]).transform((claims) => claims.map((claim) => ({ ...claim, qualifiers: normalizeQualifiers(claim.qualifiers) }))),
 });
 export type NormalizedSourceItem = z.infer<typeof NormalizedSourceItemSchema>;
 
@@ -344,6 +440,155 @@ export type PublicSubmissionState = z.infer<typeof PublicSubmissionStateSchema>;
 // that can enforce a reviewed submission and a non-publishable source policy.
 export const PublicSubmissionReviewDecisionSchema = z.enum(["under_review", "rejected", "blocked"]);
 export type PublicSubmissionReviewDecision = z.infer<typeof PublicSubmissionReviewDecisionSchema>;
+
+// Discovery model (TASK-003): the structured record of a discovered fact, its
+// capture conditions, and its reproducibility. Schema and deterministic
+// derivation only — persistence wiring is a later milestone.
+export const DiscoveryStatusSchema = z.enum([
+  "unverified", "reported", "corroborated", "verified", "needs_retest", "disputed", "patched", "rejected",
+]);
+export type DiscoveryStatus = z.infer<typeof DiscoveryStatusSchema>;
+
+export const EvidenceSummarySchema = z.object({
+  supportingLineages: z.number().int().nonnegative(),
+  contradictingLineages: z.number().int().nonnegative(),
+  strongestEvidenceType: EvidenceSchema.shape.evidenceType.nullable(),
+}).strict();
+export type EvidenceSummary = z.infer<typeof EvidenceSummarySchema>;
+
+export const ConditionsSchema = z.object({
+  timeOfDay: z.string().nullable().default(null),
+  weather: z.string().nullable().default(null),
+  mission: z.string().nullable().default(null),
+  wantedLevel: z.number().int().nonnegative().nullable().default(null),
+  inventory: z.array(z.string()).default([]),
+  mode: z.string().nullable().default(null),
+}).strict();
+export type Conditions = z.infer<typeof ConditionsSchema>;
+
+export const ReproductionSchema = z.object({
+  id: z.string().min(1),
+  discoveryId: z.string().min(1),
+  actorId: z.string().min(1),
+  outcome: z.enum(["reproduced", "failed_to_reproduce"]),
+  platform: z.string().nullable().default(null),
+  gameBuild: z.string().nullable().default(null),
+  stepsHash: z.string().regex(/^[a-f0-9]{64}$/, "Expected a SHA-256 steps hash"),
+  notes: z.string().nullable().default(null),
+  proofAttachmentId: z.string().nullable().default(null),
+}).strict();
+export type Reproduction = z.infer<typeof ReproductionSchema>;
+
+export const DiscoverySchema = z.object({
+  id: z.string().min(1),
+  collectionId: z.string().min(1),
+  gameProfileVersion: z.string().min(1),
+  canonicalTitle: z.string().min(1),
+  titleSafe: z.string().min(1),
+  categoryId: z.string().min(1),
+  summary: z.string(),
+  status: DiscoveryStatusSchema,
+  confidence: z.number().min(0).max(1),
+  newsworthiness: z.number().min(0).max(100),
+  platforms: z.array(z.string()).default([]),
+  gameBuilds: z.array(z.string()).default([]),
+  progressionContext: z.string().nullable().default(null),
+  conditions: ConditionsSchema,
+  spoilerTags: z.array(z.string()).default([]),
+  firstSeenAt: z.string().datetime(),
+  verifiedAt: z.string().datetime().nullable().default(null),
+  lastValidatedAt: z.string().datetime().nullable().default(null),
+  claimIds: z.array(z.string()).default([]),
+  evidenceSummary: EvidenceSummarySchema,
+  reproductions: z.array(ReproductionSchema).default([]),
+}).strict();
+export type Discovery = z.infer<typeof DiscoverySchema>;
+
+const evidenceWeights: Record<Evidence["evidenceType"], number> = {
+  official_document: 0.35,
+  independent_reproduction: 0.25,
+  video_result: 0.2,
+  trusted_reporting: 0.18,
+  screenshot_log: 0.08,
+  community_report: 0.04,
+  copied_report: 0.01,
+};
+
+export function evidenceSummaryFor(claims: Claim[]): EvidenceSummary {
+  const supporting = new Set<string>();
+  const contradicting = new Set<string>();
+  let strongest: Evidence["evidenceType"] | null = null;
+  for (const claim of claims) {
+    for (const evidence of claim.evidence) {
+      const family = evidence.provenanceFamilyId ?? evidence.lineageId;
+      if (evidence.stance === "contradicts") {
+        contradicting.add(family);
+        continue;
+      }
+      supporting.add(family);
+      if (!strongest || evidenceWeights[evidence.evidenceType] > evidenceWeights[strongest]) strongest = evidence.evidenceType;
+    }
+  }
+  return {
+    supportingLineages: supporting.size,
+    contradictingLineages: contradicting.size,
+    strongestEvidenceType: strongest,
+  };
+}
+
+export function assembleDiscovery(input: {
+  id: string;
+  collectionId: string;
+  gameProfileVersion: string;
+  canonicalTitle: string;
+  titleSafe?: string;
+  categoryId: string;
+  summary: string;
+  status: DiscoveryStatus;
+  confidence: number;
+  newsworthiness: number;
+  platforms?: string[];
+  gameBuilds?: string[];
+  progressionContext?: string | null;
+  conditions: Conditions;
+  spoilerTags?: string[];
+  firstSeenAt: string;
+  verifiedAt?: string | null;
+  lastValidatedAt?: string | null;
+  claims: Claim[];
+  reproductions?: Reproduction[];
+}): Discovery {
+  return DiscoverySchema.parse({
+    id: input.id,
+    collectionId: input.collectionId,
+    gameProfileVersion: input.gameProfileVersion,
+    canonicalTitle: input.canonicalTitle,
+    titleSafe: input.titleSafe ?? input.canonicalTitle,
+    categoryId: input.categoryId,
+    summary: input.summary,
+    status: input.status,
+    confidence: input.confidence,
+    newsworthiness: input.newsworthiness,
+    platforms: input.platforms ?? [],
+    gameBuilds: input.gameBuilds ?? [],
+    progressionContext: input.progressionContext ?? null,
+    conditions: input.conditions,
+    spoilerTags: input.spoilerTags ?? [],
+    firstSeenAt: input.firstSeenAt,
+    verifiedAt: input.verifiedAt ?? null,
+    lastValidatedAt: input.lastValidatedAt ?? null,
+    claimIds: input.claims.map((claim) => claim.id),
+    evidenceSummary: evidenceSummaryFor(input.claims),
+    reproductions: input.reproductions ?? [],
+  });
+}
+
+export function applyActiveBuildChange(discovery: Discovery, currentBuild: string | null): Discovery {
+  if (!currentBuild || discovery.gameBuilds.length === 0) return discovery;
+  const superseded = discovery.gameBuilds.some((build) => compareBuildVersions(build, currentBuild) < 0);
+  if (superseded && discovery.status === "verified") return { ...discovery, status: "needs_retest" };
+  return discovery;
+}
 
 export const ArticleFactSchema = z.object({
   text: z.string(),
@@ -579,7 +824,8 @@ export function canonicalizeClaimText(value: string): string {
 }
 
 export function canonicalClaimKey(input: { subject: string; predicate: string; value: string; qualifiers?: Record<string, string> }): string {
-  const qualifierEntries = Object.entries(input.qualifiers ?? {})
+  const qualifiers = normalizeQualifiers(input.qualifiers ?? {});
+  const qualifierEntries = Object.entries(qualifiers)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${canonicalizeClaimText(value)}`);
   return hashText([
@@ -627,7 +873,22 @@ export type SafeArticle = {
   title: string;
   seoTitle: string;
   description: string;
-  body: ArticleBody;
+  body: {
+    summary: string;
+    unknowns: string[];
+    sections: Array<{
+      heading: string;
+      publicSafe: true;
+      spoilerTags: [];
+      paragraphs: Array<{
+        text: string;
+        evidenceLevel: EvidenceLevel;
+        attributionType: AttributionType;
+        editorialAssessment: string | null;
+        citations: number[];
+      }>;
+    }>;
+  };
   status: ArticleStatus;
   publishedAt: string | null;
   updatedAt: string | null;
@@ -670,15 +931,20 @@ export function toSafeArticle(article: Article): SafeArticle | null {
       })),
     })),
   });
-  const safeBody = {
+  const safeBody: SafeArticle["body"] = {
     ...body,
     sections: body.sections.map((section) => ({
-      ...section,
-      paragraphs: section.paragraphs.map((fact) => ({
-        ...fact,
-        citations: [...new Set((fact.claimIds.length ? fact.claimIds : article.sourceRefs.length === 1 ? [article.sourceRefs[0].claimId ?? article.sourceRefs[0].sourceId] : [])
-          .map((claimId) => citationNumbers.get(claimId)).filter((number): number is number => number !== undefined))],
-      })),
+      heading: section.heading,
+      publicSafe: true,
+      spoilerTags: [],
+      paragraphs: section.paragraphs.map((fact) => {
+          const { claimIds, ...safeFact } = fact;
+          return {
+            ...safeFact,
+            citations: [...new Set((claimIds.length ? claimIds : article.sourceRefs.length === 1 ? [article.sourceRefs[0].claimId ?? article.sourceRefs[0].sourceId] : [])
+              .map((claimId) => citationNumbers.get(claimId)).filter((number): number is number => number !== undefined))],
+          };
+        }),
     })),
   };
   return {

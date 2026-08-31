@@ -1,9 +1,13 @@
 {
-  "name": "@gameintel/ai-runtime",
+  "name": "@gameintel/agent-runtime",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "scripts": { "typecheck": "bunx tsc --noEmit -p tsconfig.json" },
-  "dependencies": { "@opencode-ai/sdk": "^1.18.23", "zod": "^3.24.2" }
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.4",
+    "@earendil-works/pi-ai": "^0.84.4",
+    "zod": "^3.24.2"
+  }
 }

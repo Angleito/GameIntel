@@ -156,6 +156,15 @@ CREATE TABLE IF NOT EXISTS ingestion_worker_heartbeats (
   worker_id TEXT PRIMARY KEY, worker_type TEXT NOT NULL, current_job_key TEXT,
   last_error TEXT, last_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS source_health (
+  source_id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  message TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  disabled_at TEXT,
+  disabled_reason TEXT
+);
 `;
 
 export function openSqliteDatabase(path: string): Database {

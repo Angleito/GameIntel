@@ -50,6 +50,8 @@ export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId
   const entry = (await loadRegistry(input.profileId ? sourceRegistryPath(input.profileId) : undefined)).find((candidate) => candidate.id === input.sourceId);
   if (!entry) throw new Error(`Source ${input.sourceId} is not registered`);
   if (entry.access === "manual") throw new Error(`Source ${input.sourceId} does not permit URL ingestion`);
+  const health = await runtime.sourceHealth.getSourceHealth(entry.id);
+  if (health?.disabledAt) throw new Error(`Source ${entry.id} is disabled by the source health policy`);
   const source = await sourceFor(entry, entry.public_citation_base ?? input.url);
   await runtime.persistence.ensureSource(source);
   const waitMs = await runtime.pacing.acquireFetchSlot(entry.id, source.policy.requestsPerMinute);

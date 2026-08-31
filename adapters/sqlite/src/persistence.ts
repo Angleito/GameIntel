@@ -662,7 +662,8 @@ export class SQLitePersistence implements GameIntelPersistence {
     if (!claim) throw new Error("Claim not found");
     const identity = claim.canonical_claim_id ?? claimId;
     const rows = this.all<Record<string, unknown>>(
-      `SELECT e.stance, e.provenance_family_id, item.source_strength, revision.is_current AS current_rev
+      `SELECT e.id AS evidence_id, e.source_item_revision_id, e.stance, e.provenance_family_id,
+        item.source_strength, source.policy AS source_policy, revision.is_current AS current_rev
        FROM claims member
        JOIN evidence e ON e.claim_id = member.id
        JOIN analysis_runs run ON run.id = e.analysis_run_id
@@ -674,7 +675,8 @@ export class SQLitePersistence implements GameIntelPersistence {
            ORDER BY latest_run.completed_at DESC, latest_run.id DESC
            LIMIT 1
          )
-       JOIN source_items item ON item.id = e.source_item_id
+        JOIN source_items item ON item.id = e.source_item_id
+        JOIN sources source ON source.id = item.source_id
        JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
        WHERE COALESCE(member.canonical_claim_id, member.id) = ?`,
       identity,
@@ -683,10 +685,14 @@ export class SQLitePersistence implements GameIntelPersistence {
     const supportingFamilies = new Set<string>();
     const contradictingFamilies = new Set<string>();
     let strongest: SourceStrength = "UNVERIFIED";
+    let strongestApproved: SourceStrength = "UNVERIFIED";
     for (const row of currentRows) {
       const familyId = row.provenance_family_id as string | null;
       const strength = SourceStrengthSchema.parse(row.source_strength);
       if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
+      const policy = SourcePolicySchema.parse(parseJson(row.source_policy));
+      const review = this.evidenceApprovalState(row.evidence_id as string, row.source_item_revision_id as string, policy);
+      if (review.approved && sourceStrengthOrder[strength] > sourceStrengthOrder[strongestApproved]) strongestApproved = strength;
       if (!familyId) continue;
       if (row.stance === "contradicts") contradictingFamilies.add(familyId);
       else supportingFamilies.add(familyId);
@@ -695,6 +701,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       supportingFamilies: supportingFamilies.size,
       contradictingFamilies: contradictingFamilies.size,
       strongestStrength: strongest,
+      strongestApprovedStrength: strongestApproved,
       hasCurrentEvidence: currentRows.length > 0,
       hasHistoricalEvidence: rows.length > 0,
     });
@@ -822,6 +829,7 @@ export class SQLitePersistence implements GameIntelPersistence {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       this.ids.generate("evrev"), evidenceId, evidence.source_item_revision_id as string, reviewerId, decision, notes, maxSeq + 1, isoNow(),
     );
+    await this.refreshClaimState((this.get<{ claim_id: string }>("SELECT claim_id FROM evidence WHERE id = ?", evidenceId))!.claim_id);
     const articles = this.all<{ article_id: string }>(
       `SELECT DISTINCT article_source.article_id
        FROM article_sources article_source

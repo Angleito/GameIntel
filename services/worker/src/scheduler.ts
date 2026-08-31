@@ -57,7 +57,10 @@ try {
   }
   console.log(`Scheduler running for ${profileId} with ${sources.length} pollable source(s); checking every ${pollMs}ms`);
   while (!stopping) {
-    const due = await scheduler.dueSources();
+    // One PK-scoped health read per tick; the registry keeps its static
+    // enabled semantics, the health store holds the operator kill switch.
+    const disabled = new Set((await runtime.sourceHealth.listSourceHealth()).filter((record) => record.disabledAt !== null).map((record) => record.sourceId));
+    const due = (await scheduler.dueSources()).filter((source) => !disabled.has(source.sourceId));
     await processDueSources({ due, jobQueue: runtime.jobQueue, clock: runtime.clock, scheduler });
     await Bun.sleep(pollMs);
   }

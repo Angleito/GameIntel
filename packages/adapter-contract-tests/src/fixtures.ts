@@ -7,11 +7,12 @@ export function testProfile(): GameProfile {
     canonicalName: "Contract Test Collection",
     aliases: ["ContractTest"],
     version: "1",
-    capabilities: { story: true },
-    categories: ["news"],
-    spoilerSafeCategories: ["news"],
+    capabilities: { tracking: true },
+    categories: ["release", "changelog"],
+    spoilerSafeCategories: ["release"],
     platforms: [],
     sourceQueries: [],
+    builds: [],
   };
 }
 
@@ -65,9 +66,9 @@ export function testItem(sourceId = "contract-source", overrides: Partial<Normal
     processingVersion: NORMALIZATION_VERSION,
     claims: [
       {
-        subject: "Vehicle",
-        predicate: "can spawn at",
-        value: "the contract test location",
+        subject: "Contract build 2.4",
+        predicate: "adds",
+        value: "an export command",
         qualifiers: {},
         spoilerTags: [],
         exploitClass: null,
@@ -77,7 +78,7 @@ export function testItem(sourceId = "contract-source", overrides: Partial<Normal
         editorialAssessment: null,
         stance: "supports",
         evidenceType: "trusted_reporting",
-        excerpt: "A verified observation at the contract test location.",
+        excerpt: "A verified observation of the contract build.",
         startMs: null,
         endMs: null,
       },

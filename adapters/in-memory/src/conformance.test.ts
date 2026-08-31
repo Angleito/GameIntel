@@ -1,4 +1,5 @@
 import { runObjectStoreContract, runPersistenceContract, runQueueContract } from "@gameintel/adapter-contract-tests";
+import { runSourceHealthContract } from "@gameintel/adapter-contract-tests";
 import { createInMemoryRuntime, InMemoryJobQueue } from "./index.ts";
 import { InMemoryObjectStore } from "./object-store.ts";
 
@@ -17,3 +18,8 @@ runQueueContract(async () => {
 });
 
 runObjectStoreContract(() => ({ store: new InMemoryObjectStore() }));
+
+runSourceHealthContract(async () => {
+  const runtime = createInMemoryRuntime();
+  return { store: runtime.sourceHealth, close: runtime.close };
+});

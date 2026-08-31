@@ -491,6 +491,53 @@ export interface JobQueue {
 export interface SourcePacingStore {
   acquireFetchSlot(sourceId: string, requestsPerMinute: number): Promise<number>;
 }
+// ---------------------------------------------------------------------------
+// Source health (TASK-004): persistent per-source health aggregation with an
+// operator-controlled kill switch. Auto-disable is a pure function of the
+// previous record and the incoming observation.
+// ---------------------------------------------------------------------------
+
+export type SourceHealthStatus = "ok" | "down";
+
+export type SourceHealthRecord = {
+  sourceId: string;
+  status: SourceHealthStatus;
+  checkedAt: string;
+  message: string | null;
+  consecutiveFailures: number;
+  disabledAt: string | null;
+  disabledReason: string | null;
+};
+
+export const SOURCE_HEALTH_DISABLE_AFTER_FAILURES = 3;
+
+export function applySourceHealthUpdate(previous: SourceHealthRecord | null, input: {
+  sourceId: string;
+  status: SourceHealthStatus;
+  checkedAt: string;
+  message?: string | null;
+}): SourceHealthRecord {
+  const consecutiveFailures = input.status === "down" ? (previous?.consecutiveFailures ?? 0) + 1 : 0;
+  const disabledAt = previous?.disabledAt ?? (consecutiveFailures >= SOURCE_HEALTH_DISABLE_AFTER_FAILURES ? input.checkedAt : null);
+  return {
+    sourceId: input.sourceId,
+    status: input.status,
+    checkedAt: input.checkedAt,
+    message: input.message ?? null,
+    consecutiveFailures,
+    disabledAt,
+    disabledReason: disabledAt && !previous?.disabledAt
+      ? `automatically disabled after ${consecutiveFailures} consecutive failures`
+      : previous?.disabledReason ?? null,
+  };
+}
+
+export interface SourceHealthStore {
+  recordSourceHealth(input: { sourceId: string; status: SourceHealthStatus; checkedAt: string; message?: string | null }): Promise<SourceHealthRecord>;
+  getSourceHealth(sourceId: string): Promise<SourceHealthRecord | null>;
+  listSourceHealth(): Promise<SourceHealthRecord[]>;
+  setSourceDisabled(sourceId: string, disabled: boolean, reason: string, actor: string): Promise<SourceHealthRecord>;
+}
 
 export type SchedulableSource = {
   sourceId: string;
@@ -624,6 +671,7 @@ export interface GameIntelRuntime {
   persistence: GameIntelPersistence;
   jobQueue: JobQueue;
   pacing: SourcePacingStore;
+  sourceHealth: SourceHealthStore;
   fetchTransport: ControlledFetchTransport;
   scheduler: SourceScheduler | null;
   objectStore: ObjectStore | null;

@@ -55,7 +55,7 @@ function isPlaceholder(value: string): boolean {
     || /(?:^|[^a-z0-9])(?:change(?:[-_ ]?me)?|replace|placeholder|redacted|example|dummy|sample|your)(?:[^a-z0-9]|$)/i.test(normalized);
 }
 
-const namedSecretAssignment = /(?:^|[\n,])[ \t]*["']?(?:APP_DATABASE_PASSWORD|APP_OPERATOR_DATABASE_PASSWORD|APP_PUBLIC_DATABASE_PASSWORD|AWS_SECRET_ACCESS_KEY|CF_API_TOKEN|CLOUDFLARE_API_KEY|CLOUDFLARE_API_TOKEN|DAILY_SHUFFLE_SECRET|DATABASE_PASSWORD|GITHUB_TOKEN|LOCAL_OPERATOR_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|OPENCODE_PASSWORD|POSTGRES_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|SUBMISSION_IDENTITY_SECRET|SUPADATA_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:["']([^"'\r\n]*)["']|([^\s,#}\r\n]+))/gim;
+const namedSecretAssignment = /(?:^|[\n,])[ \t]*["']?(?:ANTHROPIC_API_KEY|APP_DATABASE_PASSWORD|APP_OPERATOR_DATABASE_PASSWORD|APP_PUBLIC_DATABASE_PASSWORD|AWS_SECRET_ACCESS_KEY|CF_API_TOKEN|CLOUDFLARE_API_KEY|CLOUDFLARE_API_TOKEN|DAILY_SHUFFLE_SECRET|DATABASE_PASSWORD|GITHUB_TOKEN|GOOGLE_API_KEY|LOCAL_OPERATOR_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|OPENAI_API_KEY|POSTGRES_PASSWORD|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|SUBMISSION_IDENTITY_SECRET|SUBMISSION_TRUSTED_PROXY_TOKEN|SUPADATA_API_KEY)["']?[ \t]*(?:=|:)[ \t]*(?:["']([^"'\r\n]*)["']|([^\s,#}\r\n]+))/gim;
 
 function isConfigurationText(path: string): boolean {
   return /(?:^|\/)(?:\.env(?:\.[^/]+)?|[^/]+\.(?:json|jsonc|yaml|yml))$/i.test(path);
@@ -96,7 +96,11 @@ async function scanCandidate(path: string): Promise<Finding[]> {
     const text = await readFile(path, "utf8");
     if (text.includes("\0")) return [{ path, rule: "expected text release candidate contains binary data" }];
     return scanText(path, text);
-  } catch {
+  } catch (error) {
+    // A path deleted in the current worktree can remain in the Git index until
+    // staging. It is not part of the release candidate and must not fail a
+    // pre-commit release scan.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     return [{ path, rule: "release candidate could not be scanned safely" }];
   }
 }

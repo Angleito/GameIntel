@@ -109,6 +109,7 @@ export {
   PostgresPersistence,
   createPostgresRuntime,
 } from "./adapter.ts";
+export { PostgresSourceHealthStore } from "./source-health.ts";
 
 type TransactionRunner = {
   begin?: (callback: (transaction: unknown) => Promise<unknown>) => Promise<unknown>;
@@ -1478,7 +1479,7 @@ export async function reviewEvidence(
   decision = EvidenceReviewDecisionSchema.parse(decision);
   await inTransaction(db, async (transaction) => {
     const evidence = await transaction`
-      SELECT e.id, e.source_item_revision_id, revision.is_current, item.submitted_by, source.policy,
+      SELECT e.id, e.claim_id, e.source_item_revision_id, revision.is_current, item.submitted_by, source.policy,
         run.status AS analysis_run_status,
         run.id = (
           SELECT latest_run.id
@@ -1508,6 +1509,7 @@ export async function reviewEvidence(
       INSERT INTO evidence_reviews (id, evidence_id, source_item_revision_id, reviewer_id, decision, notes)
       VALUES (${id("evrev")}, ${evidenceId}, ${record.source_item_revision_id as string}, ${reviewerId}, ${decision}, ${notes})
     `;
+    await refreshClaimState(transaction, record.claim_id as string);
     const articles = await transaction`
       SELECT DISTINCT article_source.article_id
       FROM article_sources article_source
@@ -1531,7 +1533,8 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
   if (!claim.length) throw new Error("Claim not found");
   const identity = (claim[0].canonical_claim_id as string | null) ?? claimId;
   const rows = await db`
-    SELECT e.stance, e.provenance_family_id, item.source_strength, revision.is_current AS current_rev
+    SELECT e.id AS evidence_id, e.source_item_revision_id, e.stance, e.provenance_family_id,
+      item.source_strength, source.policy AS source_policy, revision.is_current AS current_rev
     FROM claims member
     JOIN evidence e ON e.claim_id = member.id
     JOIN analysis_runs run ON run.id = e.analysis_run_id
@@ -1544,6 +1547,7 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
         LIMIT 1
       )
     JOIN source_items item ON item.id = e.source_item_id
+    JOIN sources source ON source.id = item.source_id
     JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id
     WHERE COALESCE(member.canonical_claim_id, member.id) = ${identity}
   `;
@@ -1551,10 +1555,14 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
   const supportingFamilies = new Set<string>();
   const contradictingFamilies = new Set<string>();
   let strongest: SourceStrength = "UNVERIFIED";
+  let strongestApproved: SourceStrength = "UNVERIFIED";
   for (const row of currentRows as Array<Record<string, unknown>>) {
     const familyId = row.provenance_family_id as string | null;
     const strength = SourceStrengthSchema.parse(row.source_strength);
     if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
+    const policy = SourcePolicySchema.parse(typeof row.source_policy === "string" ? JSON.parse(row.source_policy) : row.source_policy);
+    const review = await evidenceApprovalState(db, row.evidence_id as string, row.source_item_revision_id as string, policy);
+    if (review.approved && sourceStrengthOrder[strength] > sourceStrengthOrder[strongestApproved]) strongestApproved = strength;
     if (!familyId) continue;
     if (row.stance === "contradicts") contradictingFamilies.add(familyId);
     else supportingFamilies.add(familyId);
@@ -1563,6 +1571,7 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
     supportingFamilies: supportingFamilies.size,
     contradictingFamilies: contradictingFamilies.size,
     strongestStrength: strongest,
+    strongestApprovedStrength: strongestApproved,
     hasCurrentEvidence: currentRows.length > 0,
     hasHistoricalEvidence: rows.length > 0,
   });

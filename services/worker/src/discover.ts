@@ -3,6 +3,24 @@ import { parseRssFeed } from "@gameintel/source-sdk";
 import { loadRegistry, sourceFor, type RegistryEntry } from "@gameintel/newsroom";
 import { sourceRegistryPath } from "@gameintel/config";
 
+const MAX_DISCOVERY_URLS_PER_FEED = 100;
+
+function permittedDiscoveryUrl(value: string, entry: RegistryEntry): URL | null {
+  try {
+    const url = new URL(value);
+    if (!(url.protocol === "http:" || url.protocol === "https:") || url.username || url.password) return null;
+    if (url.port && !((url.protocol === "http:" && url.port === "80") || (url.protocol === "https:" && url.port === "443"))) return null;
+    const hostname = url.hostname.toLowerCase();
+    const allowed = entry.domains.some((domain) => {
+      const registered = domain.toLowerCase();
+      return registered.includes(".") && (hostname === registered || hostname.endsWith(`.${registered}`));
+    });
+    return allowed ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function discoverPayload(value: unknown): SourceDiscoverJobPayload {
   if (!value || typeof value !== "object") throw new Error("Source discovery job payload is invalid");
   const payload = value as Record<string, unknown>;
@@ -26,10 +44,10 @@ function assertDiscoveryEntry(entry: RegistryEntry): void {
 
 // Discovery job execution in the isolated ingestion worker: fetch the feed
 // through the controlled fetch transport (egress proxy, pacing, SSRF
-// hardening), parse its items, and enqueue each item as its own source_ingest
-// job. The queue deduplicates active item executions, and completed items are
-// safely re-refreshable later. The feed itself is never ingested as an
-// article.
+// hardening), parse its items, and enqueue bounded, validated item URLs as
+// source_ingest jobs. The queue deduplicates active item executions, and
+// completed items are safely re-refreshable later. The feed itself is never
+// ingested as an article.
 //
 // Lease fencing note: the per-item assertIngestionJobLeaseHeld checks narrow
 // the reclaim window but are not atomic with the enqueues (the FOR UPDATE
@@ -50,6 +68,8 @@ export async function processDiscoveryJob(
   const entry = (await loadRegistry(options.registryPath ?? (payload.profileId ? sourceRegistryPath(payload.profileId) : undefined))).find((candidate) => candidate.id === payload.sourceId);
   if (!entry) throw new Error(`Source ${payload.sourceId} is not registered`);
   assertDiscoveryEntry(entry);
+  const health = await runtime.sourceHealth.getSourceHealth(entry.id);
+  if (health?.disabledAt) throw new Error(`Source ${entry.id} is disabled by the source health policy`);
   if (entry.poll_url !== payload.feedUrl) throw new Error(`Discovery feed URL does not match the registered poll_url for ${entry.id}`);
 
   const source = await sourceFor(entry, entry.public_citation_base ?? null);
@@ -65,12 +85,21 @@ export async function processDiscoveryJob(
   const items = parseRssFeed(fetched.text);
   let enqueued = 0;
   let duplicate = 0;
+  const urls = new Set<string>();
   for (const item of items) {
+    const url = permittedDiscoveryUrl(item.url, entry);
+    if (!url) continue;
+    if (urls.has(url.href)) {
+      duplicate += 1;
+      continue;
+    }
+    urls.add(url.href);
+    if (urls.size > MAX_DISCOVERY_URLS_PER_FEED) continue;
     if (fence) await runtime.persistence.assertIngestionJobLeaseHeld(fence.jobKey, fence.leaseToken);
     const result = await runtime.jobQueue.enqueueSourceIngestJob({
       collectionId: payload.collectionId,
       sourceId: payload.sourceId,
-      url: item.url,
+      url: url.href,
       profileId: payload.profileId,
     });
     if (result.duplicate) duplicate += 1;

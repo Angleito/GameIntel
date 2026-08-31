@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run security scan
+        run: bun run security:scan
+
+      - name: Run tests
+        run: bun test
+
+      - name: Type-check
+        run: bun run typecheck
+
+      - name: Build
+        run: bun run build
+
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: example
+          APP_DATABASE_PASSWORD: example
+          APP_OPERATOR_DATABASE_PASSWORD: example
+          APP_PUBLIC_DATABASE_PASSWORD: example
+          LOCAL_OPERATOR_TOKEN: example
+        run: docker compose -f deployments/local/compose.yaml config --quiet

@@ -19,7 +19,7 @@ import {
   approveMediaCollection,
   assertIngestionJobLeaseHeld,
   audit,
-    calculateClaimConfidence,
+  calculateClaimConfidence,
     canonicalClaimIdsForSourceItem,
   claimIngestionJob,
   clearCoverMedia,
@@ -82,6 +82,7 @@ import {
   updateExistingArticle,
   type Db,
 } from "./index.ts";
+import { PostgresSourceHealthStore } from "./source-health.ts";
 
 // PostgreSQL reference persistence adapter. PostgreSQL-specific concerns
 // (advisory locks, SKIP LOCKED, partial indexes, savepoints) stay inside this
@@ -247,6 +248,7 @@ export function createPostgresRuntime(options: {
     persistence: new PostgresPersistence(handle),
     jobQueue: new PostgresJobQueue(handle),
     pacing: new PostgresPacingStore(handle),
+    sourceHealth: new PostgresSourceHealthStore(handle),
     fetchTransport: options.fetchTransport ?? new UnconfiguredFetchTransport(),
     scheduler,
     objectStore: options.objectStore ?? null,

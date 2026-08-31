@@ -1,7 +1,8 @@
 import { describe, test } from "bun:test";
-import { runPersistenceContract, runQueueContract } from "@gameintel/adapter-contract-tests";
+import { runPersistenceContract, runQueueContract, runSourceHealthContract } from "@gameintel/adapter-contract-tests";
 import { closeDb, createDb, type Db } from "./index.ts";
 import { PostgresJobQueue, PostgresPersistence } from "./adapter.ts";
+import { PostgresSourceHealthStore } from "./source-health.ts";
 
 // Conformance suite for the PostgreSQL reference adapter. Requires a migrated
 // database (GAMEINTEL_TEST_POSTGRES=true); skipped by default so `bun test`
@@ -74,4 +75,14 @@ describe("PostgreSQL adapter conformance", () => {
 
   runPersistenceContract(factory);
   runQueueContract(factory);
+  runSourceHealthContract(async () => {
+    const db = createDb();
+    return {
+      store: new PostgresSourceHealthStore(db),
+      close: async () => {
+        await db`DELETE FROM source_health WHERE source_id IN ('source-a', 'source-b')`;
+        await closeDb(db);
+      },
+    };
+  });
 });

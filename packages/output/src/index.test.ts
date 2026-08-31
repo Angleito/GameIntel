@@ -36,7 +36,7 @@ describe("output artifacts", () => {
           summary: "Summary",
           sections: [{
             heading: "Evidence",
-            paragraphs: [{ text: "Evidence", evidenceLevel: "confirmed", attributionType: "official", claimIds: [], editorialAssessment: null, citations: [1] }],
+            paragraphs: [{ text: "Evidence", evidenceLevel: "confirmed", attributionType: "official", editorialAssessment: null, citations: [1] }],
             publicSafe: true,
             spoilerTags: [],
           }],

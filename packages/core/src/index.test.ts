@@ -2,10 +2,23 @@ import { describe, expect, test } from "bun:test";
 import {
   canPublish,
   calculateConfidence,
+  applicabilityFromQualifiers,
+  assembleDiscovery,
+  applyActiveBuildChange,
+  canonicalClaimKey,
+  claimBuildStatus,
+  CollectionProfileSchema,
+  compareBuildVersions,
+  ConditionsSchema,
   deriveClaimState,
+  DiscoverySchema,
   dispositionFor,
   effectivePublicationMode,
   evidenceReviewGate,
+  evidenceSummaryFor,
+  type Evidence,
+  normalizeQualifiers,
+  ReproductionSchema,
   PublicSubmissionReviewDecisionSchema,
   PublicSubmissionSchema,
   PublicSubmissionStateSchema,
@@ -66,13 +79,14 @@ describe("editorial rules", () => {
   });
 
   test("derives claim states from evidence and revision currency", () => {
-    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", hasCurrentEvidence: false })).toBe("unverified");
-    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
-    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "COMMUNITY", hasCurrentEvidence: true })).toBe("supported");
-    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("confirmed");
-    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 1, strongestStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("contested");
-    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
-    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", hasCurrentEvidence: true, retracted: true })).toBe("retracted");
+    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", strongestApprovedStrength: "UNVERIFIED", hasCurrentEvidence: false })).toBe("unverified");
+    expect(deriveClaimState({ supportingFamilies: 0, contradictingFamilies: 0, strongestStrength: "UNVERIFIED", strongestApprovedStrength: "UNVERIFIED", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "COMMUNITY", strongestApprovedStrength: "UNVERIFIED", hasCurrentEvidence: true })).toBe("supported");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", strongestApprovedStrength: "UNVERIFIED", hasCurrentEvidence: true })).toBe("supported");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", strongestApprovedStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("confirmed");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 1, strongestStrength: "PRIMARY", strongestApprovedStrength: "PRIMARY", hasCurrentEvidence: true })).toBe("contested");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", strongestApprovedStrength: "PRIMARY", hasCurrentEvidence: false, hasHistoricalEvidence: true })).toBe("superseded");
+    expect(deriveClaimState({ supportingFamilies: 2, contradictingFamilies: 0, strongestStrength: "PRIMARY", strongestApprovedStrength: "PRIMARY", hasCurrentEvidence: true, retracted: true })).toBe("retracted");
   });
 
   test("blocks evidence from publication while any reviewer disputes or rejects it", () => {
@@ -161,6 +175,7 @@ describe("editorial rules", () => {
       approvedBy: "operator", coverMedia: null, publishedAt: null, updatedAt: null,
     };
     expect(toSafeArticle(article)?.body.sections).toHaveLength(1);
+    expect(JSON.stringify(toSafeArticle(article))).not.toContain("claim-1");
   });
 
   test("withholds URLs and markup from generated public text", () => {
@@ -188,12 +203,192 @@ describe("editorial rules", () => {
         articleSourcesComplete: true, sourceRefs: [{ sourceId: "s", claimId: "claim-1", citationLabel: "Community report", publicCitationUrl: "https://example.com/report" }], approvedBy: "operator", coverMedia: null, publishedAt: null, updatedAt: null,
      };
      const safe = toSafeArticle(article)!;
-     expect(safe.body.sections[0].paragraphs[0]).toMatchObject({
+      expect(safe.body.sections[0].paragraphs[0]).toMatchObject({
        text: "Many reports claim that Trevor Philips from GTA V has been spotted in Amborisa.",
        evidenceLevel: "suspected",
        editorialAssessment: "GameIntel.gg has not found sufficient evidence to support this claim.",
-       citations: [1],
-     });
+        citations: [1],
+      });
+      expect(safe.body.sections[0].paragraphs[0]).not.toHaveProperty("claimIds");
      expect(safe.citations).toEqual([{ number: 1, label: "Community report", url: "https://example.com/report" }]);
    });
+});
+describe("qualifier vocabulary and build applicability", () => {
+  test("normalizes qualifier keys and values deterministically", () => {
+    expect(normalizeQualifiers({ " Platform ": "  PS5  " })).toEqual({ platform: "PS5" });
+    expect(normalizeQualifiers({ mode: " Online ", time_of_day: " Night ", weather: " Clear " })).toEqual({
+      mode: "online",
+      time_of_day: "night",
+      weather: "clear",
+    });
+    expect(normalizeQualifiers({ wanted_level: " 3 " })).toEqual({ wanted_level: "3" });
+    expect(normalizeQualifiers({ status: " Source-Stated " })).toEqual({ status: "Source-Stated" });
+  });
+
+  test("canonical claim keys ignore qualifier casing and whitespace", () => {
+    const typed = canonicalClaimKey({ subject: "S", predicate: "P", value: "V", qualifiers: { platform: "PS5", time_of_day: "Night" } });
+    const sloppy = canonicalClaimKey({ subject: "S", predicate: "P", value: "V", qualifiers: { platform: " PS5 ", time_of_day: "night" } });
+    const different = canonicalClaimKey({ subject: "S", predicate: "P", value: "V", qualifiers: { platform: "PS5", time_of_day: "day" } });
+    expect(typed).toBe(sloppy);
+    expect(typed).not.toBe(different);
+  });
+
+  test("derives structured applicability from qualifiers", () => {
+    expect(applicabilityFromQualifiers({ platform: "PS5", build: "1.4.0", mode: "Online", mission: "mission_04" })).toEqual({
+      platform: "PS5",
+      build: "1.4.0",
+      mode: "online",
+      region: null,
+      progressionContext: "mission_04",
+    });
+    expect(applicabilityFromQualifiers({})).toEqual({ platform: null, build: null, mode: null, region: null, progressionContext: null });
+  });
+
+  test("compares build versions segment-wise", () => {
+    expect(compareBuildVersions("1.4.0", "1.4.0")).toBe(0);
+    expect(compareBuildVersions("1.4.0", "1.10.0")).toBeLessThan(0);
+    expect(compareBuildVersions("1.4", "1.4.0")).toBe(0);
+  });
+
+  test("classifies claim build status against the current build", () => {
+    expect(claimBuildStatus(null, "1.4.0")).toBe("unknown");
+    expect(claimBuildStatus("1.4.0", "1.4.0")).toBe("current");
+    expect(claimBuildStatus("1.0", "1.4.0")).toBe("superseded");
+    expect(claimBuildStatus("1.4.0", null)).toBe("current");
+  });
+
+  test("profiles accept a builds registry and default it to empty", () => {
+    expect(CollectionProfileSchema.parse({
+      id: "test", canonicalName: "Test", aliases: [], version: "1",
+      builds: [{ id: "build-1", version: "1.4.0" }],
+    }).builds).toEqual([{ id: "build-1", platform: null, mode: null, region: null, version: "1.4.0", releasedAt: null, active: true }]);
+    expect(CollectionProfileSchema.parse({ id: "test", canonicalName: "Test", aliases: [], version: "1" }).builds).toEqual([]);
+  });
+});
+describe("discovery schema", () => {
+  const evidence = (family: string | undefined, lineage: string, type: Evidence["evidenceType"], stance: "supports" | "contradicts" = "supports") => ({
+    sourceItemId: "item-1",
+    provenanceFamilyId: family,
+    stance,
+    evidenceType: type,
+    excerpt: "Observed under the reported conditions.",
+    startMs: null,
+    endMs: null,
+    lineageId: lineage,
+  });
+  type EvidenceRow = {
+    sourceItemId: string;
+    provenanceFamilyId: string | undefined;
+    stance: "supports" | "contradicts";
+    evidenceType: Evidence["evidenceType"];
+    excerpt: string;
+    startMs: null;
+    endMs: null;
+    lineageId: string;
+  };
+  const claim = (id: string, rows: EvidenceRow[]) => ({
+    id,
+    collectionId: "gta-vi",
+    subject: "Subject",
+    predicate: "predicate",
+    value: "value",
+    qualifiers: {},
+    spoilerTags: [],
+    exploitClass: null,
+    evidenceLevel: "confirmed" as const,
+    attributionType: "official" as const,
+    statement: null,
+    editorialAssessment: null,
+    evidence: rows,
+  });
+  const assemble = (status: "verified" | "needs_retest" | "rejected", builds: string[]) => assembleDiscovery({
+    id: "d", collectionId: "gta-vi", gameProfileVersion: "1", canonicalTitle: "T",
+    categoryId: "vehicle", summary: "S", status, confidence: 0.9, newsworthiness: 80,
+    conditions: ConditionsSchema.parse({}), firstSeenAt: "2026-08-27T00:00:00.000Z", gameBuilds: builds,
+    claims: [claim("c1", [evidence("family-a", "lineage-1", "official_document")])],
+  });
+
+  test("parses a full discovery document and applies defaults", () => {
+    const parsed = DiscoverySchema.parse({
+      id: "discovery-1",
+      collectionId: "gta-vi",
+      gameProfileVersion: "1",
+      canonicalTitle: "Rare vehicle at the docks",
+      titleSafe: "Rare vehicle at the docks",
+      categoryId: "vehicle",
+      summary: "A rare vehicle was observed.",
+      status: "reported",
+      confidence: 0.6,
+      newsworthiness: 70,
+      conditions: { timeOfDay: "night" },
+      firstSeenAt: "2026-08-27T00:00:00.000Z",
+      claimIds: ["claim-1"],
+      evidenceSummary: { supportingLineages: 1, contradictingLineages: 0, strongestEvidenceType: "community_report" },
+    });
+    expect(parsed.platforms).toEqual([]);
+    expect(parsed.gameBuilds).toEqual([]);
+    expect(parsed.spoilerTags).toEqual([]);
+    expect(parsed.reproductions).toEqual([]);
+    expect(parsed.verifiedAt).toBeNull();
+    expect(parsed.conditions).toEqual({ timeOfDay: "night", weather: null, mission: null, wantedLevel: null, inventory: [], mode: null });
+  });
+
+  test("counts distinct evidence lineages and picks the strongest supporting type", () => {
+    const summary = evidenceSummaryFor([
+      claim("claim-1", [
+        evidence("family-a", "lineage-1", "community_report"),
+        evidence("family-a", "lineage-2", "video_result"),
+        evidence(undefined, "lineage-3", "official_document"),
+        evidence("family-b", "lineage-4", "screenshot_log", "contradicts"),
+        evidence("family-b", "lineage-5", "trusted_reporting", "contradicts"),
+      ]),
+    ]);
+    expect(summary).toEqual({
+      supportingLineages: 2,
+      contradictingLineages: 1,
+      strongestEvidenceType: "official_document",
+    });
+    expect(evidenceSummaryFor([claim("claim-2", [evidence("family-b", "lineage-6", "community_report", "contradicts")])]).strongestEvidenceType).toBeNull();
+  });
+
+  test("derives evidence summary and title defaults when assembling", () => {
+    const assembled = assembleDiscovery({
+      id: "discovery-2",
+      collectionId: "gta-vi",
+      gameProfileVersion: "1",
+      canonicalTitle: "Title",
+      categoryId: "vehicle",
+      summary: "Summary",
+      status: "verified",
+      confidence: 0.9,
+      newsworthiness: 80,
+      conditions: ConditionsSchema.parse({ mode: "online" }),
+      firstSeenAt: "2026-08-27T00:00:00.000Z",
+      claims: [claim("claim-1", [evidence("family-a", "lineage-1", "official_document")])],
+    });
+    expect(assembled.titleSafe).toBe("Title");
+    expect(assembled.claimIds).toEqual(["claim-1"]);
+    expect(assembled.evidenceSummary).toEqual({ supportingLineages: 1, contradictingLineages: 0, strongestEvidenceType: "official_document" });
+    expect(ConditionsSchema.safeParse({ timeOfDay: "night", unknown: "x" }).success).toBe(false);
+  });
+
+  test("demotes verified discoveries when an active build supersedes them", () => {
+    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), "1.4.0").status).toBe("needs_retest");
+    expect(applyActiveBuildChange(assemble("needs_retest", ["1.0"]), "1.4.0").status).toBe("needs_retest");
+    expect(applyActiveBuildChange(assemble("rejected", ["1.0"]), "1.4.0").status).toBe("rejected");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), "1.0").status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", []), "1.4.0").status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), null).status).toBe("verified");
+  });
+
+  test("requires a 64-character lowercase hex steps hash for reproductions", () => {
+    expect(ReproductionSchema.safeParse({
+      id: "r1", discoveryId: "d1", actorId: "actor-1", outcome: "reproduced",
+      stepsHash: "not-a-hash",
+    }).success).toBe(false);
+    expect(ReproductionSchema.safeParse({
+      id: "r1", discoveryId: "d1", actorId: "actor-1", outcome: "reproduced",
+      stepsHash: "a".repeat(64),
+    }).success).toBe(true);
+  });
 });
