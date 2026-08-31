@@ -17,6 +17,7 @@ import {
   evidenceReviewGate,
   evidenceSummaryFor,
   type Evidence,
+  GameBuildSchema,
   normalizeQualifiers,
   ReproductionSchema,
   PublicSubmissionReviewDecisionSchema,
@@ -223,6 +224,8 @@ describe("qualifier vocabulary and build applicability", () => {
     });
     expect(normalizeQualifiers({ wanted_level: " 3 " })).toEqual({ wanted_level: "3" });
     expect(normalizeQualifiers({ status: " Source-Stated " })).toEqual({ status: "Source-Stated" });
+    expect(normalizeQualifiers({ wanted_level: "abc" })).toEqual({ wanted_level: "abc" });
+    expect(normalizeQualifiers({ wanted_level: "3.5" })).toEqual({ wanted_level: "3.5" });
   });
 
   test("canonical claim keys ignore qualifier casing and whitespace", () => {
@@ -263,6 +266,9 @@ describe("qualifier vocabulary and build applicability", () => {
       builds: [{ id: "build-1", version: "1.4.0" }],
     }).builds).toEqual([{ id: "build-1", platform: null, mode: null, region: null, version: "1.4.0", releasedAt: null, active: true }]);
     expect(CollectionProfileSchema.parse({ id: "test", canonicalName: "Test", aliases: [], version: "1" }).builds).toEqual([]);
+    expect(GameBuildSchema.safeParse({ id: "b", version: "v1.2.3" }).success).toBe(false);
+    expect(GameBuildSchema.safeParse({ id: "b", version: "1.2.3-beta" }).success).toBe(false);
+    expect(GameBuildSchema.safeParse({ id: "b", version: "1.4" }).success).toBe(true);
   });
 });
 describe("discovery schema", () => {
@@ -379,6 +385,8 @@ describe("discovery schema", () => {
     expect(applyActiveBuildChange(assemble("verified", ["1.0"]), "1.0").status).toBe("verified");
     expect(applyActiveBuildChange(assemble("verified", []), "1.4.0").status).toBe("verified");
     expect(applyActiveBuildChange(assemble("verified", ["1.0"]), null).status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0", "1.4.0"]), "1.4.0").status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0", "1.4.0"]), "1.5.0").status).toBe("needs_retest");
   });
 
   test("requires a 64-character lowercase hex steps hash for reproductions", () => {

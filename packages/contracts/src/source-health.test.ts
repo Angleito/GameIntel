@@ -58,4 +58,12 @@ describe("source health", () => {
     expect(down(null, "t1").message).toBeNull();
     expect(down(null, "t1", "fetch failed").message).toBe("fetch failed");
   });
+
+  test("ignores observations older than the stored check", () => {
+    const first = ok(null, "2026-08-27T00:00:02.000Z");
+    const stale = down(first, "2026-08-27T00:00:01.000Z");
+    expect(stale.status).toBe("ok");
+    expect(stale.checkedAt).toBe("2026-08-27T00:00:02.000Z");
+    expect(stale.consecutiveFailures).toBe(0);
+  });
 });

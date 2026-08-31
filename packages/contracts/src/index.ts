@@ -517,6 +517,10 @@ export function applySourceHealthUpdate(previous: SourceHealthRecord | null, inp
   checkedAt: string;
   message?: string | null;
 }): SourceHealthRecord {
+  // Ignore observations older than the stored check (ISO-8601 strings compare
+  // lexicographically, which is chronological); out-of-order arrivals must not
+  // overwrite fresher state.
+  if (previous && input.checkedAt < previous.checkedAt) return previous;
   const consecutiveFailures = input.status === "down" ? (previous?.consecutiveFailures ?? 0) + 1 : 0;
   const disabledAt = previous?.disabledAt ?? (consecutiveFailures >= SOURCE_HEALTH_DISABLE_AFTER_FAILURES ? input.checkedAt : null);
   return {

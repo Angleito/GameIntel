@@ -3,7 +3,23 @@ import { isIP } from "node:net";
 import type { SourcePolicy } from "@gameintel/core";
 import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
-export type { DnsResolver, FetchPolicy, RegisteredSource };
+// Typed source-availability failures. Only `source_unavailable` counts against
+// source health: network-level failures (DNS/connect/TLS/timeout) and HTTP >=
+// 500 mean the external source itself is down. `url_not_found` (4xx) is a bad
+// URL, `response` (redirect/content-type/size violations) is a malformed
+// response — neither is a source outage. Policy errors stay plain `Error`.
+export type SourceFetchErrorKind = "source_unavailable" | "url_not_found" | "response";
+
+export class SourceFetchError extends Error {
+  readonly kind: SourceFetchErrorKind;
+  readonly status: number | null;
+  constructor(kind: SourceFetchErrorKind, message: string, options: { status?: number; cause?: unknown } = {}) {
+    super(message, { cause: options.cause });
+    this.name = "SourceFetchError";
+    this.kind = kind;
+    this.status = options.status ?? null;
+  }
+}
 
 const privateV4 = (ip: string): boolean => {
   const parts = ip.split(".").map(Number);
@@ -109,26 +125,33 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy, reso
   while (true) {
     await assertPublicHost(url.hostname, resolver);
     await limiterFor(policy.source.id).wait(policy.sourcePolicy.requestsPerMinute);
-    const response = await fetch(url, {
-      redirect: "manual",
-      headers: { accept: "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, text/xml", "user-agent": policy.userAgent ?? policy.source.userAgent ?? "gameintelgg/0.1" },
-      signal: AbortSignal.timeout(policy.timeoutMs ?? 15_000),
-      proxy: proxy.toString(),
-    } as RequestInit & { proxy: string });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        redirect: "manual",
+        headers: { accept: "text/html, application/xhtml+xml, application/rss+xml, application/atom+xml, text/xml", "user-agent": policy.userAgent ?? policy.source.userAgent ?? "gameintelgg/0.1" },
+        signal: AbortSignal.timeout(policy.timeoutMs ?? 15_000),
+        proxy: proxy.toString(),
+      } as RequestInit & { proxy: string });
+    } catch (error) {
+      // Network-level failure (DNS/connect/TLS/timeout): the source itself is
+      // unavailable. Policy/proxy errors were thrown before this point.
+      throw new SourceFetchError("source_unavailable", `Source fetch failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    }
     if (response.status >= 300 && response.status < 400) {
-      if (++redirects > (policy.maxRedirects ?? 3)) throw new Error("Too many redirects");
+      if (++redirects > (policy.maxRedirects ?? 3)) throw new SourceFetchError("response", "Too many redirects");
       const location = response.headers.get("location");
-      if (!location) throw new Error("Redirect has no location");
+      if (!location) throw new SourceFetchError("response", "Redirect has no location");
       url = assertRegisteredUrl(new URL(location, url).toString(), policy.source);
       continue;
     }
-    if (!response.ok) throw new Error(`Source fetch failed with HTTP ${response.status}`);
+    if (!response.ok) throw new SourceFetchError(response.status >= 500 ? "source_unavailable" : "url_not_found", `Source fetch failed with HTTP ${response.status}`, { status: response.status });
     const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() ?? "";
     const accepted = ["text/html", "application/xhtml+xml", "application/rss+xml", "application/atom+xml", "text/xml"].includes(contentType);
-    if (!accepted) throw new Error(`Unsupported source content type: ${contentType || "unknown"}`);
+    if (!accepted) throw new SourceFetchError("response", `Unsupported source content type: ${contentType || "unknown"}`);
     const maxBytes = policy.maxBytes ?? 1_500_000;
     const declaredSize = Number(response.headers.get("content-length") ?? 0);
-    if (declaredSize > maxBytes) throw new Error("Source response exceeds size limit");
+    if (declaredSize > maxBytes) throw new SourceFetchError("response", "Source response exceeds size limit");
     const reader = response.body?.getReader();
     if (!reader) return { url: url.toString(), contentType, status: response.status, text: "" };
     const chunks: Uint8Array[] = [];
@@ -137,7 +160,7 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy, reso
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > maxBytes) { await reader.cancel(); throw new Error("Source response exceeds size limit"); }
+      if (size > maxBytes) { await reader.cancel(); throw new SourceFetchError("response", "Source response exceeds size limit"); }
       chunks.push(chunk.value);
     }
     const bytes = new Uint8Array(size);

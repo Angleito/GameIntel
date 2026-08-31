@@ -136,7 +136,10 @@ const QUALIFIER_VALUE_NORMALIZERS: Record<SemanticQualifierKey, (value: string) 
   weather: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
   mission: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
   progression: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
-  wanted_level: (v) => String(Number(v.trim())),
+  wanted_level: (v) => {
+    const trimmed = v.trim();
+    return /^\d+$/.test(trimmed) ? String(Number(trimmed)) : trimmed;
+  },
   inventory: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
 };
 
@@ -180,7 +183,7 @@ export const GameBuildSchema = z.object({
   platform: z.string().nullable().default(null),
   mode: z.string().nullable().default(null),
   region: z.string().nullable().default(null),
-  version: z.string().min(1),
+  version: z.string().min(1).regex(/^\d+(?:\.\d+)*$/, "Expected a numeric dot-separated build version"),
   releasedAt: z.string().datetime().nullable().default(null),
   active: z.boolean().default(true),
 });
@@ -585,7 +588,10 @@ export function assembleDiscovery(input: {
 
 export function applyActiveBuildChange(discovery: Discovery, currentBuild: string | null): Discovery {
   if (!currentBuild || discovery.gameBuilds.length === 0) return discovery;
-  const superseded = discovery.gameBuilds.some((build) => compareBuildVersions(build, currentBuild) < 0);
+  // Demote only when the newest recorded build is superseded: a discovery
+  // that already covers the current build is still valid.
+  const newestBuild = discovery.gameBuilds.reduce((newest, build) => (compareBuildVersions(build, newest) > 0 ? build : newest));
+  const superseded = compareBuildVersions(newestBuild, currentBuild) < 0;
   if (superseded && discovery.status === "verified") return { ...discovery, status: "needs_retest" };
   return discovery;
 }

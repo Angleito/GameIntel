@@ -216,6 +216,7 @@
       "dependencies": {
         "@gameintel/config": "workspace:*",
         "@gameintel/contracts": "workspace:*",
+        "@gameintel/controlled-fetch": "workspace:*",
         "@gameintel/newsroom": "workspace:*",
         "@gameintel/postgres": "workspace:*",
         "@gameintel/source-sdk": "workspace:*",

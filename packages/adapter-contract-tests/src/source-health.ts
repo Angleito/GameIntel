@@ -101,5 +101,19 @@ export function runSourceHealthContract(factory: SourceHealthFactory): void {
         await close?.();
       }
     });
+
+    test("ignores observations older than the stored check", async () => {
+      const { store, close } = await factory();
+      try {
+        await store.recordSourceHealth({ sourceId: "source-a", status: "ok", checkedAt: "2026-08-27T00:00:02.000Z" });
+        const stale = await store.recordSourceHealth({ sourceId: "source-a", status: "down", checkedAt: "2026-08-27T00:00:01.000Z" });
+        expect(stale.status).toBe("ok");
+        expect(stale.checkedAt).toBe("2026-08-27T00:00:02.000Z");
+        expect(stale.consecutiveFailures).toBe(0);
+        expect(await store.getSourceHealth("source-a")).toEqual(stale);
+      } finally {
+        await close?.();
+      }
+    });
   });
 }

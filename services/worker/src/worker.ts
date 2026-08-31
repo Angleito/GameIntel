@@ -3,6 +3,7 @@ import { ingestUrl } from "@gameintel/newsroom";
 import { createServiceRuntime } from "@gameintel/newsroom/runtime";
 import { processDiscoveryJob } from "./discover.ts";
 import { runWorkerLoop, retryableWorkerError } from "./worker-loop.ts";
+import { recordJobHealth } from "./job-health.ts";
 
 function workerId(): string {
   return process.env.INGESTION_WORKER_ID ?? `ingest-worker-${crypto.randomUUID().slice(0, 8)}`;
@@ -72,19 +73,13 @@ try {
         const result = job.jobType === "source_discover"
           ? await processDiscoveryJob(runtime, job, fence)
           : await ingestUrl(runtime, sourceIngestPayload(job.payload), fence);
-        await runtime.sourceHealth.recordSourceHealth({ sourceId, status: "ok", checkedAt: runtime.clock.nowIso() });
+        await recordJobHealth({ sourceHealth: runtime.sourceHealth, clock: runtime.clock, sourceId, job });
         return result;
       } catch (error) {
-        // Retryable fetch failures accumulate toward the source health
-        // auto-disable; policy errors never touch the health record.
-        if (retryableWorkerError(error)) {
-          await runtime.sourceHealth.recordSourceHealth({
-            sourceId,
-            status: "down",
-            checkedAt: runtime.clock.nowIso(),
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
+        // Only typed source-availability failures from the controlled-fetch
+        // layer count against source health, and only on a job's first
+        // execution; policy and application errors never touch the record.
+        await recordJobHealth({ sourceHealth: runtime.sourceHealth, clock: runtime.clock, sourceId, job, error }).catch(() => undefined);
         throw error;
       }
     },
