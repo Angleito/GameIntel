@@ -80,8 +80,9 @@ The `ControlledFetchTransport` capability enforces the GameIntel
 controlled-fetch requirements: registered ingestion sources, allowed domain
 validation, HTTP/HTTPS restrictions, port restrictions, DNS validation,
 private/loopback/link-local/metadata-address blocking, redirect revalidation,
-response-size limits, content-type limits, timeouts, rate limiting, and source
-pacing.
+response-size limits, content-type limits, timeouts, and source enablement.
+Per-source request pacing is owned by the `SourcePacingStore`, applied
+immediately before each transport fetch; the transport itself does not pace.
 
 `@gameintel/controlled-fetch` provides the reference HTTP implementation with
 an injectable DNS resolver for tests. A proxy (Squid in the reference

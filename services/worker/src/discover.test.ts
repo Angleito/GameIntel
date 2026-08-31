@@ -37,11 +37,13 @@ function fakeRuntime(options: {
   feedText?: string;
   leaseHeld?: boolean;
   pacingMs?: number;
-} = {}): GameIntelRuntime & { enqueuedUrls: string[] } {
+} = {}): GameIntelRuntime & { enqueuedUrls: string[]; events: string[] } {
   const enqueuedUrls: string[] = [];
+  const events: string[] = [];
   const leaseHeld = options.leaseHeld ?? true;
   const runtime = {
     enqueuedUrls,
+    events,
     persistence: {
       ensureSource: async () => undefined,
       assertIngestionJobLeaseHeld: async () => {
@@ -49,15 +51,15 @@ function fakeRuntime(options: {
       },
     },
     pacing: {
-      acquireFetchSlot: async () => options.pacingMs ?? 0,
+      acquireFetchSlot: async () => { events.push("pacing-acquired"); return options.pacingMs ?? 0; },
     },
     fetchTransport: {
-      fetch: async (url: string) => ({
+      fetch: async (url: string) => { events.push("transport-fetched"); return {
         url,
         status: 200,
         contentType: "application/rss+xml",
         text: options.feedText ?? FEED_XML,
-      }),
+      }; },
     },
     jobQueue: {
       enqueueSourceIngestJob: async (input: { url: string }) => {
@@ -81,7 +83,7 @@ function fakeRuntime(options: {
         throw new Error("not implemented");
       },
     },
-  } as unknown as GameIntelRuntime & { enqueuedUrls: string[] };
+  } as unknown as GameIntelRuntime & { enqueuedUrls: string[]; events: string[] };
   return runtime;
 }
 
@@ -124,6 +126,18 @@ sources:
     );
     expect(result).toEqual({ feedUrl: "https://contract.example.com/feed.xml", discovered: 2, enqueued: 2, duplicate: 0 });
     expect(runtime.enqueuedUrls).toEqual(["https://contract.example.com/a", "https://contract.example.com/b"]);
+  });
+
+  test("paces via the pacing store before the transport fetch", async () => {
+    process.env.GAMEINTEL_FETCH_WORKER = "true";
+    const runtime = fakeRuntime();
+    await processDiscoveryJob(
+      runtime,
+      fakeJob("https://contract.example.com/feed.xml"),
+      { jobKey: "discover-job", leaseToken: "lease-token" },
+      { registryPath },
+    );
+    expect(runtime.events).toEqual(["pacing-acquired", "transport-fetched"]);
   });
 
   test("skips invalid, off-domain, and duplicate item URLs before queueing", async () => {

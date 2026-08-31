@@ -48,7 +48,9 @@ demonstrated need exists.
 
 Network adapters must go through the `ControlledFetchTransport` capability
 (`@gameintel/controlled-fetch`), which enforces registered domains, private-IP
-blocking, redirect revalidation, size/type/time limits, and pacing. Provider
+blocking, redirect revalidation, size/type/time limits, and source enablement.
+Per-source request pacing is owned by the `SourcePacingStore`, applied
+immediately before each transport fetch. Provider
 credentials, rate limits, retention, and public citation rules belong in
 configuration (the source registry), never in adapter-specific constants.
 

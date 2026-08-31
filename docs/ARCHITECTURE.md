@@ -81,9 +81,12 @@ misbehaves. Application containers never receive migration credentials.
 
 ## Controlled retrieval
 
-`@gameintel/controlled-fetch` is the behavioral contract: registered domains,
-public-host checks, redirect limits, content-type limits, response-size
-limits, timeouts, rate limits, and source enablement. DNS checks are defense
+`@gameintel/controlled-fetch` is the behavioral contract: registered-domain
+enforcement, public-host/SSRF checks, redirect limits, content-type limits,
+response-size limits, timeouts, source enablement, and proxy/network policy.
+Authoritative per-source request pacing lives in the `SourcePacingStore`,
+applied immediately before each transport fetch; the transport does not pace.
+DNS checks are defense
 in depth, not an egress boundary: the Compose worker is on internal-only
 networks and must use the egress proxy, which applies destination-IP deny
 rules at connection time for loopback, private, link-local, carrier-grade NAT,
