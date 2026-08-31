@@ -486,6 +486,15 @@ export const ReproductionSchema = z.object({
 }).strict();
 export type Reproduction = z.infer<typeof ReproductionSchema>;
 
+export const GameBuildRefSchema = z.object({
+  buildId: z.string().min(1),
+  version: z.string().min(1).regex(/^\d+(?:\.\d+)*$/, "Expected a numeric dot-separated build version"),
+  platform: z.string().nullable().default(null),
+  mode: z.string().nullable().default(null),
+  region: z.string().nullable().default(null),
+});
+export type GameBuildRef = z.infer<typeof GameBuildRefSchema>;
+
 export const DiscoverySchema = z.object({
   id: z.string().min(1),
   collectionId: z.string().min(1),
@@ -498,13 +507,26 @@ export const DiscoverySchema = z.object({
   confidence: z.number().min(0).max(1),
   newsworthiness: z.number().min(0).max(100),
   platforms: z.array(z.string()).default([]),
-  // Build versions validated for this discovery. Single-context invariant: all
-  // entries MUST belong to one applicability context (platform/mode/region).
-  // applyActiveBuildChange compares the list as one context, so a producer
-  // merging contexts could let a newer build on another platform mask a stale
-  // observation here. Producers must never merge contexts; retaining build
-  // id/platform/mode association is a later milestone.
-  gameBuilds: z.array(z.string()).default([]),
+  // Build references validated for this discovery. Single-context invariant,
+  // enforced here: all entries MUST share one applicability context
+  // (platform/mode/region). applyActiveBuildChange compares the list as one
+  // context, so a producer merging contexts could let a newer build on
+  // another platform mask a stale observation here. Producers must never
+  // merge contexts.
+  gameBuilds: z.array(GameBuildRefSchema).default([]).superRefine((refs, context) => {
+    if (refs.length < 2) return;
+    // A ref that leaves a field null does not pin it; only conflicting
+    // non-null declarations across refs violate the single-context invariant
+    // (e.g. a pc build and a ps5 build in one list).
+    const fields: Array<"platform" | "mode" | "region"> = ["platform", "mode", "region"];
+    const conflict = fields.some((field) => {
+      const pinned = refs.filter((ref) => ref[field] !== null);
+      return pinned.some((ref) => ref[field] !== pinned[0][field]);
+    });
+    if (conflict) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "All gameBuilds must share one applicability context (platform/mode/region)" });
+    }
+  }),
   progressionContext: z.string().nullable().default(null),
   conditions: ConditionsSchema,
   spoilerTags: z.array(z.string()).default([]),
@@ -561,7 +583,7 @@ export function assembleDiscovery(input: {
   confidence: number;
   newsworthiness: number;
   platforms?: string[];
-  gameBuilds?: string[];
+  gameBuilds?: GameBuildRef[];
   progressionContext?: string | null;
   conditions: Conditions;
   spoilerTags?: string[];
@@ -600,9 +622,10 @@ export function applyActiveBuildChange(discovery: Discovery, currentBuild: strin
   if (!currentBuild || discovery.gameBuilds.length === 0) return discovery;
   // Demote only when the newest recorded build is superseded: a discovery
   // that already covers the current build is still valid.
-  // Precondition: all gameBuilds share one applicability context (see DiscoverySchema).
-  const newestBuild = discovery.gameBuilds.reduce((newest, build) => (compareBuildVersions(build, newest) > 0 ? build : newest));
-  const superseded = compareBuildVersions(newestBuild, currentBuild) < 0;
+  // Precondition: all gameBuilds share one applicability context — enforced
+  // by the DiscoverySchema single-context refine (GameBuildRefSchema).
+  const newestBuild = discovery.gameBuilds.reduce((newest, build) => (compareBuildVersions(build.version, newest.version) > 0 ? build : newest));
+  const superseded = compareBuildVersions(newestBuild.version, currentBuild) < 0;
   if (superseded && discovery.status === "verified") return { ...discovery, status: "needs_retest" };
   return discovery;
 }

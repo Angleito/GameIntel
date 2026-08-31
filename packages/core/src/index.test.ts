@@ -17,6 +17,7 @@ import {
   evidenceReviewGate,
   evidenceSummaryFor,
   type Evidence,
+  type GameBuildRef,
   GameBuildSchema,
   normalizeQualifiers,
   ReproductionSchema,
@@ -310,7 +311,7 @@ describe("discovery schema", () => {
   const assemble = (status: "verified" | "needs_retest" | "rejected", builds: string[]) => assembleDiscovery({
     id: "d", collectionId: "gta-vi", gameProfileVersion: "1", canonicalTitle: "T",
     categoryId: "vehicle", summary: "S", status, confidence: 0.9, newsworthiness: 80,
-    conditions: ConditionsSchema.parse({}), firstSeenAt: "2026-08-27T00:00:00.000Z", gameBuilds: builds,
+    conditions: ConditionsSchema.parse({}), firstSeenAt: "2026-08-27T00:00:00.000Z", gameBuilds: builds.map((version) => ({ buildId: `build-${version}`, version, platform: null, mode: null, region: null })),
     claims: [claim("c1", [evidence("family-a", "lineage-1", "official_document")])],
   });
 
@@ -398,5 +399,52 @@ describe("discovery schema", () => {
       id: "r1", discoveryId: "d1", actorId: "actor-1", outcome: "reproduced",
       stepsHash: "a".repeat(64),
     }).success).toBe(true);
+  });
+
+  test("rejects gameBuilds spanning multiple applicability contexts", () => {
+    const document = (gameBuilds: GameBuildRef[]) => ({
+      id: "discovery-3",
+      collectionId: "gta-vi",
+      gameProfileVersion: "1",
+      canonicalTitle: "T",
+      titleSafe: "T",
+      categoryId: "vehicle",
+      summary: "S",
+      status: "verified",
+      confidence: 0.9,
+      newsworthiness: 80,
+      conditions: ConditionsSchema.parse({}),
+      firstSeenAt: "2026-08-27T00:00:00.000Z",
+      claimIds: ["claim-1"],
+      evidenceSummary: { supportingLineages: 1, contradictingLineages: 0, strongestEvidenceType: "official_document" },
+      gameBuilds,
+    });
+    const ref = (version: string, context: Partial<Pick<GameBuildRef, "platform" | "mode" | "region">> = {}): GameBuildRef => ({ buildId: `build-${version}`, version, platform: context.platform ?? null, mode: context.mode ?? null, region: context.region ?? null });
+    expect(DiscoverySchema.safeParse(document([ref("1.0", { platform: "pc" }), ref("1.4", { platform: "ps5" })])).success).toBe(false);
+    expect(DiscoverySchema.safeParse(document([ref("1.0", { mode: "online" }), ref("1.4", { mode: "offline" })])).success).toBe(false);
+    expect(DiscoverySchema.safeParse(document([ref("1.0", { region: "na" }), ref("1.4", { region: "eu" })])).success).toBe(false);
+  });
+
+  test("accepts gameBuilds sharing one applicability context", () => {
+    const document = (gameBuilds: GameBuildRef[]) => ({
+      id: "discovery-4",
+      collectionId: "gta-vi",
+      gameProfileVersion: "1",
+      canonicalTitle: "T",
+      titleSafe: "T",
+      categoryId: "vehicle",
+      summary: "S",
+      status: "verified",
+      confidence: 0.9,
+      newsworthiness: 80,
+      conditions: ConditionsSchema.parse({}),
+      firstSeenAt: "2026-08-27T00:00:00.000Z",
+      claimIds: ["claim-1"],
+      evidenceSummary: { supportingLineages: 1, contradictingLineages: 0, strongestEvidenceType: "official_document" },
+      gameBuilds,
+    });
+    const ref = (version: string, context: Partial<Pick<GameBuildRef, "platform" | "mode" | "region">> = {}): GameBuildRef => ({ buildId: `build-${version}`, version, platform: context.platform ?? null, mode: context.mode ?? null, region: context.region ?? null });
+    expect(DiscoverySchema.safeParse(document([ref("1.0", { platform: "pc" }), ref("1.4", { platform: "pc", mode: "online", region: "na" })])).success).toBe(true);
+    expect(DiscoverySchema.safeParse(document([ref("1.0"), ref("1.4")])).success).toBe(true);
   });
 });
