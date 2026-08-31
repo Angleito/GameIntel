@@ -78,6 +78,5 @@ describe("generic-core conformance", () => {
     expect(loaded.id).toBe("software-releases");
     const roundTripped = GameProfileSchema.parse(loaded);
     expect(roundTripped.categories).toEqual(["release", "changelog"]);
-    expect(roundTripped.builds).toHaveLength(1);
   });
 });

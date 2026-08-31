@@ -1,8 +1,6 @@
 import {
   IngestionLeaseLostError,
   SAFE_IDENTIFIER_PATTERN,
-  ingestJobDedupeKey,
-  jobRetryBackoffMs,
   type Clock,
   type IdGenerator,
   type IngestionJob,
@@ -12,18 +10,19 @@ import {
   type SourceDiscoverJobPayload,
   type SourceIngestEnqueueResult,
   type SourceIngestJobPayload,
+  jobEnqueueInput,
+  jobFailureOutcome,
 } from "@gameintel/contracts";
-import { canonicalizeUrl, PublicHttpUrlSchema } from "@gameintel/core";
 import type { JobRecord, WorkerHeartbeatRecord } from "./store.ts";
 
 // Shared lease state between the in-memory job queue and the in-memory
 // persistence fence: a reclaimed lease invalidates the stale worker's fence
 // check exactly like the PostgreSQL FOR UPDATE row lock.
 export class MemoryLeaseRegistry {
-  private readonly leases = new Map<string, { token: string; held: boolean }>();
+  private readonly leases = new Map<string, string>();
 
   acquire(jobKey: string, token: string): void {
-    this.leases.set(jobKey, { token, held: true });
+    this.leases.set(jobKey, token);
   }
 
   release(jobKey: string): void {
@@ -31,8 +30,7 @@ export class MemoryLeaseRegistry {
   }
 
   held(jobKey: string, token: string): boolean {
-    const entry = this.leases.get(jobKey);
-    return entry !== undefined && entry.held && entry.token === token;
+    return this.leases.get(jobKey) === token;
   }
 }
 
@@ -71,77 +69,22 @@ export class InMemoryJobQueue implements JobQueue {
     return this.jobs.get(jobKey);
   }
 
-  async enqueueSourceIngestJob(input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult> {
-    const collectionId = input.collectionId.trim();
-    const sourceId = input.sourceId.trim();
-    if (!collectionId || !sourceId) throw new Error("Source ingestion jobs require a collection and source");
-    const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
-    const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
-    const jobKey = this.ids.generate("source_ingest");
-    const dedupeKey = ingestJobDedupeKey("source_ingest", collectionId, sourceId, url);
+  private async enqueueJob(input: SourceIngestJobPayload | SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
+    const { jobType, payload, dedupeKey } = jobEnqueueInput(input);
+    const jobKey = this.ids.generate(jobType);
     for (const existing of this.jobs.values()) {
       if (existing.dedupeKey === dedupeKey && (existing.status === "queued" || existing.status === "running")) {
         return { jobKey: existing.jobKey, dedupeKey, duplicate: true, status: existing.status };
       }
     }
     const now = this.clock.now();
-    this.jobs.set(jobKey, {
-      jobKey,
-      jobType: "source_ingest",
-      status: "queued",
-      payload,
-      dedupeKey,
-      priority: 100,
-      attempts: 0,
-      maxAttempts: 5,
-      availableAt: now,
-      leasedBy: null,
-      leaseToken: null,
-      leaseExpiresAt: null,
-      lastError: null,
-      result: null,
-      createdAt: now,
-      updatedAt: now,
-      completedAt: null,
-    });
+    this.jobs.set(jobKey, { jobKey, jobType, status: "queued", payload, dedupeKey, priority: 100, attempts: 0, maxAttempts: 5, availableAt: now, leasedBy: null, leaseToken: null, leaseExpiresAt: null, lastError: null, result: null, createdAt: now, updatedAt: now, completedAt: null });
     return { jobKey, dedupeKey, duplicate: false, status: "queued" };
   }
 
-  async enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
-    const collectionId = input.collectionId.trim();
-    const sourceId = input.sourceId.trim();
-    if (!collectionId || !sourceId) throw new Error("Source discovery jobs require a collection and source");
-    const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
-    const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
-    const jobKey = this.ids.generate("source_discover");
-    const dedupeKey = ingestJobDedupeKey("source_discover", collectionId, sourceId, feedUrl);
-    for (const existing of this.jobs.values()) {
-      if (existing.dedupeKey === dedupeKey && (existing.status === "queued" || existing.status === "running")) {
-        return { jobKey: existing.jobKey, dedupeKey, duplicate: true, status: existing.status };
-      }
-    }
-    const now = this.clock.now();
-    this.jobs.set(jobKey, {
-      jobKey,
-      jobType: "source_discover",
-      status: "queued",
-      payload,
-      dedupeKey,
-      priority: 100,
-      attempts: 0,
-      maxAttempts: 5,
-      availableAt: now,
-      leasedBy: null,
-      leaseToken: null,
-      leaseExpiresAt: null,
-      lastError: null,
-      result: null,
-      createdAt: now,
-      updatedAt: now,
-      completedAt: null,
-    });
-    return { jobKey, dedupeKey, duplicate: false, status: "queued" };
-  }
+  async enqueueSourceIngestJob(input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult> { return this.enqueueJob(input); }
+
+  async enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> { return this.enqueueJob(input); }
 
   async claimIngestionJob(workerId: string, jobTypes: string[] = ["source_ingest"], leaseMs = 60_000): Promise<IngestionJob | null> {
     if (!workerId.trim() || !jobTypes.length || !Number.isInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 300_000) {
@@ -200,9 +143,7 @@ export class InMemoryJobQueue implements JobQueue {
     const job = this.jobs.get(jobKey);
     if (!job || job.status !== "running" || job.leaseToken !== leaseToken) throw new IngestionLeaseLostError(jobKey);
     const now = this.clock.now();
-    const terminal = !retryable || job.attempts >= job.maxAttempts;
-    const delayMs = jobRetryBackoffMs(job.attempts);
-    const message = error instanceof Error ? error.message : String(error);
+    const { terminal, delayMs, message } = jobFailureOutcome(job.attempts, job.maxAttempts, retryable, error);
     job.status = terminal ? "dead" : "queued";
     job.lastError = message.slice(0, 2_000);
     job.availableAt = now + delayMs;

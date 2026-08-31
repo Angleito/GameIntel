@@ -85,7 +85,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     store: MemoryStore,
     private readonly ids: IdGenerator,
     private readonly clock: Clock,
-    private readonly leases: MemoryLeaseRegistry | null = null,
+    private readonly leases: MemoryLeaseRegistry,
   ) {
     this.store = store;
   }
@@ -215,7 +215,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
         contentType: item.contentType,
         language: item.language,
         retentionUntil,
-        provenanceStatus: "normalized",
         contentPurgedAt: null,
         submittedBy,
       };
@@ -263,7 +262,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
       contentType: item.contentType,
       language: item.language,
       retentionUntil,
-      provenanceStatus: "normalized",
       contentPurgedAt: null,
       submittedBy,
       createdAt: now,
@@ -297,15 +295,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
 
   async createEvent(input: { collectionId: string; sourceItemId: string; newsworthiness: number; disposition: string; existingArticleId?: string | null }): Promise<string> {
     const eventId = this.ids.generate("evt");
-    this.store.events.set(eventId, {
-      id: eventId,
-      gameId: input.collectionId,
-      sourceItemId: input.sourceItemId,
-      newsworthiness: input.newsworthiness,
-      disposition: input.disposition,
-      existingArticleId: input.existingArticleId ?? null,
-      createdAt: this.clock.nowIso(),
-    });
     return eventId;
   }
 
@@ -789,14 +778,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
 
   async reviewSourcePolicy(sourceId: string, reviewerId: string, decision: "approved" | "rejected" | "revoked" = "approved", notes = ""): Promise<void> {
     if (!this.store.sources.has(sourceId)) throw new Error("Source not found");
-    this.store.sourcePolicyReviews.push({
-      id: this.ids.generate("srcpol"),
-      sourceId,
-      reviewerId,
-      decision,
-      notes,
-      createdAt: this.clock.nowIso(),
-    });
     await this.audit(reviewerId, `source_policy_review.${decision}`, "source", sourceId, notes);
   }
 
@@ -1086,14 +1067,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       createdAt: now,
       updatedAt: now,
     });
-    this.store.articleRevisions.set(this.ids.generate("rev"), {
-      id: this.ids.generate("rev"),
-      articleId,
-      revisionNumber: 1,
-      body: input.body,
-      changeSummary: "Initial AI-assisted draft",
-      createdAt: now,
-    });
+    this.store.articleRevisions.set(articleId, 1);
     for (const source of input.sourceRefs) {
       const articleSourceId = this.ids.generate("arts");
       this.store.articleSources.set(articleSourceId, {
@@ -1118,20 +1092,11 @@ export class InMemoryPersistence implements GameIntelPersistence {
   }): Promise<void> {
     const article = this.store.articles.get(input.articleId);
     if (!article) throw new Error("Article not found");
-    const maxRevision = [...this.store.articleRevisions.values()]
-      .filter((revision) => revision.articleId === input.articleId)
-      .reduce((max, revision) => Math.max(max, revision.revisionNumber), 0);
+    const revisionNumber = (this.store.articleRevisions.get(input.articleId) ?? 0) + 1;
+    this.store.articleRevisions.set(input.articleId, revisionNumber);
     const now = this.clock.nowIso();
     if (input.body) article.body = input.body;
     article.updatedAt = now;
-    this.store.articleRevisions.set(this.ids.generate("rev"), {
-      id: this.ids.generate("rev"),
-      articleId: input.articleId,
-      revisionNumber: maxRevision + 1,
-      body: input.body ?? article.body,
-      changeSummary: input.changeSummary ?? "Re-analyzed source revision",
-      createdAt: now,
-    });
     const ownedClaimIds = new Set([...this.store.claims.values()]
       .filter((claim) => claim.sourceItemId === input.sourceItemId)
       .map((claim) => claim.id));
@@ -1175,10 +1140,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
         editorialAssessment: claim.editorialAssessment,
         spoilerTags: [...claim.spoilerTags],
       }));
-  }
-
-  async publicArticles(collectionId: string): Promise<unknown[]> {
-    return this.listPublicArticles(collectionId);
   }
 
   async purgeExpiredSourceContent(options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {
@@ -1236,7 +1197,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
     submitterIpHash: string;
     submitterAccountId?: string | null;
     retentionDays?: number;
-    limits?: import("@gameintel/contracts").PublicSubmissionRateLimits;
   }): Promise<{ id: string; duplicate: boolean }> {
     if (!/^[a-f0-9]{64}$/i.test(input.submitterSessionHash) || !/^[a-f0-9]{64}$/i.test(input.submitterIpHash)) {
       throw new Error("Submission identity hashes must be SHA-256 digests");
@@ -1246,7 +1206,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 90) {
       throw new Error("Submission retention must be between 1 and 90 days");
     }
-    const limits = input.limits ?? defaultPublicSubmissionRateLimits;
+    const limits = defaultPublicSubmissionRateLimits;
     if (Object.values(limits).some((limit) => !Number.isInteger(limit) || limit < 1)) {
       throw new Error("Submission rate limits must be positive integers");
     }
@@ -1458,17 +1418,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
   // AuditRepository
   // -------------------------------------------------------------------------
 
-  async audit(actor: string, action: string, targetType: string, targetId: string, reason: string): Promise<void> {
-    this.store.auditLog.push({
-      id: this.ids.generate("audit"),
-      actorId: actor,
-      action,
-      targetType,
-      targetId,
-      reason,
-      createdAt: this.clock.nowIso(),
-    });
-  }
+  async audit(_actor: string, _action: string, _targetType: string, _targetId: string, _reason: string): Promise<void> {}
 
   // -------------------------------------------------------------------------
   // MediaRepository
@@ -1609,6 +1559,6 @@ export class InMemoryPersistence implements GameIntelPersistence {
   // -------------------------------------------------------------------------
 
   async assertIngestionJobLeaseHeld(jobKey: string, leaseToken: string): Promise<void> {
-    if (this.leases !== null && !this.leases.held(jobKey, leaseToken)) throw new IngestionLeaseLostError(jobKey);
+    if (!this.leases.held(jobKey, leaseToken)) throw new IngestionLeaseLostError(jobKey);
   }
 }

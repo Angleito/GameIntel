@@ -8,8 +8,5 @@
   "spoilerSafeCategories": ["news", "release"],
   "defaultExploitMode": "intended_only",
   "platforms": ["PS5", "Xbox Series X|S", "PC"],
-  "sourceQueries": ["GTA VI", "GTA 6", "Grand Theft Auto VI"],
-  "builds": [
-    { "id": "gta-vi-launch-build", "platform": null, "mode": null, "region": null, "version": "1.0", "releasedAt": null, "active": true }
-  ]
+  "sourceQueries": ["GTA VI", "GTA 6", "Grand Theft Auto VI"]
 }

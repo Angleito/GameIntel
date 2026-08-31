@@ -1,4 +1,4 @@
-import { computeFetchSlot, type Clock, type SourcePacingStore } from "@gameintel/contracts";
+import { assertPacingSourceId, computeFetchSlot, type Clock, type SourcePacingStore } from "@gameintel/contracts";
 
 export class InMemoryPacingStore implements SourcePacingStore {
   private readonly nextAllowedAt = new Map<string, number>();
@@ -6,9 +6,7 @@ export class InMemoryPacingStore implements SourcePacingStore {
   constructor(private readonly clock: Clock) {}
 
   async acquireFetchSlot(sourceId: string, requestsPerMinute: number): Promise<number> {
-    if (!sourceId.trim()) {
-      throw new Error("Source fetch pacing requires a positive request rate");
-    }
+    assertPacingSourceId(sourceId);
     const now = this.clock.now();
     const { scheduledAtMs, waitMs } = computeFetchSlot(now, this.nextAllowedAt.get(sourceId) ?? now, requestsPerMinute);
     this.nextAllowedAt.set(sourceId, scheduledAtMs);

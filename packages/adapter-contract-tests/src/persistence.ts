@@ -384,7 +384,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       await persistence.approveArticle(articleId, "approver");
       const published = await persistence.markPublished(articleId, "publisher");
       expect(published.status).toBe("published");
-      const publicArticles = await persistence.publicArticles("contract-test");
+      const publicArticles = await persistence.listPublicArticles("contract-test");
       expect(publicArticles).toHaveLength(1);
       const safe = publicArticles[0] as { title: string; citations: Array<{ number: number; label: string; url: string }>; body: { sections: Array<{ heading: string }> } };
       expect(safe.title).toBe("Contract test article");

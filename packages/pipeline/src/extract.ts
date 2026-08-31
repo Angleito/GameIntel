@@ -1,12 +1,11 @@
 import {
   CLAIM_EXTRACTOR_VERSION,
-  canonicalClaimKey,
   trustClassificationFor,
   type NormalizedSourceItem,
   type SourceStrength,
 } from "@gameintel/core";
 
-export { CLAIM_EXTRACTOR_VERSION, canonicalClaimKey, canonicalizeClaimText } from "@gameintel/core";
+export { CLAIM_EXTRACTOR_VERSION } from "@gameintel/core";
 
 export type ExtractedClaim = NormalizedSourceItem["claims"][number];
 

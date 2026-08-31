@@ -7,8 +7,5 @@
   "categories": ["release", "changelog"],
   "spoilerSafeCategories": [],
   "platforms": [],
-  "sourceQueries": ["software release", "changelog"],
-  "builds": [
-    { "id": "release-1.4.0", "platform": null, "mode": null, "region": null, "version": "1.4.0", "releasedAt": "2026-08-27T00:00:00.000Z", "active": true }
-  ]
+  "sourceQueries": ["software release", "changelog"]
 }

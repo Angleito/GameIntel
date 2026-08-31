@@ -1152,10 +1152,6 @@ const published = await this.getArticle(articleId);
     return rows.map((row) => this.articleSelect(row)).map((article) => toSafeArticle(article)).filter((safe): safe is SafeArticle => safe !== null);
   }
 
-  async publicArticles(collectionId: string): Promise<unknown[]> {
-    return this.listPublicArticles(collectionId);
-  }
-
   async purgeExpiredSourceContent(options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {
     const candidates = this.all<{ id: string }>(
       `SELECT si.id FROM source_items si
@@ -1232,7 +1228,6 @@ const published = await this.getArticle(articleId);
     submitterIpHash: string;
     submitterAccountId?: string | null;
     retentionDays?: number;
-    limits?: { perIpPerMinute: number; perSessionPerMinute: number; perAccountPerDay: number; globalPerMinute: number };
   }): Promise<{ id: string; duplicate: boolean }> {
     const submission = input.submission;
     if (!this.validIdentityHash(input.submitterSessionHash) || !this.validIdentityHash(input.submitterIpHash)) {
@@ -1243,7 +1238,7 @@ const published = await this.getArticle(articleId);
     if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 90) {
       throw new Error("Submission retention must be between 1 and 90 days");
     }
-    const limits = input.limits ?? defaultPublicSubmissionRateLimits;
+    const limits = defaultPublicSubmissionRateLimits;
     if (Object.values(limits).some((limit) => !Number.isInteger(limit) || limit < 1)) {
       throw new Error("Submission rate limits must be positive integers");
     }

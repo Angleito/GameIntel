@@ -1,4 +1,4 @@
-import { computeFetchSlot, type SourcePacingStore } from "@gameintel/contracts";
+import { assertPacingSourceId, computeFetchSlot, type SourcePacingStore } from "@gameintel/contracts";
 import type { Database } from "bun:sqlite";
 
 // SQLite pacing store: serialized on the single connection, with the same
@@ -7,9 +7,7 @@ export class SQLitePacingStore implements SourcePacingStore {
   constructor(private readonly db: Database) {}
 
   async acquireFetchSlot(sourceId: string, requestsPerMinute: number): Promise<number> {
-    if (!sourceId.trim()) {
-      throw new Error("Source fetch pacing requires a positive request rate");
-    }
+    assertPacingSourceId(sourceId);
     const now = Date.now();
     this.db.exec("BEGIN IMMEDIATE");
     try {

@@ -141,7 +141,7 @@ try {
     const article = await runtime.persistence.markPublished(args[0], operator);
     console.log(`Article ${article.id} published. Run 'bun run build' to build Astro.`);
   } else if (command === "public-snapshot") {
-    console.log(JSON.stringify(await runtime.persistence.publicArticles(profileId), null, 2));
+    console.log(JSON.stringify(await runtime.persistence.listPublicArticles(profileId), null, 2));
   } else if (command === "source-health") {
     console.log(JSON.stringify(await runtime.sourceHealth.listSourceHealth(), null, 2));
   } else if (command === "disable-source") {

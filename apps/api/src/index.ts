@@ -118,11 +118,11 @@ app.get("/v1/games", (c) => c.json([{ id: profile.id, canonicalName: profile.can
 app.get("/v1/games/:gameId", (c) => c.json(c.req.param("gameId") === profile.id ? profile : { error: "Game not found" }, c.req.param("gameId") === profile.id ? 200 : 404));
 app.get("/v1/games/:gameId/articles", async (c) => {
   if (c.req.param("gameId") !== profile.id) return c.json({ error: "Game not found" }, 404);
-  return c.json(await publicRuntime.persistence.publicArticles(profile.id));
+  return c.json(await publicRuntime.persistence.listPublicArticles(profile.id));
 });
 app.get("/v1/data/:profileId", async (c) => {
   if (c.req.param("profileId") !== profile.id) return c.json({ error: "Profile not found" }, 404);
-  return c.json(createPublicOutputArtifact({ schemaVersion: "1.0", projectId: project.id, profileId: profile.id, records: await publicRuntime.persistence.publicArticles(profile.id) }));
+  return c.json(createPublicOutputArtifact({ schemaVersion: "1.0", projectId: project.id, profileId: profile.id, records: await publicRuntime.persistence.listPublicArticles(profile.id) }));
 });
 app.get("/v1/articles/:id", async (c) => {
   const article = await publicRuntime.persistence.getPublicArticle(c.req.param("id"));

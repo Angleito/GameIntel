@@ -34,12 +34,9 @@ export type ResearchPacket = {
 export type AgentRole = "article-writer";
 
 export type AgentRunConfig = {
-  role: AgentRole;
   model: string;
   maxOutputTokens: number;
   maxRuntimeMs: number;
-  maxTurns: number;
-  capabilities: readonly string[];
 };
 
 export type PiRunner = (input: {
@@ -82,12 +79,9 @@ function configuredRun(): AgentRunConfig {
   const allowedModels = (process.env.PI_ALLOWED_MODELS ?? model).split(",").map((value) => value.trim()).filter(Boolean);
   if (!allowedModels.includes(model)) throw new Error(`PI_MODEL '${model}' is not included in PI_ALLOWED_MODELS`);
   return {
-    role: "article-writer",
     model,
     maxOutputTokens: positiveInteger(process.env.PI_MAX_OUTPUT_TOKENS, 1_500, "PI_MAX_OUTPUT_TOKENS", 8_000),
     maxRuntimeMs: positiveInteger(process.env.PI_MAX_RUNTIME_MS, MAX_RUNTIME_MS, "PI_MAX_RUNTIME_MS", 300_000),
-    maxTurns: 1,
-    capabilities: [],
   };
 }
 

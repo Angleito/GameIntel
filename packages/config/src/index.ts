@@ -24,7 +24,6 @@ export const ProjectConfigSchema = z.object({
   name: z.string().min(1),
   description: z.string().min(1),
   defaultProfileId: z.string().min(1),
-  namespace: z.string().min(1),
   disclaimer: z.string().min(1),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;

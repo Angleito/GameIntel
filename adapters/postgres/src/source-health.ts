@@ -5,8 +5,7 @@ import {
   type SourceHealthStatus,
   type SourceHealthStore,
 } from "@gameintel/contracts";
-import type { Db } from "./index.ts";
-import { inTransaction } from "./index.ts";
+import { inTransaction, type Db } from "./db.ts";
 
 type HealthRow = {
   source_id: string;

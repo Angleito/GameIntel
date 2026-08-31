@@ -4,8 +4,7 @@
 const REQUEST_TIMEOUT_MS = 15_000;
 
 async function sha256(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", arrayBuffer(bytes));
-  return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+  return hex(await crypto.subtle.digest("SHA-256", arrayBuffer(bytes)));
 }
 
 function arrayBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -143,32 +142,5 @@ export class R2Client {
       ...Object.fromEntries(Object.entries(options.metadata ?? {}).map(([name, value]) => [`x-amz-meta-${name}`, value])),
     });
     this.assertResponse(response, bucket, key, "PUT");
-  }
-
-  async getObject(bucket: string, key: string): Promise<{ bytes: Uint8Array; checksum: string | null } | null> {
-    const response = await this.signedRequest("GET", bucket, key, "", undefined, {});
-    if (response.status === 404) return null;
-    this.assertResponse(response, bucket, key, "GET");
-    return { bytes: new Uint8Array(await response.arrayBuffer()), checksum: response.headers.get("x-amz-meta-sha256") };
-  }
-
-  async deleteObject(bucket: string, key: string): Promise<void> {
-    const response = await this.signedRequest("DELETE", bucket, key, "", undefined, {});
-    if (response.status === 404) return;
-    this.assertResponse(response, bucket, key, "DELETE");
-  }
-
-  async listObjects(bucket: string, prefix = ""): Promise<string[]> {
-    const keys: string[] = [];
-    let continuation: string | null = null;
-    do {
-      const query = `list-type=2&prefix=${encodeURIComponent(prefix)}${continuation ? `&continuation-token=${encodeURIComponent(continuation)}` : ""}`;
-      const response = await this.signedRequest("GET", bucket, "", query, undefined, {});
-      this.assertResponse(response, bucket, prefix || "(root)", "LIST");
-      const xml = await response.text();
-      for (const match of xml.matchAll(/<Key>([\s\S]*?)<\/Key>/g)) keys.push(match[1]);
-      continuation = xml.match(/<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/)?.[1] ?? null;
-    } while (continuation);
-    return keys;
   }
 }

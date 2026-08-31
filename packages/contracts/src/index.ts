@@ -1,4 +1,4 @@
-import { hashText } from "@gameintel/core";
+import { canonicalizeUrl, hashText, PublicHttpUrlSchema } from "@gameintel/core";
 import type {
   Article,
   ArticleBody,
@@ -20,8 +20,6 @@ import type {
 // never on PostgreSQL, Squid, Cloudflare, R2, or any other product. Adapters
 // (PostgreSQL, in-memory, controlled fetch, filesystem, ...) implement them.
 // Infrastructure-specific concerns belong inside adapters.
-
-export const ADAPTER_API_VERSION = 1;
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -411,7 +409,6 @@ export interface PublicationRepository {
   getPublicArticle(idOrSlug: string): Promise<SafeArticle | null>;
   listPublicArticles(collectionId: string): Promise<SafeArticle[]>;
   markPublished(articleId: string, operator: string): Promise<Article>;
-  publicArticles(collectionId: string): Promise<unknown[]>;
   purgeExpiredSourceContent(options?: { execute?: boolean }): Promise<SourceContentPurgeResult>;
 }
 
@@ -422,7 +419,6 @@ export interface SubmissionRepository {
     submitterIpHash: string;
     submitterAccountId?: string | null;
     retentionDays?: number;
-    limits?: PublicSubmissionRateLimits;
   }): Promise<{ id: string; duplicate: boolean }>;
   listPublicSubmissionsForModeration(collectionId: string, options?: { state?: PublicSubmissionState; limit?: number }): Promise<PublicSubmissionForModeration[]>;
   getPublicSubmissionForModeration(submissionId: string): Promise<PublicSubmissionForModeration | null>;
@@ -529,6 +525,29 @@ export function ingestJobDedupeKey(
 
 export function jobRetryBackoffMs(attempts: number): number {
   return Math.min(300_000, 1_000 * 2 ** Math.max(0, attempts - 1));
+}
+export function jobEnqueueInput(
+  input: SourceIngestJobPayload | SourceDiscoverJobPayload,
+): { jobType: "source_ingest" | "source_discover"; payload: SourceIngestJobPayload | SourceDiscoverJobPayload; dedupeKey: string } {
+  const discover = "feedUrl" in input;
+  const collectionId = input.collectionId.trim();
+  const sourceId = input.sourceId.trim();
+  if (!collectionId || !sourceId) throw new Error(`Source ${discover ? "discovery" : "ingestion"} jobs require a collection and source`);
+  const url = canonicalizeUrl(PublicHttpUrlSchema.parse("feedUrl" in input ? input.feedUrl : input.url));
+  const payload: SourceIngestJobPayload | SourceDiscoverJobPayload = discover
+    ? { collectionId, sourceId, feedUrl: url, profileId: input.profileId?.trim() || undefined }
+    : { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
+  return { jobType: discover ? "source_discover" : "source_ingest", payload, dedupeKey: ingestJobDedupeKey(discover ? "source_discover" : "source_ingest", collectionId, sourceId, url) };
+}
+
+export function jobFailureOutcome(attempts: number, maxAttempts: number, retryable: boolean, error: unknown): { terminal: boolean; delayMs: number; message: string } {
+  const terminal = !retryable || attempts >= maxAttempts;
+  const message = error instanceof Error ? error.message : String(error);
+  return { terminal, delayMs: jobRetryBackoffMs(attempts), message: message.slice(0, 2_000) };
+}
+
+export function assertPacingSourceId(sourceId: string): void {
+  if (!sourceId.trim()) throw new Error("Source fetch pacing requires a positive request rate");
 }
 
 export interface SourcePacingStore {
@@ -753,7 +772,6 @@ export interface AbuseProtection {
 // ---------------------------------------------------------------------------
 
 export interface GameIntelRuntime {
-  adapterApiVersion: number;
   persistence: GameIntelPersistence;
   jobQueue: JobQueue;
   pacing: SourcePacingStore;

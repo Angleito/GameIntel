@@ -91,7 +91,6 @@ describe("PostgreSQL capability role privileges", () => {
         defaultExploitMode: "intended_only",
         platforms: ["PC"],
         sourceQueries: [],
-        builds: [],
       });
     } finally {
       await closeDb(db);

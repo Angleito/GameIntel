@@ -12,7 +12,6 @@ export function testProfile(): GameProfile {
     spoilerSafeCategories: ["release"],
     platforms: [],
     sourceQueries: [],
-    builds: [],
   };
 }
 

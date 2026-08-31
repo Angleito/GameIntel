@@ -1,7 +1,6 @@
 import {
   CLAIM_EXTRACTOR_VERSION,
   NormalizedSourceItemSchema,
-  canonicalClaimKey,
   dispositionFor,
   hashText,
   lineageFor,
@@ -10,8 +9,6 @@ import {
   type ScoreInput,
 } from "@gameintel/core";
 import { extractClaims } from "./extract.ts";
-
-export type IngestionScoring = Omit<ScoreInput, "collectionRelevance"> & { collectionRelevance: number };
 
 export type PreparedIngestion = {
   item: NormalizedSourceItem;
@@ -23,7 +20,7 @@ export type PreparedIngestion = {
 
 export function prepareIngestion(
   input: unknown,
-  scoring: IngestionScoring,
+  scoring: ScoreInput,
   existingArticleId: string | null = null,
 ): PreparedIngestion {
   const item = NormalizedSourceItemSchema.parse(input);

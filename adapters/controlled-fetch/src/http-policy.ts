@@ -1,6 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourcePolicy } from "@gameintel/core";
+import { computeFetchSlot } from "@gameintel/contracts";
 import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
 // Typed source-availability failures. `source_unavailable` counts against
@@ -112,11 +113,9 @@ class RateLimiter {
   private nextRequest = 0;
   async wait(rpm: number): Promise<void> {
     if (!rpm) throw new Error("Network access is disabled by source policy");
-    const interval = 60_000 / rpm;
-    const scheduled = Math.max(Date.now(), this.nextRequest);
-    this.nextRequest = scheduled + interval;
-    const delay = Math.max(0, scheduled - Date.now());
-    if (delay) await Bun.sleep(delay);
+    const { scheduledAtMs, waitMs } = computeFetchSlot(Date.now(), this.nextRequest, rpm);
+    this.nextRequest = scheduledAtMs;
+    if (waitMs) await Bun.sleep(waitMs);
   }
 }
 

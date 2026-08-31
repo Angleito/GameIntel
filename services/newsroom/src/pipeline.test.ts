@@ -141,10 +141,10 @@ describe("Tudum newsroom pipeline", () => {
       const fixture = await testFixture();
       const result = await processFixture(persistence, fixture, { allowFixture: true });
       const articleId = result.articleId!;
-      const existingPublicCount = (await persistence.publicArticles("gta-vi")).length;
+      const existingPublicCount = (await persistence.listPublicArticles("gta-vi")).length;
 
       await expect(persistence.approveArticle(articleId, "test-approver")).rejects.toThrow("current editorial review");
-      expect(await persistence.publicArticles("gta-vi")).toHaveLength(existingPublicCount);
+      expect(await persistence.listPublicArticles("gta-vi")).toHaveLength(existingPublicCount);
 
       await persistence.reviewSource(fixture.source.id, "test-source-reviewer", "Tudum source policy reviewed");
       await expect(persistence.reviewArticle(articleId, "test-editor", "Draft checked against the source"))
@@ -162,7 +162,7 @@ describe("Tudum newsroom pipeline", () => {
       expect(published.editorReviewCompleted).toBe(true);
       expect(published.approvedBy).toBe("test-approver");
 
-      const publicSnapshot = await persistence.publicArticles("gta-vi");
+      const publicSnapshot = await persistence.listPublicArticles("gta-vi");
       expect(publicSnapshot).toHaveLength(existingPublicCount + 1);
       const article = publicSnapshot[0] as { title: string; citations: Array<{ url: string }>; body: { sections: Array<{ paragraphs: Array<{ text: string; evidenceLevel: string; citations: number[] }> }> } };
       expect(article.title).toBe(fixture.item.title);
@@ -284,13 +284,13 @@ describe("Tudum newsroom pipeline", () => {
         submitterIpHash: "b".repeat(64),
         retentionDays: 1,
       };
-      const existingPublic = await persistence.publicArticles("gta-vi");
+      const existingPublic = await persistence.listPublicArticles("gta-vi");
       const first = await persistence.createQuarantinedSubmission(input);
       const duplicate = await persistence.createQuarantinedSubmission(input);
 
       expect(first.duplicate).toBe(false);
       expect(duplicate).toEqual({ id: first.id, duplicate: true });
-      expect(await persistence.publicArticles("gta-vi")).toEqual(existingPublic);
+      expect(await persistence.listPublicArticles("gta-vi")).toEqual(existingPublic);
       const stored = storeOf(persistence).publicSubmissions.get(first.id);
       expect(stored).toMatchObject({ state: "quarantined", report: input.submission.report, contentPurgedAt: null });
       expect(stored!.contentHash).toHaveLength(64);
@@ -309,7 +309,7 @@ describe("Tudum newsroom pipeline", () => {
   test("promotes only reviewed submissions as non-publishable community evidence", async () => {
     const persistence = runtime.persistence;
     await persistence.ensureGame(profile);
-    const existingPublic = await persistence.publicArticles("gta-vi");
+    const existingPublic = await persistence.listPublicArticles("gta-vi");
     const submitted = await persistence.createQuarantinedSubmission({
       submission: {
         collectionId: "gta-vi",
@@ -360,7 +360,7 @@ describe("Tudum newsroom pipeline", () => {
     const evidenceRecord = [...storeOf(persistence).evidence.values()].find((record) => record.claimId === [...storeOf(persistence).claims.values()].find((claim) => claim.sourceItemId === promoted.sourceItemId)?.id);
     await expect(persistence.reviewEvidence(evidenceRecord!.id, "moderator-two", "approved"))
       .rejects.toThrow("Submitters cannot approve their own evidence");
-    expect(await persistence.publicArticles("gta-vi")).toEqual(existingPublic);
+    expect(await persistence.listPublicArticles("gta-vi")).toEqual(existingPublic);
     expect((await persistence.listPublicSubmissionModerationActions(submitted.id)).map((action) => action.action))
       .toEqual(["submitted", "state:under_review", "promoted"]);
     await expect(persistence.reviewPublicSubmission({
@@ -464,7 +464,7 @@ describe("Tudum newsroom pipeline", () => {
 
         await persistence.approveCoverMedia(result.articleId!, "test-media-reviewer");
         await persistence.markPublished(result.articleId!, "test-publisher");
-        const publicArticle = (await persistence.publicArticles("gta-vi")).find((article) => (article as { id: string }).id === result.articleId!) as { coverMedia: { id: string } | null };
+        const publicArticle = (await persistence.listPublicArticles("gta-vi")).find((article) => (article as { id: string }).id === result.articleId!) as { coverMedia: { id: string } | null };
         expect(publicArticle.coverMedia).toMatchObject({ id: safeMediaId });
         expect(await persistence.approveMediaCollection("gta-vi", "test-media-reviewer")).toBe(1);
         expect(await persistence.approveMediaCollection("gta-vi", "test-media-reviewer")).toBe(0);

@@ -1,7 +1,7 @@
 import { describe, test } from "bun:test";
 import { runPersistenceContract, runQueueContract, runSourceHealthContract } from "@gameintel/adapter-contract-tests";
 import { closeDb, createDb, type Db } from "./index.ts";
-import { PostgresJobQueue, PostgresPersistence } from "./adapter.ts";
+import { PostgresJobQueue, PostgresPersistence } from "./index.ts";
 import { PostgresSourceHealthStore } from "./source-health.ts";
 
 // Conformance suite for the PostgreSQL reference adapter. Requires a migrated

@@ -40,7 +40,6 @@ export type SourceItemRecord = {
   contentType: string | null;
   language: string | null;
   retentionUntil: number;
-  provenanceStatus: string;
   contentPurgedAt: number | null;
   submittedBy: string | null;
   createdAt: string;
@@ -115,16 +114,6 @@ export type ProvenanceRelationshipRecord = {
   createdAt: string;
 };
 
-export type EventRecord = {
-  id: string;
-  gameId: string;
-  sourceItemId: string;
-  newsworthiness: number;
-  disposition: string;
-  existingArticleId: string | null;
-  createdAt: string;
-};
-
 export type ClaimRecord = {
   id: string;
   gameId: string;
@@ -172,15 +161,6 @@ export type EvidenceReviewRecord = {
   createdAt: string;
 };
 
-export type SourcePolicyReviewRecord = {
-  id: string;
-  sourceId: string;
-  reviewerId: string;
-  decision: "approved" | "rejected" | "revoked";
-  notes: string;
-  createdAt: string;
-};
-
 export type ArticleRecord = {
   id: string;
   gameId: string;
@@ -200,15 +180,6 @@ export type ArticleRecord = {
   publishedAt: string | null;
   createdAt: string;
   updatedAt: string;
-};
-
-export type ArticleRevisionRecord = {
-  id: string;
-  articleId: string;
-  revisionNumber: number;
-  body: ArticleBody;
-  changeSummary: string;
-  createdAt: string;
 };
 
 export type ArticleSourceRecord = {
@@ -294,16 +265,6 @@ export type SubmissionActionRecord = {
   createdAt: string;
 };
 
-export type AuditRecord = {
-  id: string;
-  actorId: string;
-  action: string;
-  targetType: string;
-  targetId: string;
-  reason: string;
-  createdAt: string;
-};
-
 export type JobRecord = {
   jobKey: string;
   jobType: string;
@@ -343,23 +304,17 @@ export type MemoryStore = {
   provenanceFamilies: Map<string, ProvenanceFamilyRecord>;
   sourceItemProvenance: Map<string, SourceItemProvenanceRecord>;
   provenanceRelationships: Map<string, ProvenanceRelationshipRecord>;
-  events: Map<string, EventRecord>;
   claims: Map<string, ClaimRecord>;
   evidence: Map<string, EvidenceRecord>;
   evidenceReviews: EvidenceReviewRecord[];
-  sourcePolicyReviews: SourcePolicyReviewRecord[];
   articles: Map<string, ArticleRecord>;
-  articleRevisions: Map<string, ArticleRevisionRecord>;
+  articleRevisions: Map<string, number>;
   articleSources: Map<string, ArticleSourceRecord>;
   reviews: ReviewRecord[];
   mediaAssets: Map<string, MediaAssetRecord>;
   articleMedia: Map<string, ArticleMediaRecord>;
   publicSubmissions: Map<string, PublicSubmissionRecord>;
   submissionActions: SubmissionActionRecord[];
-  auditLog: AuditRecord[];
-  jobs: Map<string, JobRecord>;
-  pacing: Map<string, number>;
-  workerHeartbeats: Map<string, WorkerHeartbeatRecord>;
 };
 
 export function createMemoryStore(): MemoryStore {
@@ -373,11 +328,9 @@ export function createMemoryStore(): MemoryStore {
     provenanceFamilies: new Map(),
     sourceItemProvenance: new Map(),
     provenanceRelationships: new Map(),
-    events: new Map(),
     claims: new Map(),
     evidence: new Map(),
     evidenceReviews: [],
-    sourcePolicyReviews: [],
     articles: new Map(),
     articleRevisions: new Map(),
     articleSources: new Map(),
@@ -386,10 +339,6 @@ export function createMemoryStore(): MemoryStore {
     articleMedia: new Map(),
     publicSubmissions: new Map(),
     submissionActions: [],
-    auditLog: [],
-    jobs: new Map(),
-    pacing: new Map(),
-    workerHeartbeats: new Map(),
   };
 }
 

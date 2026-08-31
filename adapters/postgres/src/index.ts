@@ -1,18 +1,25 @@
-import postgres, { type Sql } from "postgres";
+import { readFile } from "node:fs/promises";
 import {
   SAFE_IDENTIFIER_PATTERN,
+  UnconfiguredFetchTransport,
+  assertPacingSourceId,
   computeFetchSlot,
   cryptoIdGenerator,
-  ingestJobDedupeKey,
   IngestionLeaseLostError,
-  jobRetryBackoffMs,
+  jobEnqueueInput,
+  jobFailureOutcome,
+  jsonStringArray,
   parseStoredJson,
+  schedulerForSources,
+  systemClock,
   timestampMs,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
   validateModerationActor,
   validateModerationNotes,
 } from "@gameintel/contracts";
+import { closeDb, createDb, inTransaction, type Db } from "./db.ts";
+import { PostgresSourceHealthStore } from "./source-health.ts";
 import type {
   ArticleEvidenceForReview,
   CoverMediaCandidate,
@@ -27,6 +34,12 @@ import type {
   SourceDiscoverJobPayload,
   SourceIngestEnqueueResult,
   SourceIngestJobPayload,
+  GameIntelPersistence,
+  GameIntelRuntime,
+  JobQueue,
+  ObjectStore,
+  SchedulableSource,
+  SourcePacingStore,
 } from "@gameintel/contracts";
 import {
   ArticleBodySchema,
@@ -36,9 +49,9 @@ import {
   type Article,
   type ArticleBody,
   ArticleCoverMediaSchema,
+  assertUniqueMedia,
   calculateConfidence,
   canonicalClaimKey,
-  canonicalizeUrl,
   type ClaimState,
   deriveClaimState,
   EvidenceReviewDecisionSchema,
@@ -49,6 +62,9 @@ import {
   type GameProfile,
   type NormalizedSourceItem,
   type PublicationMode,
+  MediaCatalogSchema,
+  mediaCoverScore,
+  normalizedText,
   ProvenanceClusteringMethodSchema,
   type ProvenanceClusteringMethod,
   ProvenanceRelationshipSchema,
@@ -56,7 +72,6 @@ import {
   publicSubmissionFingerprint,
   retainedExcerpt,
   retentionUntilMs,
-  PublicHttpUrlSchema,
   PublicSubmissionSchema,
   type PublicSubmission,
   PublicSubmissionReviewDecisionSchema,
@@ -72,58 +87,11 @@ import {
   type SourceStrength,
   type SafeArticle,
   toSafeArticle,
+  type CatalogMedia,
 } from "@gameintel/core";
 
-export {
-  approveCoverMedia,
-  approveMediaAsset,
-  approveMediaCollection,
-  clearCoverMedia,
-  importMediaCatalog,
-  listCoverCandidates,
-  recommendArticleCover,
-  rejectCoverMedia,
-  setCoverMedia,
-} from "./media.ts";
-
-export type Db = Sql<{}>;
-
-export {
-  PostgresJobQueue,
-  PostgresPacingStore,
-  PostgresPersistence,
-  createPostgresRuntime,
-} from "./adapter.ts";
-export { PostgresSourceHealthStore } from "./source-health.ts";
-
-type TransactionRunner = {
-  begin?: (callback: (transaction: unknown) => Promise<unknown>) => Promise<unknown>;
-  savepoint?: (callback: (transaction: unknown) => Promise<unknown>) => Promise<unknown>;
-};
-
-export async function inTransaction<T>(db: Db, callback: (transaction: Db) => Promise<T>): Promise<T> {
-  const runner = db as unknown as TransactionRunner;
-  const run = async (transaction: unknown): Promise<unknown> => callback(transaction as Db);
-  // postgres.js exposes savepoints on transaction handles; use one rather than
-  // attempting to start a nested top-level transaction.
-  if (typeof runner.savepoint === "function") return await runner.savepoint(run) as T;
-  if (typeof runner.begin === "function") return await runner.begin(run) as T;
-  throw new Error("Database handle does not support transactions");
-}
-
-export function createDb(url = process.env.DATABASE_URL): Db {
-  if (!url) throw new Error("DATABASE_URL is required");
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new Error("DATABASE_URL must be a valid PostgreSQL URL");
-  }
-  if (!(["postgres:", "postgresql:"].includes(parsed.protocol)) || !parsed.username || !parsed.password) {
-    throw new Error("DATABASE_URL must include PostgreSQL credentials");
-  }
-  return postgres(url, { max: 5, idle_timeout: 20 });
-}
+export { closeDb, createDb, inTransaction } from "./db.ts";
+export type { Db } from "./db.ts";
 
 const id = cryptoIdGenerator.generate;
 
@@ -299,7 +267,7 @@ async function firstRevisionForSourceItem(db: Db, sourceItemId: string): Promise
   return revisions[0].id as string;
 }
 
-export async function createEvent(db: Db, input: { collectionId: string; sourceItemId: string; newsworthiness: number; disposition: string; existingArticleId?: string | null }): Promise<string> {
+async function createEvent(db: Db, input: { collectionId: string; sourceItemId: string; newsworthiness: number; disposition: string; existingArticleId?: string | null }): Promise<string> {
   const eventId = id("evt");
   await db`
     INSERT INTO events (id, game_id, source_item_id, newsworthiness, disposition, existing_article_id)
@@ -330,7 +298,7 @@ async function resolveCanonicalClaimForRow(db: Db, claimId: string, collectionId
   return canonicalClaimId;
 }
 
-export async function ensureCanonicalClaimsForSourceItem(db: Db, sourceItemId: string): Promise<number> {
+async function ensureCanonicalClaimsForSourceItem(db: Db, sourceItemId: string): Promise<number> {
   const unresolved = await db`
     SELECT id, game_id, subject, predicate, value, qualifiers
     FROM claims
@@ -429,7 +397,7 @@ function parseAnalysisRun(row: Record<string, unknown>): import("@gameintel/cont
   };
 }
 
-export async function getAnalysisRun(
+async function getAnalysisRun(
   db: Db,
   sourceItemRevisionId: string,
   versions: import("@gameintel/contracts").AnalysisVersions,
@@ -483,7 +451,7 @@ export async function createAnalysisRun(
   return parseAnalysisRun(rows[0] as Record<string, unknown>);
 }
 
-export async function listAnalysisRuns(db: Db, sourceItemRevisionId: string): Promise<import("@gameintel/contracts").AnalysisRunInfo[]> {
+async function listAnalysisRuns(db: Db, sourceItemRevisionId: string): Promise<import("@gameintel/contracts").AnalysisRunInfo[]> {
   const rows = await db`
     SELECT *
     FROM analysis_runs
@@ -493,7 +461,7 @@ export async function listAnalysisRuns(db: Db, sourceItemRevisionId: string): Pr
   return rows.map((row) => parseAnalysisRun(row as Record<string, unknown>));
 }
 
-export async function getRevisionForAnalysis(db: Db, revisionId: string): Promise<import("@gameintel/contracts").RevisionForAnalysis | null> {
+async function getRevisionForAnalysis(db: Db, revisionId: string): Promise<import("@gameintel/contracts").RevisionForAnalysis | null> {
   const rows = await db`
     SELECT revision.id, revision.source_item_id, revision.title, revision.content, revision.raw_hash,
       revision.processing_version, revision.content_purged_at,
@@ -551,7 +519,7 @@ export async function getRevisionForAnalysis(db: Db, revisionId: string): Promis
 // point at any member claim of the given canonical claims. This routes a
 // revised high-newsworthiness source to its existing knowledge/publication
 // object (update_existing) instead of spawning a parallel draft.
-export async function resolveExistingArticleForCanonicalClaims(db: Db, canonicalClaimIds: string[]): Promise<string | null> {
+async function resolveExistingArticleForCanonicalClaims(db: Db, canonicalClaimIds: string[]): Promise<string | null> {
   if (!canonicalClaimIds.length) return null;
   const rows = await db`
     SELECT candidate.id
@@ -574,7 +542,7 @@ export async function resolveExistingArticleForCanonicalClaims(db: Db, canonical
 // evidence (which needs fresh review) demotes stale publication state and
 // contradiction from any member source propagates to every referencing
 // article.
-export async function refreshArticlesForCanonicalClaims(db: Db, canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]> {
+async function refreshArticlesForCanonicalClaims(db: Db, canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]> {
   if (!canonicalClaimIds.length) return [];
   const articles = await db`
     SELECT DISTINCT article_source.article_id
@@ -591,7 +559,7 @@ export async function refreshArticlesForCanonicalClaims(db: Db, canonicalClaimId
   return articleIds;
 }
 
-export async function canonicalClaimIdsForSourceItem(db: Db, sourceItemId: string): Promise<string[]> {
+async function canonicalClaimIdsForSourceItem(db: Db, sourceItemId: string): Promise<string[]> {
   const rows = await db`
     SELECT DISTINCT COALESCE(canonical_claim_id, id) AS canonical_claim_id
     FROM claims
@@ -600,7 +568,7 @@ export async function canonicalClaimIdsForSourceItem(db: Db, sourceItemId: strin
   return rows.map((row) => row.canonical_claim_id as string);
 }
 
-export async function linkSourceItemProvenance(db: Db, input: {
+async function linkSourceItemProvenance(db: Db, input: {
   sourceItemId: string;
   relatedSourceItemId: string;
   relationship: ProvenanceRelationship;
@@ -705,7 +673,7 @@ function parseIngestionWorkerHeartbeat(row: Record<string, unknown>): IngestionW
   };
 }
 
-export async function heartbeatIngestionWorker(db: Db, input: {
+async function heartbeatIngestionWorker(db: Db, input: {
   workerId: string;
   workerType: "source_ingest";
   currentJobKey?: string | null;
@@ -729,7 +697,7 @@ export async function heartbeatIngestionWorker(db: Db, input: {
   `;
 }
 
-export async function listIngestionWorkerHeartbeats(db: Db): Promise<IngestionWorkerHeartbeat[]> {
+async function listIngestionWorkerHeartbeats(db: Db): Promise<IngestionWorkerHeartbeat[]> {
   const rows = await db`
     SELECT worker_id, worker_type, current_job_key, last_error, last_seen_at
     FROM ingestion_worker_heartbeats
@@ -738,7 +706,7 @@ export async function listIngestionWorkerHeartbeats(db: Db): Promise<IngestionWo
   return rows.map((row) => parseIngestionWorkerHeartbeat(row as Record<string, unknown>));
 }
 
-export async function getIngestionQueueStatus(db: Db, staleAfterMs = 30_000): Promise<IngestionQueueStatus> {
+async function getIngestionQueueStatus(db: Db, staleAfterMs = 30_000): Promise<IngestionQueueStatus> {
   if (!Number.isInteger(staleAfterMs) || staleAfterMs < 1_000 || staleAfterMs > 3_600_000) {
     throw new Error("Ingestion worker stale threshold must be between 1 second and 1 hour");
   }
@@ -774,7 +742,7 @@ export async function getIngestionQueueStatus(db: Db, staleAfterMs = 30_000): Pr
   };
 }
 
-export async function listRecentIngestionJobs(db: Db, limit = 25): Promise<IngestionJob[]> {
+async function listRecentIngestionJobs(db: Db, limit = 25): Promise<IngestionJob[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Ingestion job list limit must be between 1 and 100");
   const rows = await db`
     SELECT *
@@ -787,13 +755,8 @@ export async function listRecentIngestionJobs(db: Db, limit = 25): Promise<Inges
 }
 
 export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult> {
-  const collectionId = input.collectionId.trim();
-  const sourceId = input.sourceId.trim();
-  if (!collectionId || !sourceId) throw new Error("Source ingestion jobs require a collection and source");
-  const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
-  const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
+  const { payload, dedupeKey } = jobEnqueueInput(input);
   const jobKey = id("source_ingest");
-  const dedupeKey = ingestJobDedupeKey("source_ingest", collectionId, sourceId, url);
   const inserted = await db`
     INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at, dedupe_key)
     VALUES (${jobKey}, 'source_ingest', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now(), ${dedupeKey})
@@ -811,14 +774,9 @@ export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPaylo
   return { jobKey: existing[0].job_key as string, dedupeKey, duplicate: true, status: existing[0].status as string };
 }
 
-export async function enqueueSourceDiscoverJob(db: Db, input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
-  const collectionId = input.collectionId.trim();
-  const sourceId = input.sourceId.trim();
-  if (!collectionId || !sourceId) throw new Error("Source discovery jobs require a collection and source");
-  const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
-  const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
+async function enqueueSourceDiscoverJob(db: Db, input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
+  const { payload, dedupeKey } = jobEnqueueInput(input);
   const jobKey = id("source_discover");
-  const dedupeKey = ingestJobDedupeKey("source_discover", collectionId, sourceId, feedUrl);
   const inserted = await db`
     INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at, dedupe_key)
     VALUES (${jobKey}, 'source_discover', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now(), ${dedupeKey})
@@ -836,7 +794,7 @@ export async function enqueueSourceDiscoverJob(db: Db, input: SourceDiscoverJobP
   return { jobKey: existing[0].job_key as string, dedupeKey, duplicate: true, status: existing[0].status as string };
 }
 
-export async function claimIngestionJob(
+async function claimIngestionJob(
   db: Db,
   workerId: string,
   jobTypes: string[] = ["source_ingest"],
@@ -883,7 +841,7 @@ export async function claimIngestionJob(
 // FOR UPDATE for the remainder of the transaction, so the reaper cannot
 // requeue or reclaim it mid-transaction. A worker whose lease was reclaimed
 // while stalled fails this check and its transaction rolls back.
-export async function assertIngestionJobLeaseHeld(db: Db, jobKey: string, leaseToken: string): Promise<void> {
+async function assertIngestionJobLeaseHeld(db: Db, jobKey: string, leaseToken: string): Promise<void> {
   if (!jobKey.trim() || !leaseToken.trim()) throw new Error("An ingestion job key and lease token are required");
   const held = await db`
     SELECT job_key
@@ -894,7 +852,7 @@ export async function assertIngestionJobLeaseHeld(db: Db, jobKey: string, leaseT
   if (!held.length) throw new IngestionLeaseLostError(jobKey);
 }
 
-export async function completeIngestionJob(db: Db, jobKey: string, leaseToken: string, result: unknown): Promise<void> {
+async function completeIngestionJob(db: Db, jobKey: string, leaseToken: string, result: unknown): Promise<void> {
   const completed = await db`
     UPDATE jobs
     SET status = 'completed', result = ${JSON.stringify(result)}, completed_at = now(),
@@ -905,7 +863,7 @@ export async function completeIngestionJob(db: Db, jobKey: string, leaseToken: s
   if (!completed.length) throw new IngestionLeaseLostError(jobKey);
 }
 
-export async function failIngestionJob(db: Db, jobKey: string, leaseToken: string, error: unknown, retryable = true): Promise<void> {
+async function failIngestionJob(db: Db, jobKey: string, leaseToken: string, error: unknown, retryable = true): Promise<void> {
   await inTransaction(db, async (transaction) => {
     const jobs = await transaction`
       SELECT attempts, max_attempts
@@ -916,9 +874,7 @@ export async function failIngestionJob(db: Db, jobKey: string, leaseToken: strin
     if (!jobs.length) throw new IngestionLeaseLostError(jobKey);
     const attempts = Number(jobs[0].attempts);
     const maxAttempts = Number(jobs[0].max_attempts);
-    const terminal = !retryable || attempts >= maxAttempts;
-    const delayMs = jobRetryBackoffMs(attempts);
-    const message = error instanceof Error ? error.message : String(error);
+    const { terminal, delayMs, message } = jobFailureOutcome(attempts, maxAttempts, retryable, error);
     await transaction`
       UPDATE jobs
       SET status = ${terminal ? "dead" : "queued"}, last_error = ${message.slice(0, 2_000)},
@@ -929,7 +885,7 @@ export async function failIngestionJob(db: Db, jobKey: string, leaseToken: strin
   });
 }
 
-export async function renewIngestionJobLease(db: Db, jobKey: string, leaseToken: string, durationMs: number): Promise<boolean> {
+async function renewIngestionJobLease(db: Db, jobKey: string, leaseToken: string, durationMs: number): Promise<boolean> {
   if (!jobKey.trim() || !leaseToken.trim() || !Number.isInteger(durationMs) || durationMs < 1_000 || durationMs > 3_600_000) {
     throw new Error("Invalid ingestion job lease renewal request");
   }
@@ -942,15 +898,13 @@ export async function renewIngestionJobLease(db: Db, jobKey: string, leaseToken:
   return renewed.length > 0;
 }
 
-export async function getIngestionJob(db: Db, jobKey: string): Promise<IngestionJob | null> {
+async function getIngestionJob(db: Db, jobKey: string): Promise<IngestionJob | null> {
   const jobs = await db`SELECT * FROM jobs WHERE job_key = ${jobKey} LIMIT 1`;
   return jobs.length ? parseJob(jobs[0] as Record<string, unknown>) : null;
 }
 
-export async function acquireSourceFetchSlot(db: Db, sourceId: string, requestsPerMinute: number): Promise<number> {
-  if (!sourceId.trim()) {
-    throw new Error("Source fetch pacing requires a positive request rate");
-  }
+async function acquireSourceFetchSlot(db: Db, sourceId: string, requestsPerMinute: number): Promise<number> {
+  assertPacingSourceId(sourceId);
   return inTransaction(db, async (transaction) => {
     await transaction`
       INSERT INTO source_fetch_pacing (source_id, next_allowed_at)
@@ -999,7 +953,7 @@ export async function createArticleDraft(db: Db, input: {
 // new claim references, a new article_revisions row records the change, and
 // evidence state/confidence are re-derived (a published article demotes and
 // its materialized public record is dropped until evidence is re-reviewed).
-export async function updateExistingArticle(db: Db, input: {
+async function updateExistingArticle(db: Db, input: {
   articleId: string;
   sourceItemId: string;
   sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
@@ -1040,7 +994,7 @@ export async function updateExistingArticle(db: Db, input: {
   });
 }
 
-export async function listClaimsForArticle(db: Db, articleId: string): Promise<import("@gameintel/contracts").ArticleClaimForDraft[]> {
+async function listClaimsForArticle(db: Db, articleId: string): Promise<import("@gameintel/contracts").ArticleClaimForDraft[]> {
   const rows = await db`
     SELECT DISTINCT claim.id, claim.source_item_id, claim.subject, claim.predicate, claim.value,
       claim.evidence_level, claim.attribution_type, claim.statement,
@@ -1154,7 +1108,7 @@ export async function materializePublicArticle(db: Db, article: Article): Promis
 // any mutation that affects public output (publication, evidence demotion,
 // cover changes, media approval or revocation). Call this transactionally
 // from the same operation that changed the article or its media.
-export async function refreshPublicArticleRecord(db: Db, articleId: string, article?: Article | null): Promise<void> {
+async function refreshPublicArticleRecord(db: Db, articleId: string, article?: Article | null): Promise<void> {
   const current = article ?? await getArticle(db, articleId);
   if (!current || (current.status !== "published" && current.status !== "updated") || !toSafeArticle(current)) {
     await db`DELETE FROM public_article_records WHERE article_id = ${articleId}`;
@@ -1200,7 +1154,7 @@ async function evidenceApprovalState(
   return { approved: gate.eligible, latestReviewAt, blockedBy: gate.blockedBy };
 }
 
-export async function calculateClaimConfidence(db: Db, claimId: string): Promise<number> {
+async function calculateClaimConfidence(db: Db, claimId: string): Promise<number> {
   const claims = await db`SELECT game_id, qualifiers, canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
   if (!claims.length) throw new Error("Claim not found");
   const claim = claims[0] as Record<string, unknown>;
@@ -1401,7 +1355,7 @@ async function assertPublicationRequirements(db: Db, articleId: string): Promise
   }
 }
 
-export async function reviewSourcePolicy(
+async function reviewSourcePolicy(
   db: Db,
   sourceId: string,
   reviewerId: string,
@@ -1423,11 +1377,11 @@ export async function reviewSourcePolicy(
 // Kept as a compatibility entrypoint; it records source access metadata only.
 // Collection itself follows the registry enabled state and never requires this
 // record, so an editorial review cannot become an ingestion gate.
-export async function reviewSource(db: Db, sourceId: string, reviewerId: string, notes = ""): Promise<void> {
+async function reviewSource(db: Db, sourceId: string, reviewerId: string, notes = ""): Promise<void> {
   await reviewSourcePolicy(db, sourceId, reviewerId, "approved", notes);
 }
 
-export async function reviewEvidence(
+async function reviewEvidence(
   db: Db,
   evidenceId: string,
   reviewerId: string,
@@ -1486,7 +1440,7 @@ export async function reviewEvidence(
   });
 }
 
-export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimState> {
+async function refreshClaimState(db: Db, claimId: string): Promise<ClaimState> {
   const claim = await db`SELECT id, canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
   if (!claim.length) throw new Error("Claim not found");
   const identity = (claim[0].canonical_claim_id as string | null) ?? claimId;
@@ -1548,14 +1502,14 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
 // revisions, so a material change that removes a claim leaves its evidence
 // stale and the claim becomes superseded. Legacy claim rows without a
 // canonical link are resolved first.
-export async function refreshClaimStatesForSourceItem(db: Db, sourceItemId: string): Promise<number> {
+async function refreshClaimStatesForSourceItem(db: Db, sourceItemId: string): Promise<number> {
   const claims = await db`SELECT id FROM claims WHERE source_item_id = ${sourceItemId}`;
   await ensureCanonicalClaimsForSourceItem(db, sourceItemId);
   for (const claim of claims) await refreshClaimState(db, claim.id as string);
   return claims.length;
 }
 
-export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceItemId: string): Promise<void> {
+async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceItemId: string): Promise<void> {
   const articles = await db`
     SELECT DISTINCT article_source.article_id
     FROM article_sources article_source
@@ -1572,7 +1526,7 @@ export async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceIte
   }
 }
 
-export async function listArticleEvidence(db: Db, articleId: string): Promise<ArticleEvidenceForReview[]> {
+async function listArticleEvidence(db: Db, articleId: string): Promise<ArticleEvidenceForReview[]> {
   const rows = await db`
     SELECT DISTINCT e.id, e.claim_id, e.source_item_id, e.source_item_revision_id, e.excerpt, e.evidence_type,
       revision.processing_version,
@@ -1606,7 +1560,7 @@ export async function listArticleEvidence(db: Db, articleId: string): Promise<Ar
   }));
 }
 
-export async function reviewArticle(db: Db, articleId: string, reviewerId: string, notes = ""): Promise<void> {
+async function reviewArticle(db: Db, articleId: string, reviewerId: string, notes = ""): Promise<void> {
   await inTransaction(db, async (transaction) => {
     await lockArticle(transaction, articleId);
     const evidence = await articleEvidenceState(transaction, articleId);
@@ -1624,7 +1578,7 @@ export async function reviewArticle(db: Db, articleId: string, reviewerId: strin
   });
 }
 
-export async function approveArticle(db: Db, articleId: string, approver: string): Promise<void> {
+async function approveArticle(db: Db, articleId: string, approver: string): Promise<void> {
   await inTransaction(db, async (transaction) => {
     const article = await lockArticle(transaction, articleId);
     if (article.status !== "editor_review") throw new Error("Publication approval requires a current editorial review");
@@ -1639,7 +1593,7 @@ export async function approveArticle(db: Db, articleId: string, approver: string
   });
 }
 
-export async function markPublished(db: Db, articleId: string, operator: string): Promise<Article> {
+async function markPublished(db: Db, articleId: string, operator: string): Promise<Article> {
   return inTransaction(db, async (transaction) => {
     const article = await lockArticle(transaction, articleId);
     if (article.status !== "approved") throw new Error("Only approved articles can be published");
@@ -1664,7 +1618,7 @@ export async function markPublished(db: Db, articleId: string, operator: string)
   });
 }
 
-export async function purgeExpiredSourceContent(db: Db, options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {
+async function purgeExpiredSourceContent(db: Db, options: { execute?: boolean } = {}): Promise<SourceContentPurgeResult> {
   return inTransaction(db, async (transaction) => {
     const candidates = await transaction`
       SELECT si.id
@@ -1709,7 +1663,6 @@ export async function createQuarantinedSubmission(db: Db, input: {
   submitterIpHash: string;
   submitterAccountId?: string | null;
   retentionDays?: number;
-  limits?: PublicSubmissionRateLimits;
 }): Promise<{ id: string; duplicate: boolean }> {
   const submission = PublicSubmissionSchema.parse(input.submission);
   if (!validIdentityHash(input.submitterSessionHash) || !validIdentityHash(input.submitterIpHash)) {
@@ -1720,15 +1673,9 @@ export async function createQuarantinedSubmission(db: Db, input: {
   if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 90) {
     throw new Error("Submission retention must be between 1 and 90 days");
   }
-  const limits = input.limits ?? defaultPublicSubmissionRateLimits;
+  const limits = defaultPublicSubmissionRateLimits;
   if (Object.values(limits).some((limit) => !Number.isInteger(limit) || limit < 1)) {
     throw new Error("Submission rate limits must be positive integers");
-  }
-  // Rate limits are trusted database configuration inside
-  // public_submission_submit; a compromised public client cannot supply
-  // custom limits.
-  if (JSON.stringify(limits) !== JSON.stringify(defaultPublicSubmissionRateLimits)) {
-    throw new Error("Custom submission rate limits are not supported by the PostgreSQL backend");
   }
   const contentHash = publicSubmissionFingerprint(submission);
 
@@ -1781,7 +1728,7 @@ function moderationSubmission(row: Record<string, unknown>): PublicSubmissionFor
   };
 }
 
-export async function listPublicSubmissionsForModeration(
+async function listPublicSubmissionsForModeration(
   db: Db,
   collectionId: string,
   options: { state?: PublicSubmissionState; limit?: number } = {},
@@ -1808,7 +1755,7 @@ export async function listPublicSubmissionsForModeration(
   return rows.map((row) => moderationSubmission(row as Record<string, unknown>));
 }
 
-export async function getPublicSubmissionForModeration(db: Db, submissionId: string): Promise<PublicSubmissionForModeration | null> {
+async function getPublicSubmissionForModeration(db: Db, submissionId: string): Promise<PublicSubmissionForModeration | null> {
   const rows = await db`
     SELECT id, collection_id, state, title, report, urls, media_refs, promoted_source_item_id, retention_until, created_at, updated_at
     FROM public_submissions
@@ -1818,7 +1765,7 @@ export async function getPublicSubmissionForModeration(db: Db, submissionId: str
   return rows.length ? moderationSubmission(rows[0] as Record<string, unknown>) : null;
 }
 
-export async function listPublicSubmissionModerationActions(db: Db, submissionId: string): Promise<PublicSubmissionModerationAction[]> {
+async function listPublicSubmissionModerationActions(db: Db, submissionId: string): Promise<PublicSubmissionModerationAction[]> {
   const rows = await db`
     SELECT id, actor_id, action, notes, created_at
     FROM submission_moderation_actions
@@ -1834,7 +1781,7 @@ export async function listPublicSubmissionModerationActions(db: Db, submissionId
   }));
 }
 
-export async function reviewPublicSubmission(db: Db, input: {
+async function reviewPublicSubmission(db: Db, input: {
   submissionId: string;
   actorId: string;
   decision: PublicSubmissionReviewDecision;
@@ -1874,7 +1821,7 @@ export async function reviewPublicSubmission(db: Db, input: {
 // This function must be called inside the transaction that creates the source
 // item and marks the submission promoted, so a concurrent moderator cannot
 // promote the same report twice.
-export async function getPublicSubmissionForPromotion(db: Db, submissionId: string): Promise<PublicSubmissionForModeration> {
+async function getPublicSubmissionForPromotion(db: Db, submissionId: string): Promise<PublicSubmissionForModeration> {
   const rows = await db`
     SELECT id, collection_id, state, title, report, urls, media_refs, promoted_source_item_id, retention_until, created_at, updated_at
     FROM public_submissions
@@ -1889,7 +1836,7 @@ export async function getPublicSubmissionForPromotion(db: Db, submissionId: stri
   return submission;
 }
 
-export async function markPublicSubmissionPromoted(db: Db, input: {
+async function markPublicSubmissionPromoted(db: Db, input: {
   submissionId: string;
   sourceItemId: string;
   actorId: string;
@@ -1911,7 +1858,7 @@ export async function markPublicSubmissionPromoted(db: Db, input: {
   await audit(db, actorId, "submission.promoted", "public_submission", input.submissionId, notes);
 }
 
-export async function recordSubmissionModerationAction(
+async function recordSubmissionModerationAction(
   db: Db,
   submissionId: string,
   actorId: string,
@@ -1929,7 +1876,7 @@ export async function recordSubmissionModerationAction(
   });
 }
 
-export async function purgeExpiredPublicSubmissions(db: Db, options: { execute?: boolean } = {}): Promise<PublicSubmissionPurgeResult> {
+async function purgeExpiredPublicSubmissions(db: Db, options: { execute?: boolean } = {}): Promise<PublicSubmissionPurgeResult> {
   return inTransaction(db, async (transaction) => {
     const candidates = await transaction`
       SELECT id
@@ -1951,14 +1898,326 @@ export async function purgeExpiredPublicSubmissions(db: Db, options: { execute?:
   });
 }
 
-export async function audit(db: Db, actor: string, action: string, targetType: string, targetId: string, reason: string): Promise<void> {
+async function audit(db: Db, actor: string, action: string, targetType: string, targetId: string, reason: string): Promise<void> {
   await db`INSERT INTO audit_log (id, actor_id, action, target_type, target_id, reason) VALUES (${id("audit")}, ${actor}, ${action}, ${targetType}, ${targetId}, ${reason})`;
 }
 
-export async function publicArticles(db: Db, collectionId: string): Promise<unknown[]> {
-  return listPublicArticles(db, collectionId);
+export async function importMediaCatalog(db: Db, catalogPath: string): Promise<{ imported: number; collectionIds: string[] }> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(catalogPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Could not read media catalog '${catalogPath}': ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const catalog = MediaCatalogSchema.safeParse(parsed);
+  if (!catalog.success) throw new Error(`Invalid media catalog: ${catalog.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
+  assertUniqueMedia(catalog.data.media);
+
+  return inTransaction(db, async (transaction) => {
+    for (const item of catalog.data.media) {
+      await transaction`
+        INSERT INTO media_assets (id, game_id, collection, caption, alt_text, tags, spoiler_tags, attribution, source_url, source_page_url, original_key, display_key, public_url, content_type, width, height, checksum, review_status)
+        VALUES (${item.id}, ${item.collectionId}, ${item.collection}, ${item.caption}, ${item.altText}, ${transaction.json(item.tags)}, ${transaction.json(item.spoilerTags)}, ${item.attribution}, ${item.sourceUrl}, ${item.sourcePageUrl}, ${item.originalKey}, ${item.displayKey}, ${item.publicUrl}, ${item.contentType}, ${item.width}, ${item.height}, ${item.checksum}, 'pending')
+        ON CONFLICT (id) DO UPDATE SET
+          game_id = EXCLUDED.game_id, collection = EXCLUDED.collection, caption = EXCLUDED.caption, alt_text = EXCLUDED.alt_text,
+          tags = EXCLUDED.tags, spoiler_tags = EXCLUDED.spoiler_tags, attribution = EXCLUDED.attribution,
+          source_url = EXCLUDED.source_url, source_page_url = EXCLUDED.source_page_url, original_key = EXCLUDED.original_key,
+          display_key = EXCLUDED.display_key, public_url = EXCLUDED.public_url, content_type = EXCLUDED.content_type,
+          width = EXCLUDED.width, height = EXCLUDED.height, checksum = EXCLUDED.checksum,
+          review_status = 'pending', approved_by = NULL, approved_at = NULL, updated_at = now()
+      `;
+    }
+    // Importing resets affected assets to pending; published articles using
+    // them as covers lose their public cover until re-approved.
+    const affected = catalog.data.media.map((item) => item.id);
+    const coverArticles = await transaction`
+      SELECT DISTINCT article_id
+      FROM article_media
+      WHERE role = 'cover' AND media_id = ANY(${transaction.array(affected)})
+    `;
+    for (const article of coverArticles) await refreshPublicArticleRecord(transaction, article.article_id as string);
+    return { imported: catalog.data.media.length, collectionIds: [...new Set(catalog.data.media.map((item) => item.collectionId))].sort() };
+  });
 }
 
-export async function closeDb(db: Db): Promise<void> {
-  await db.end({ timeout: 2 });
+export async function listCoverCandidates(db: Db, articleId: string): Promise<CoverMediaCandidate[]> {
+  const rows = await db`
+    SELECT ma.id, ma.collection, ma.caption, ma.alt_text, ma.tags, ma.spoiler_tags, ma.attribution, ma.source_url, ma.public_url
+    FROM media_assets ma JOIN articles a ON a.game_id = ma.game_id
+    WHERE a.id = ${articleId} AND ma.review_status = 'approved' AND jsonb_array_length(ma.spoiler_tags) = 0
+    ORDER BY ma.id ASC
+  `;
+  return rows.map((row) => ({
+    id: row.id as string, collection: row.collection as string, caption: row.caption as string, altText: row.alt_text as string,
+    tags: jsonStringArray(row.tags), spoilerTags: jsonStringArray(row.spoiler_tags), attribution: row.attribution as string,
+    sourceUrl: row.source_url as string, publicUrl: row.public_url as string,
+  }));
+}
+
+export async function setCoverMedia(db: Db, articleId: string, mediaId: string, selectionSource: "automatic" | "editor" = "editor"): Promise<void> {
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`
+      SELECT a.game_id AS article_game_id, ma.game_id AS media_game_id, ma.spoiler_tags
+      FROM articles a CROSS JOIN media_assets ma
+      WHERE a.id = ${articleId} AND ma.id = ${mediaId}
+    `;
+    if (!rows.length) throw new Error("Article or media asset not found");
+    if (rows[0].article_game_id !== rows[0].media_game_id) throw new Error("Cover media must belong to the article collection");
+    if (jsonStringArray(rows[0].spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
+    await transaction`
+      INSERT INTO article_media (article_id, media_id, role, selection_source, review_status)
+      VALUES (${articleId}, ${mediaId}, 'cover', ${selectionSource}, 'pending')
+      ON CONFLICT (article_id, role) DO UPDATE SET
+        media_id = EXCLUDED.media_id, selection_source = EXCLUDED.selection_source, review_status = 'pending', reviewed_by = NULL, reviewed_at = NULL, created_at = now()
+    `;
+    // A pending or replaced cover must not remain in the public surface; a
+    // published article's materialized record is refreshed (drafts have no
+    // record and the refresh is a no-op). The mutation and refresh commit
+    // together so the media state can never outlive a failed refresh.
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
+}
+
+export async function recommendArticleCover(db: Db, input: { articleId: string; title: string; description: string; safeClaimText: string[] }): Promise<string | null> {
+  const candidates = await listCoverCandidates(db, input.articleId);
+  if (!candidates.length) return null;
+  const articleText = normalizedText([input.title, input.description, ...input.safeClaimText].join(" "));
+  const selected = candidates.map((candidate) => ({ candidate, score: mediaCoverScore(candidate, articleText) }))
+    .sort((left, right) => right.score - left.score || left.candidate.id.localeCompare(right.candidate.id))[0].candidate;
+  await setCoverMedia(db, input.articleId, selected.id, "automatic");
+  return selected.id;
+}
+
+export async function approveMediaAsset(db: Db, mediaId: string, reviewer: string): Promise<void> {
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`UPDATE media_assets SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now() WHERE id = ${mediaId} RETURNING id`;
+    if (!rows.length) throw new Error("Media asset not found");
+    await refreshCoverArticlesForAssets(transaction, [mediaId]);
+  });
+}
+
+export async function approveMediaCollection(db: Db, collectionId: string, reviewer: string): Promise<number> {
+  return inTransaction(db, async (transaction) => {
+    const rows = await transaction`
+      UPDATE media_assets
+      SET review_status = 'approved', approved_by = ${reviewer}, approved_at = now(), updated_at = now()
+      WHERE game_id = ${collectionId} AND review_status = 'pending' AND jsonb_array_length(spoiler_tags) = 0
+      RETURNING id
+    `;
+    await refreshCoverArticlesForAssets(transaction, rows.map((row) => row.id as string));
+    return rows.length;
+  });
+}
+
+// Refreshes the materialized public record of every published article whose
+// cover references one of the affected media assets.
+async function refreshCoverArticlesForAssets(db: Db, mediaIds: string[]): Promise<void> {
+  if (!mediaIds.length) return;
+  const articles = await db`
+    SELECT DISTINCT article_id
+    FROM article_media
+    WHERE role = 'cover' AND media_id = ANY(${db.array(mediaIds)})
+  `;
+  for (const article of articles) await refreshPublicArticleRecord(db, article.article_id as string);
+}
+
+export async function approveCoverMedia(db: Db, articleId: string, reviewer: string): Promise<void> {
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`
+      SELECT am.media_id, ma.review_status AS asset_review_status
+      FROM article_media am JOIN media_assets ma ON ma.id = am.media_id
+      WHERE am.article_id = ${articleId} AND am.role = 'cover'
+    `;
+    if (!rows.length) throw new Error("Article has no selected cover media");
+    if (rows[0].asset_review_status !== "approved") throw new Error("Cover media asset must be approved before its assignment");
+    await transaction`UPDATE article_media SET review_status = 'approved', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover'`;
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
+}
+
+export async function rejectCoverMedia(db: Db, articleId: string, reviewer: string): Promise<void> {
+  await inTransaction(db, async (transaction) => {
+    const rows = await transaction`UPDATE article_media SET review_status = 'rejected', reviewed_by = ${reviewer}, reviewed_at = now() WHERE article_id = ${articleId} AND role = 'cover' RETURNING media_id`;
+    if (!rows.length) throw new Error("Article has no selected cover media");
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
+}
+
+export async function clearCoverMedia(db: Db, articleId: string): Promise<void> {
+  await inTransaction(db, async (transaction) => {
+    await transaction`DELETE FROM article_media WHERE article_id = ${articleId} AND role = 'cover'`;
+    await refreshPublicArticleRecord(transaction, articleId);
+  });
+}
+
+// PostgreSQL reference persistence adapter. PostgreSQL-specific concerns
+// (advisory locks, SKIP LOCKED, partial indexes, savepoints) stay inside this
+// adapter and never define GameIntel Core.
+
+export class PostgresPersistence implements GameIntelPersistence {
+  constructor(private readonly handle: Db) {}
+
+  ensureGame = (profile: Parameters<typeof ensureGame>[1]) => ensureGame(this.handle, profile);
+  ensureSource = (source: Parameters<typeof ensureSource>[1]) => ensureSource(this.handle, source);
+  insertSourceItem = (
+    item: Parameters<typeof insertSourceItem>[1],
+    rawHash: string,
+    lineageId: string,
+    policy: Parameters<typeof insertSourceItem>[4],
+    submittedBy?: string | null,
+  ) => insertSourceItem(this.handle, item, rawHash, lineageId, policy, submittedBy);
+
+  createEvent = (input: Parameters<typeof createEvent>[1]) => createEvent(this.handle, input);
+  linkSourceItemProvenance = (input: Parameters<typeof linkSourceItemProvenance>[1]) => linkSourceItemProvenance(this.handle, input);
+  getSourceItemProvenance = async (sourceItemId: string) => {
+    const rows = await this.handle`
+      SELECT provenance_family_id, relationship, clustering_method
+      FROM source_item_provenance
+      WHERE source_item_id = ${sourceItemId}
+      LIMIT 1
+    `;
+    if (!rows.length) return null;
+    const row = rows[0] as { provenance_family_id: string; relationship: import("@gameintel/core").ProvenanceRelationship; clustering_method: import("@gameintel/core").ProvenanceClusteringMethod };
+    return {
+      provenanceFamilyId: row.provenance_family_id,
+      relationship: row.relationship,
+      clusteringMethod: row.clustering_method,
+    };
+  };
+
+  insertClaim = (
+    item: Parameters<typeof insertClaim>[1],
+    sourceItemId: string,
+    sourceItemRevisionId: string,
+    analysisRunId: string,
+    provenanceFamilyId: string,
+    claim: Parameters<typeof insertClaim>[6],
+    lineageId: string,
+  ) => insertClaim(this.handle, item, sourceItemId, sourceItemRevisionId, analysisRunId, provenanceFamilyId, claim, lineageId);
+  refreshClaimState = (claimId: string) => refreshClaimState(this.handle, claimId);
+  refreshClaimStatesForSourceItem = (sourceItemId: string) => refreshClaimStatesForSourceItem(this.handle, sourceItemId);
+  calculateClaimConfidence = (claimId: string) => calculateClaimConfidence(this.handle, claimId);
+  canonicalClaimIdsForSourceItem = (sourceItemId: string) => canonicalClaimIdsForSourceItem(this.handle, sourceItemId);
+  getAnalysisRun = (sourceItemRevisionId: string, versions: Parameters<typeof getAnalysisRun>[2]) =>
+    getAnalysisRun(this.handle, sourceItemRevisionId, versions);
+  createAnalysisRun = (input: Parameters<typeof createAnalysisRun>[1]) => createAnalysisRun(this.handle, input);
+  listAnalysisRuns = (sourceItemRevisionId: string) => listAnalysisRuns(this.handle, sourceItemRevisionId);
+  getRevisionForAnalysis = (revisionId: string) => getRevisionForAnalysis(this.handle, revisionId);
+  resolveExistingArticleForCanonicalClaims = (canonicalClaimIds: string[]) =>
+    resolveExistingArticleForCanonicalClaims(this.handle, canonicalClaimIds);
+  refreshArticlesForCanonicalClaims = (canonicalClaimIds: string[], auditAction: string, auditReason: string) =>
+    refreshArticlesForCanonicalClaims(this.handle, canonicalClaimIds, auditAction, auditReason);
+
+  invalidateEvidenceApprovalsForSourceItem = (sourceItemId: string) => invalidateEvidenceApprovalsForSourceItem(this.handle, sourceItemId);
+  listArticleEvidence = (articleId: string) => listArticleEvidence(this.handle, articleId);
+
+  reviewSourcePolicy = (
+    sourceId: string,
+    reviewerId: string,
+    decision?: Parameters<typeof reviewSourcePolicy>[3],
+    notes?: string,
+  ) => reviewSourcePolicy(this.handle, sourceId, reviewerId, decision, notes);
+  reviewSource = (sourceId: string, reviewerId: string, notes?: string) => reviewSource(this.handle, sourceId, reviewerId, notes);
+  reviewEvidence = (
+    evidenceId: string,
+    reviewerId: string,
+    decision?: Parameters<typeof reviewEvidence>[3],
+    notes?: string,
+  ) => reviewEvidence(this.handle, evidenceId, reviewerId, decision, notes);
+  reviewArticle = (articleId: string, reviewerId: string, notes?: string) => reviewArticle(this.handle, articleId, reviewerId, notes);
+  approveArticle = (articleId: string, approver: string) => approveArticle(this.handle, articleId, approver);
+
+  createArticleDraft = (input: Parameters<typeof createArticleDraft>[1]) => createArticleDraft(this.handle, input);
+  updateExistingArticle = (input: Parameters<typeof updateExistingArticle>[1]) => updateExistingArticle(this.handle, input);
+  listClaimsForArticle = (articleId: string) => listClaimsForArticle(this.handle, articleId);
+  getArticle = (idOrSlug: string) => getArticle(this.handle, idOrSlug);
+  listArticles = (collectionId: string) => listArticles(this.handle, collectionId);
+  getPublicArticle = (idOrSlug: string) => getPublicArticle(this.handle, idOrSlug);
+  listPublicArticles = (collectionId: string) => listPublicArticles(this.handle, collectionId);
+  markPublished = (articleId: string, operator: string) => markPublished(this.handle, articleId, operator);
+  purgeExpiredSourceContent = (options?: { execute?: boolean }) => purgeExpiredSourceContent(this.handle, options);
+
+  createQuarantinedSubmission = (input: Parameters<typeof createQuarantinedSubmission>[1]) => createQuarantinedSubmission(this.handle, input);
+  listPublicSubmissionsForModeration = (
+    collectionId: string,
+    options?: Parameters<typeof listPublicSubmissionsForModeration>[2],
+  ) => listPublicSubmissionsForModeration(this.handle, collectionId, options);
+  getPublicSubmissionForModeration = (submissionId: string) => getPublicSubmissionForModeration(this.handle, submissionId);
+  listPublicSubmissionModerationActions = (submissionId: string) => listPublicSubmissionModerationActions(this.handle, submissionId);
+  reviewPublicSubmission = (input: Parameters<typeof reviewPublicSubmission>[1]) => reviewPublicSubmission(this.handle, input);
+  getPublicSubmissionForPromotion = (submissionId: string) => getPublicSubmissionForPromotion(this.handle, submissionId);
+  markPublicSubmissionPromoted = (input: Parameters<typeof markPublicSubmissionPromoted>[1]) => markPublicSubmissionPromoted(this.handle, input);
+  recordSubmissionModerationAction = (submissionId: string, actorId: string, action: string, notes?: string) =>
+    recordSubmissionModerationAction(this.handle, submissionId, actorId, action, notes);
+  purgeExpiredPublicSubmissions = (options?: { execute?: boolean }) => purgeExpiredPublicSubmissions(this.handle, options);
+
+  audit = (actor: string, action: string, targetType: string, targetId: string, reason: string) =>
+    audit(this.handle, actor, action, targetType, targetId, reason);
+
+  importMediaCatalog = (catalogPath: string) => importMediaCatalog(this.handle, catalogPath);
+  listCoverCandidates = (articleId: string) => listCoverCandidates(this.handle, articleId);
+  setCoverMedia = (articleId: string, mediaId: string, selectionSource?: "automatic" | "editor") =>
+    setCoverMedia(this.handle, articleId, mediaId, selectionSource);
+  recommendArticleCover = (input: Parameters<typeof recommendArticleCover>[1]) => recommendArticleCover(this.handle, input);
+  approveMediaAsset = (mediaId: string, reviewer: string) => approveMediaAsset(this.handle, mediaId, reviewer);
+  approveMediaCollection = (collectionId: string, reviewer: string) => approveMediaCollection(this.handle, collectionId, reviewer);
+  approveCoverMedia = (articleId: string, reviewer: string) => approveCoverMedia(this.handle, articleId, reviewer);
+  rejectCoverMedia = (articleId: string, reviewer: string) => rejectCoverMedia(this.handle, articleId, reviewer);
+  clearCoverMedia = (articleId: string) => clearCoverMedia(this.handle, articleId);
+
+  transaction = async <T>(callback: (transaction: GameIntelPersistence) => Promise<T>): Promise<T> => {
+    return inTransaction(this.handle, async (transaction) => {
+      return callback(new PostgresPersistence(transaction));
+    });
+  };
+
+  assertIngestionJobLeaseHeld = (jobKey: string, leaseToken: string) => assertIngestionJobLeaseHeld(this.handle, jobKey, leaseToken);
+}
+
+export class PostgresJobQueue implements JobQueue {
+  constructor(private readonly handle: Db) {}
+
+  enqueueSourceIngestJob = (input: Parameters<typeof enqueueSourceIngestJob>[1]) => enqueueSourceIngestJob(this.handle, input);
+  enqueueSourceDiscoverJob = (input: Parameters<typeof enqueueSourceDiscoverJob>[1]) => enqueueSourceDiscoverJob(this.handle, input);
+  claimIngestionJob = (workerId: string, jobTypes?: string[], leaseMs?: number) => claimIngestionJob(this.handle, workerId, jobTypes, leaseMs);
+  completeIngestionJob = (jobKey: string, leaseToken: string, result: unknown) => completeIngestionJob(this.handle, jobKey, leaseToken, result);
+  failIngestionJob = (jobKey: string, leaseToken: string, error: unknown, retryable?: boolean) =>
+    failIngestionJob(this.handle, jobKey, leaseToken, error, retryable);
+  renewIngestionJobLease = (jobKey: string, leaseToken: string, durationMs: number) => renewIngestionJobLease(this.handle, jobKey, leaseToken, durationMs);
+  getIngestionJob = (jobKey: string) => getIngestionJob(this.handle, jobKey);
+  listRecentIngestionJobs = (limit?: number) => listRecentIngestionJobs(this.handle, limit);
+  getIngestionQueueStatus = (staleAfterMs?: number) => getIngestionQueueStatus(this.handle, staleAfterMs);
+  heartbeatIngestionWorker = (input: Parameters<typeof heartbeatIngestionWorker>[1]) => heartbeatIngestionWorker(this.handle, input);
+  listIngestionWorkerHeartbeats = () => listIngestionWorkerHeartbeats(this.handle);
+}
+
+export class PostgresPacingStore implements SourcePacingStore {
+  constructor(private readonly handle: Db) {}
+
+  acquireFetchSlot = (sourceId: string, requestsPerMinute: number) => acquireSourceFetchSlot(this.handle, sourceId, requestsPerMinute);
+}
+
+export type PostgresRuntime = GameIntelRuntime;
+
+export function createPostgresRuntime(options: {
+  url?: string;
+  fetchTransport?: GameIntelRuntime["fetchTransport"];
+  objectStore?: ObjectStore | null;
+  schedulerSources?: SchedulableSource[];
+} = {}): PostgresRuntime {
+  const handle = createDb(options.url);
+  const clock = systemClock;
+  const scheduler = schedulerForSources(options.schedulerSources, clock);
+  return {
+    persistence: new PostgresPersistence(handle),
+    jobQueue: new PostgresJobQueue(handle),
+    pacing: new PostgresPacingStore(handle),
+    sourceHealth: new PostgresSourceHealthStore(handle),
+    fetchTransport: options.fetchTransport ?? new UnconfiguredFetchTransport(),
+    scheduler,
+    objectStore: options.objectStore ?? null,
+    clock,
+    ids: cryptoIdGenerator,
+    close: () => closeDb(handle),
+  };
 }

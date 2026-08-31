@@ -1,8 +1,6 @@
 import {
   IngestionLeaseLostError,
   SAFE_IDENTIFIER_PATTERN,
-  ingestJobDedupeKey,
-  jobRetryBackoffMs,
   parseStoredJson,
   type Clock,
   type IdGenerator,
@@ -13,8 +11,9 @@ import {
   type SourceDiscoverJobPayload,
   type SourceIngestEnqueueResult,
   type SourceIngestJobPayload,
+  jobEnqueueInput,
+  jobFailureOutcome,
 } from "@gameintel/contracts";
-import { canonicalizeUrl, PublicHttpUrlSchema } from "@gameintel/core";
 import type { Database } from "bun:sqlite";
 import { json } from "./database.ts";
 
@@ -68,13 +67,8 @@ export class SQLiteJobQueue implements JobQueue {
   }
 
   async enqueueSourceIngestJob(input: SourceIngestJobPayload): Promise<SourceIngestEnqueueResult> {
-    const collectionId = input.collectionId.trim();
-    const sourceId = input.sourceId.trim();
-    if (!collectionId || !sourceId) throw new Error("Source ingestion jobs require a collection and source");
-    const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
-    const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
+    const { payload, dedupeKey } = jobEnqueueInput(input);
     const jobKey = this.ids.generate("source_ingest");
-    const dedupeKey = ingestJobDedupeKey("source_ingest", collectionId, sourceId, url);
     const now = this.clock.now();
     const existing = this.db.query(
       "SELECT job_key, status FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running') LIMIT 1",
@@ -88,13 +82,8 @@ export class SQLiteJobQueue implements JobQueue {
   }
 
   async enqueueSourceDiscoverJob(input: SourceDiscoverJobPayload): Promise<SourceIngestEnqueueResult> {
-    const collectionId = input.collectionId.trim();
-    const sourceId = input.sourceId.trim();
-    if (!collectionId || !sourceId) throw new Error("Source discovery jobs require a collection and source");
-    const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
-    const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
+    const { payload, dedupeKey } = jobEnqueueInput(input);
     const jobKey = this.ids.generate("source_discover");
-    const dedupeKey = ingestJobDedupeKey("source_discover", collectionId, sourceId, feedUrl);
     const now = this.clock.now();
     const existing = this.db.query(
       "SELECT job_key, status FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running') LIMIT 1",
@@ -158,9 +147,7 @@ export class SQLiteJobQueue implements JobQueue {
     ).get(jobKey, leaseToken) as { attempts: number; max_attempts: number } | null;
     if (!row) throw new IngestionLeaseLostError(jobKey);
     const now = this.clock.now();
-    const terminal = !retryable || row.attempts >= row.max_attempts;
-    const delayMs = jobRetryBackoffMs(row.attempts);
-    const message = error instanceof Error ? error.message : String(error);
+    const { terminal, delayMs, message } = jobFailureOutcome(row.attempts, row.max_attempts, retryable, error);
     this.db.query(
       `UPDATE jobs SET status = ?, last_error = ?, available_at = ?, lease_token = NULL, lease_expires_at = NULL,
         completed_at = ?, updated_at = ? WHERE job_key = ?`,
