@@ -1,3 +1,4 @@
+import { hashText } from "@gameintel/core";
 import type {
   Article,
   ArticleBody,
@@ -488,8 +489,34 @@ export interface JobQueue {
   listIngestionWorkerHeartbeats(): Promise<IngestionWorkerHeartbeat[]>;
 }
 
+export const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9._:-]{1,128}$/;
+
+export function ingestJobDedupeKey(
+  jobType: "source_ingest" | "source_discover",
+  collectionId: string,
+  sourceId: string,
+  url: string,
+): string {
+  return `${jobType}:${collectionId}:${sourceId}:${hashText(url)}`;
+}
+
+export function jobRetryBackoffMs(attempts: number): number {
+  return Math.min(300_000, 1_000 * 2 ** Math.max(0, attempts - 1));
+}
+
 export interface SourcePacingStore {
   acquireFetchSlot(sourceId: string, requestsPerMinute: number): Promise<number>;
+}
+export function computeFetchSlot(
+  nowMs: number,
+  nextAllowedAtMs: number,
+  requestsPerMinute: number,
+): { scheduledAtMs: number; waitMs: number } {
+  if (!Number.isFinite(requestsPerMinute) || requestsPerMinute <= 0) {
+    throw new Error("Source fetch pacing requires a positive request rate");
+  }
+  const scheduledAtMs = Math.max(nowMs, nextAllowedAtMs) + 60_000 / requestsPerMinute;
+  return { scheduledAtMs, waitMs: Math.max(0, scheduledAtMs - nowMs) };
 }
 // ---------------------------------------------------------------------------
 // Source health (TASK-004): persistent per-source health aggregation with an
@@ -534,6 +561,34 @@ export function applySourceHealthUpdate(previous: SourceHealthRecord | null, inp
       ? `automatically disabled after ${consecutiveFailures} consecutive failures`
       : previous?.disabledReason ?? null,
   };
+}
+
+export function applySourceHealthDisable(
+  sourceId: string,
+  previous: SourceHealthRecord | null,
+  disabled: boolean,
+  reason: string,
+  nowIso: string,
+): SourceHealthRecord {
+  return disabled
+    ? {
+        sourceId,
+        status: previous?.status ?? "ok",
+        checkedAt: previous?.checkedAt ?? nowIso,
+        message: previous?.message ?? null,
+        consecutiveFailures: previous?.consecutiveFailures ?? 0,
+        disabledAt: nowIso,
+        disabledReason: reason,
+      }
+    : {
+        sourceId,
+        status: "ok",
+        checkedAt: previous?.checkedAt ?? nowIso,
+        message: previous?.message ?? null,
+        consecutiveFailures: 0,
+        disabledAt: null,
+        disabledReason: null,
+      };
 }
 
 export interface SourceHealthStore {

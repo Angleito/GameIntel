@@ -10,7 +10,6 @@
   "dependencies": {
     "@gameintel/config": "workspace:*",
     "@gameintel/core": "workspace:*",
-    "@gameintel/postgres": "workspace:*",
     "@gameintel/newsroom": "workspace:*",
     "@gameintel/output": "workspace:*",
     "hono": "^4.7.2",

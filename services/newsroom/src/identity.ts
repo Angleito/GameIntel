@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
-import type { AbuseProtection, OperatorIdentity, OperatorIdentityProvider } from "@gameintel/contracts";
+import { SAFE_IDENTIFIER_PATTERN, type AbuseProtection, type OperatorIdentity, type OperatorIdentityProvider } from "@gameintel/contracts";
 
 // Local/free capability implementations for operator identity and community
 // intake abuse protection. They satisfy the @gameintel/contracts capabilities
@@ -9,7 +9,6 @@ import type { AbuseProtection, OperatorIdentity, OperatorIdentityProvider } from
 export class SubmissionIdentityError extends Error {}
 
 const TOKEN_PLACEHOLDER = /^(?:change[-_ ]?me|replace|placeholder|example|test)$/i;
-const OPERATOR_ID_PATTERN = /^[a-zA-Z0-9._:-]{1,128}$/;
 const SUBMISSION_SESSION_PATTERN = /^[a-zA-Z0-9_-]{32,256}$/;
 
 export type StaticOperatorIdentityOptions = {
@@ -28,7 +27,7 @@ export class StaticOperatorIdentityProvider implements OperatorIdentityProvider 
       throw new Error("LOCAL_OPERATOR_TOKEN must be a unique token of at least 32 characters");
     }
     const operatorId = options.operatorId ?? "local-operator";
-    if (!OPERATOR_ID_PATTERN.test(operatorId)) throw new Error("OPERATOR_ID must be a valid operator identifier");
+    if (!SAFE_IDENTIFIER_PATTERN.test(operatorId)) throw new Error("OPERATOR_ID must be a valid operator identifier");
     this.expected = new TextEncoder().encode(options.token);
     this.actorId = operatorId;
   }

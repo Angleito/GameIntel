@@ -12,8 +12,7 @@
   "dependencies": {
     "@gameintel/contracts": "workspace:*",
     "@gameintel/core": "workspace:*",
-    "postgres": "^3.4.5",
-    "zod": "^3.24.2"
+    "postgres": "^3.4.5"
   },
   "devDependencies": {
     "@gameintel/adapter-contract-tests": "workspace:*"

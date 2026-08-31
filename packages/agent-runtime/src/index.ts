@@ -151,15 +151,3 @@ export class PiArticleDraftRuntime {
     }
   }
 }
-
-export class MockArticleDraftRuntime {
-  async draft(packet: ResearchPacket): Promise<ArticleDraft> {
-    return ArticleDraftSchema.parse({
-      title: `Research draft: ${packet.collectionId}`,
-      description: "Synthetic draft generated from a validated research packet.",
-      summary: "This draft is awaiting human source and editorial review.",
-      confirmed: packet.claims.map((claim) => `${claim.subject} ${claim.predicate} ${claim.value}`),
-      unknowns: ["Independent reproduction is still required."],
-    });
-  }
-}

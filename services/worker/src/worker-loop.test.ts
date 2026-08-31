@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/postgres";
+import { IngestionLeaseLostError, type IngestionJob } from "@gameintel/contracts";
 import { runWorkerLoop, retryableWorkerError, type WorkerLeaseDeps } from "./worker-loop.ts";
 
 function fakeJob(jobKey: string): IngestionJob {

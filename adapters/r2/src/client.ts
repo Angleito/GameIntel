@@ -1,6 +1,5 @@
 // S3-compatible client for Cloudflare R2. Generic SigV4 signing over HTTPS
-// with no external dependencies; used by the profile media publish tooling and
-// the R2ObjectStore adapter.
+// with no external dependencies; used by the profile media publish tooling.
 
 const REQUEST_TIMEOUT_MS = 15_000;
 

@@ -22,25 +22,20 @@
     "release:check:postgres": "GAMEINTEL_TEST_POSTGRES=true bun test adapters/postgres/src/adapter.test.ts adapters/postgres/src/privileges.test.ts",
     "operator": "bun run services/newsroom/src/cli.ts",
     "publish": "bun run services/publisher/src/index.ts",
-    "export": "bun run services/publisher/src/index.ts",
     "media:sync": "bun run profiles/gta-vi/scripts/sync-media.ts",
     "media:publish": "bun run profiles/gta-vi/scripts/publish-media.ts"
   },
-"dependencies": {
-    "@gameintel/adapter-contract-tests": "workspace:*",
+  "dependencies": {
     "@gameintel/config": "workspace:*",
-    "@gameintel/core": "workspace:*",
+    "@gameintel/contracts": "workspace:*",
+    "@gameintel/in-memory": "workspace:*",
     "@gameintel/output": "workspace:*",
     "@gameintel/pipeline": "workspace:*",
     "@gameintel/postgres": "workspace:*",
-    "@gameintel/r2": "workspace:*",
-    "hono": "^4.7.2",
-    "postgres": "^3.4.5",
-    "zod": "^3.24.2"
+    "@gameintel/r2": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "astro": "^7.2.9",
     "typescript": "^5.8.2"
   }
 }

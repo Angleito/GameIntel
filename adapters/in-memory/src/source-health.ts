@@ -1,4 +1,5 @@
 import {
+  applySourceHealthDisable,
   applySourceHealthUpdate,
   type Clock,
   type SourceHealthRecord,
@@ -30,26 +31,7 @@ export class InMemorySourceHealthStore implements SourceHealthStore {
 
   async setSourceDisabled(sourceId: string, disabled: boolean, reason: string, actor: string): Promise<SourceHealthRecord> {
     const previous = this.records.get(sourceId) ?? null;
-    const now = this.clock.nowIso();
-    const record: SourceHealthRecord = disabled
-      ? {
-          sourceId,
-          status: previous?.status ?? "ok",
-          checkedAt: previous?.checkedAt ?? now,
-          message: previous?.message ?? null,
-          consecutiveFailures: previous?.consecutiveFailures ?? 0,
-          disabledAt: now,
-          disabledReason: reason,
-        }
-      : {
-          sourceId,
-          status: "ok",
-          checkedAt: previous?.checkedAt ?? now,
-          message: previous?.message ?? null,
-          consecutiveFailures: 0,
-          disabledAt: null,
-          disabledReason: null,
-        };
+    const record = applySourceHealthDisable(sourceId, previous, disabled, reason, this.clock.nowIso());
     this.records.set(sourceId, record);
     return record;
   }

@@ -23,7 +23,6 @@ export * from "./pacing.ts";
 export * from "./persistence.ts";
 export * from "./source-health.ts";
 export * from "./store.ts";
-export { RegistryPollingScheduler } from "@gameintel/contracts";
 
 export type InMemoryRuntime = GameIntelRuntime & { memory: MemoryStore };
 

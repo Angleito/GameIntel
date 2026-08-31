@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { Database, Statement } from "bun:sqlite";
 import {
   IngestionLeaseLostError,
+  SAFE_IDENTIFIER_PATTERN,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
   type AnalysisRunInfo,
@@ -31,6 +32,8 @@ import {
   MediaCatalogSchema,
   mediaCoverScore,
   publicSubmissionFingerprint,
+  retainedExcerpt,
+  retentionUntilMs,
   SourcePolicySchema,
   SourceStrengthSchema,
   toSafeArticle,
@@ -185,8 +188,8 @@ export class SQLitePersistence implements GameIntelPersistence {
     submittedBy: string | null = null,
   ): Promise<InsertedSourceItem> {
     const now = isoNow();
-    const excerpt = policy.retainRawTextDays === 0 ? "" : item.text.slice(0, policy.mayStoreFullText ? 4_000 : 1_000);
-    const retentionUntil = Date.now() + policy.retainRawTextDays * 86_400_000;
+    const excerpt = retainedExcerpt(item.text, policy);
+    const retentionUntil = retentionUntilMs(policy, Date.now());
 
     const currentRevisionId = (sourceItemId: string): string => {
       const current = this.get<{ id: string }>(
@@ -1349,7 +1352,7 @@ const published = await this.getArticle(articleId);
 
   private moderationActor(actorId: string): string {
     const actor = actorId.trim();
-    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(actor)) throw new Error("A valid moderation actor is required");
+    if (!SAFE_IDENTIFIER_PATTERN.test(actor)) throw new Error("A valid moderation actor is required");
     return actor;
   }
 

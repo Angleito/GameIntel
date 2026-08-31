@@ -33,4 +33,4 @@ export function prepareIngestion(
   return { item, rawHash, lineageId, newsworthiness, disposition: dispositionFor(newsworthiness, existingArticleId) };
 }
 
-export { CLAIM_EXTRACTOR_VERSION, canonicalClaimKey, extractClaims };
+export { CLAIM_EXTRACTOR_VERSION, extractClaims };

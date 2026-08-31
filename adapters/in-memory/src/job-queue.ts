@@ -1,5 +1,8 @@
 import {
   IngestionLeaseLostError,
+  SAFE_IDENTIFIER_PATTERN,
+  ingestJobDedupeKey,
+  jobRetryBackoffMs,
   type Clock,
   type IdGenerator,
   type IngestionJob,
@@ -10,7 +13,7 @@ import {
   type SourceIngestEnqueueResult,
   type SourceIngestJobPayload,
 } from "@gameintel/contracts";
-import { canonicalizeUrl, hashText, PublicHttpUrlSchema } from "@gameintel/core";
+import { canonicalizeUrl, PublicHttpUrlSchema } from "@gameintel/core";
 import type { JobRecord, WorkerHeartbeatRecord } from "./store.ts";
 
 // Shared lease state between the in-memory job queue and the in-memory
@@ -75,7 +78,7 @@ export class InMemoryJobQueue implements JobQueue {
     const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
     const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
     const jobKey = this.ids.generate("source_ingest");
-    const dedupeKey = `source_ingest:${collectionId}:${sourceId}:${hashText(url)}`;
+    const dedupeKey = ingestJobDedupeKey("source_ingest", collectionId, sourceId, url);
     for (const existing of this.jobs.values()) {
       if (existing.dedupeKey === dedupeKey && (existing.status === "queued" || existing.status === "running")) {
         return { jobKey: existing.jobKey, dedupeKey, duplicate: true, status: existing.status };
@@ -111,7 +114,7 @@ export class InMemoryJobQueue implements JobQueue {
     const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
     const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
     const jobKey = this.ids.generate("source_discover");
-    const dedupeKey = `source_discover:${collectionId}:${sourceId}:${hashText(feedUrl)}`;
+    const dedupeKey = ingestJobDedupeKey("source_discover", collectionId, sourceId, feedUrl);
     for (const existing of this.jobs.values()) {
       if (existing.dedupeKey === dedupeKey && (existing.status === "queued" || existing.status === "running")) {
         return { jobKey: existing.jobKey, dedupeKey, duplicate: true, status: existing.status };
@@ -198,7 +201,7 @@ export class InMemoryJobQueue implements JobQueue {
     if (!job || job.status !== "running" || job.leaseToken !== leaseToken) throw new IngestionLeaseLostError(jobKey);
     const now = this.clock.now();
     const terminal = !retryable || job.attempts >= job.maxAttempts;
-    const delayMs = Math.min(300_000, 1_000 * 2 ** Math.max(0, job.attempts - 1));
+    const delayMs = jobRetryBackoffMs(job.attempts);
     const message = error instanceof Error ? error.message : String(error);
     job.status = terminal ? "dead" : "queued";
     job.lastError = message.slice(0, 2_000);
@@ -260,7 +263,7 @@ export class InMemoryJobQueue implements JobQueue {
     lastError?: string | null;
   }): Promise<void> {
     const workerId = input.workerId.trim();
-    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(workerId)) throw new Error("A valid ingestion worker id is required");
+    if (!SAFE_IDENTIFIER_PATTERN.test(workerId)) throw new Error("A valid ingestion worker id is required");
     const currentJobKey = input.currentJobKey ?? null;
     const retainLastError = input.lastError === undefined;
     const lastError = input.lastError?.slice(0, 2_000) ?? null;

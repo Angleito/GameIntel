@@ -14,10 +14,6 @@
     "@gameintel/controlled-fetch": "workspace:*",
     "@gameintel/core": "workspace:*",
     "@mozilla/readability": "^0.6.0",
-    "linkedom": "^0.18.13",
-    "yaml": "^2.9.0"
-  },
-  "devDependencies": {
-    "@gameintel/adapter-contract-tests": "workspace:*"
+    "linkedom": "^0.18.13"
   }
 }

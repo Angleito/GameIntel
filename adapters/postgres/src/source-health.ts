@@ -1,4 +1,5 @@
 import {
+  applySourceHealthDisable,
   applySourceHealthUpdate,
   type SourceHealthRecord,
   type SourceHealthStatus,
@@ -106,26 +107,7 @@ export class PostgresSourceHealthStore implements SourceHealthStore {
 
   async setSourceDisabled(sourceId: string, disabled: boolean, reason: string, actor: string): Promise<SourceHealthRecord> {
     const previous = await this.getRecord(sourceId);
-    const now = new Date().toISOString();
-    const record: SourceHealthRecord = disabled
-      ? {
-          sourceId,
-          status: previous?.status ?? "ok",
-          checkedAt: previous?.checkedAt ?? now,
-          message: previous?.message ?? null,
-          consecutiveFailures: previous?.consecutiveFailures ?? 0,
-          disabledAt: now,
-          disabledReason: reason,
-        }
-      : {
-          sourceId,
-          status: "ok",
-          checkedAt: previous?.checkedAt ?? now,
-          message: previous?.message ?? null,
-          consecutiveFailures: 0,
-          disabledAt: null,
-          disabledReason: null,
-        };
+    const record = applySourceHealthDisable(sourceId, previous, disabled, reason, new Date().toISOString());
     await this.upsert(record);
     return record;
   }

@@ -1,5 +1,8 @@
 import {
   IngestionLeaseLostError,
+  SAFE_IDENTIFIER_PATTERN,
+  ingestJobDedupeKey,
+  jobRetryBackoffMs,
   type Clock,
   type IdGenerator,
   type IngestionJob,
@@ -10,7 +13,7 @@ import {
   type SourceIngestEnqueueResult,
   type SourceIngestJobPayload,
 } from "@gameintel/contracts";
-import { canonicalizeUrl, hashText, PublicHttpUrlSchema } from "@gameintel/core";
+import { canonicalizeUrl, PublicHttpUrlSchema } from "@gameintel/core";
 import type { Database } from "bun:sqlite";
 import { json, parseJson } from "./database.ts";
 
@@ -70,7 +73,7 @@ export class SQLiteJobQueue implements JobQueue {
     const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
     const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
     const jobKey = this.ids.generate("source_ingest");
-    const dedupeKey = `source_ingest:${collectionId}:${sourceId}:${hashText(url)}`;
+    const dedupeKey = ingestJobDedupeKey("source_ingest", collectionId, sourceId, url);
     const now = this.clock.now();
     const existing = this.db.query(
       "SELECT job_key, status FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running') LIMIT 1",
@@ -90,7 +93,7 @@ export class SQLiteJobQueue implements JobQueue {
     const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
     const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
     const jobKey = this.ids.generate("source_discover");
-    const dedupeKey = `source_discover:${collectionId}:${sourceId}:${hashText(feedUrl)}`;
+    const dedupeKey = ingestJobDedupeKey("source_discover", collectionId, sourceId, feedUrl);
     const now = this.clock.now();
     const existing = this.db.query(
       "SELECT job_key, status FROM jobs WHERE dedupe_key = ? AND status IN ('queued', 'running') LIMIT 1",
@@ -155,7 +158,7 @@ export class SQLiteJobQueue implements JobQueue {
     if (!row) throw new IngestionLeaseLostError(jobKey);
     const now = this.clock.now();
     const terminal = !retryable || row.attempts >= row.max_attempts;
-    const delayMs = Math.min(300_000, 1_000 * 2 ** Math.max(0, row.attempts - 1));
+    const delayMs = jobRetryBackoffMs(row.attempts);
     const message = error instanceof Error ? error.message : String(error);
     this.db.query(
       `UPDATE jobs SET status = ?, last_error = ?, available_at = ?, lease_token = NULL, lease_expires_at = NULL,
@@ -218,7 +221,7 @@ export class SQLiteJobQueue implements JobQueue {
     lastError?: string | null;
   }): Promise<void> {
     const workerId = input.workerId.trim();
-    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(workerId)) throw new Error("A valid ingestion worker id is required");
+    if (!SAFE_IDENTIFIER_PATTERN.test(workerId)) throw new Error("A valid ingestion worker id is required");
     const currentJobKey = input.currentJobKey ?? null;
     const retainLastError = input.lastError === undefined;
     const lastError = input.lastError?.slice(0, 2_000) ?? null;

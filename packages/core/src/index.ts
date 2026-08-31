@@ -55,6 +55,14 @@ export const SourcePolicySchema = z.object({
 });
 export type SourcePolicy = z.infer<typeof SourcePolicySchema>;
 
+export function retainedExcerpt(text: string, policy: Pick<SourcePolicy, "retainRawTextDays" | "mayStoreFullText">): string {
+  return policy.retainRawTextDays === 0 ? "" : text.slice(0, policy.mayStoreFullText ? 4_000 : 1_000);
+}
+
+export function retentionUntilMs(policy: Pick<SourcePolicy, "retainRawTextDays">, nowMs: number): number {
+  return nowMs + policy.retainRawTextDays * 86_400_000;
+}
+
 export const InputKindSchema = z.enum(["url", "rss", "pasted_text", "local_file", "manual_fixture"]);
 export type InputKind = z.infer<typeof InputKindSchema>;
 

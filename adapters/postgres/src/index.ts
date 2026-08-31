@@ -1,6 +1,11 @@
 import postgres, { type Sql } from "postgres";
 import {
+  SAFE_IDENTIFIER_PATTERN,
+  computeFetchSlot,
+  cryptoIdGenerator,
+  ingestJobDedupeKey,
   IngestionLeaseLostError,
+  jobRetryBackoffMs,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
 } from "@gameintel/contracts";
@@ -33,7 +38,6 @@ import {
   deriveClaimState,
   EvidenceReviewDecisionSchema,
   evidenceReviewGate,
-  hashText,
   type Evidence,
   type EvidenceReviewDecision,
   type GameProfile,
@@ -44,6 +48,8 @@ import {
   ProvenanceRelationshipSchema,
   type ProvenanceRelationship,
   publicSubmissionFingerprint,
+  retainedExcerpt,
+  retentionUntilMs,
   PublicHttpUrlSchema,
   PublicSubmissionSchema,
   type PublicSubmission,
@@ -140,7 +146,7 @@ export function createDb(url = process.env.DATABASE_URL): Db {
   return postgres(url, { max: 5, idle_timeout: 20 });
 }
 
-const id = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
+const id = cryptoIdGenerator.generate;
 
 export async function ensureGame(db: Db, profile: GameProfile): Promise<void> {
   await db`
@@ -166,15 +172,6 @@ export async function ensureSource(db: Db, source: {
       policy = EXCLUDED.policy,
       enabled = EXCLUDED.enabled
   `;
-}
-
-function retainedExcerpt(text: string, policy: SourcePolicy): string {
-  if (policy.retainRawTextDays === 0) return "";
-  return text.slice(0, policy.mayStoreFullText ? 4_000 : 1_000);
-}
-
-function retentionUntil(policy: SourcePolicy): Date {
-  return new Date(Date.now() + policy.retainRawTextDays * 86_400_000);
 }
 
 async function provenanceFamilyForSourceItem(
@@ -276,7 +273,7 @@ export async function insertSourceItem(
         title = ${item.title}, text_excerpt = ${excerpt}, raw_hash = ${rawHash}, lineage_id = ${lineageId},
         source_strength = ${item.sourceStrength}, publication_mode = ${item.publicationMode}, discovered_at = ${item.discoveredAt},
         published_at = ${item.publishedAt}, input_kind = ${item.inputKind}, content_type = ${item.contentType}, language = ${item.language},
-        retention_until = ${retentionUntil(policy)}, provenance_status = 'normalized', content_purged_at = null,
+        retention_until = ${new Date(retentionUntilMs(policy, Date.now()))}, provenance_status = 'normalized', content_purged_at = null,
         submitted_by = ${submittedBy}
       WHERE id = ${itemId}
     `;
@@ -296,7 +293,7 @@ export async function insertSourceItem(
   const itemId = id("src");
   await db`
     INSERT INTO source_items (id, source_id, game_id, external_id, url, canonical_url, title, text_excerpt, raw_hash, lineage_id, source_strength, publication_mode, public_visibility, discovered_at, published_at, input_kind, content_type, language, retention_until, provenance_status, submitted_by)
-    VALUES (${itemId}, ${item.sourceId}, ${item.collectionId}, ${item.externalId}, ${item.url}, ${item.url.startsWith("urn:") ? null : item.url}, ${item.title}, ${excerpt}, ${rawHash}, ${lineageId}, ${item.sourceStrength}, ${item.publicationMode}, false, ${item.discoveredAt}, ${item.publishedAt}, ${item.inputKind}, ${item.contentType}, ${item.language}, ${retentionUntil(policy)}, 'normalized', ${submittedBy})
+    VALUES (${itemId}, ${item.sourceId}, ${item.collectionId}, ${item.externalId}, ${item.url}, ${item.url.startsWith("urn:") ? null : item.url}, ${item.title}, ${excerpt}, ${rawHash}, ${lineageId}, ${item.sourceStrength}, ${item.publicationMode}, false, ${item.discoveredAt}, ${item.publishedAt}, ${item.inputKind}, ${item.contentType}, ${item.language}, ${new Date(retentionUntilMs(policy, Date.now()))}, 'normalized', ${submittedBy})
   `;
   await db`
     INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content)
@@ -705,18 +702,17 @@ export async function linkSourceItemProvenance(db: Db, input: {
 }
 
 function parseJob(row: Record<string, unknown>): IngestionJob {
-  const json = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(value) as T : value as T;
   return {
     jobKey: row.job_key as string,
     jobType: row.job_type as string,
     status: row.status as string,
-    payload: json<SourceIngestJobPayload>(row.payload),
+    payload: parseStoredJson<SourceIngestJobPayload>(row.payload),
     attempts: Number(row.attempts),
     maxAttempts: Number(row.max_attempts),
     leaseToken: row.lease_token as string | null,
     leaseExpiresAt: row.lease_expires_at ? new Date(row.lease_expires_at as string).toISOString() : null,
     lastError: row.last_error as string | null,
-    result: row.result === null ? null : json(row.result),
+    result: row.result === null ? null : parseStoredJson(row.result),
   };
 }
 
@@ -738,7 +734,7 @@ export async function heartbeatIngestionWorker(db: Db, input: {
   lastError?: string | null;
 }): Promise<void> {
   const workerId = input.workerId.trim();
-  if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(workerId)) throw new Error("A valid ingestion worker id is required");
+  if (!SAFE_IDENTIFIER_PATTERN.test(workerId)) throw new Error("A valid ingestion worker id is required");
   const currentJobKey = input.currentJobKey ?? null;
   const retainLastError = input.lastError === undefined;
   const lastError = input.lastError?.slice(0, 2_000) ?? null;
@@ -818,7 +814,7 @@ export async function enqueueSourceIngestJob(db: Db, input: SourceIngestJobPaylo
   const url = canonicalizeUrl(PublicHttpUrlSchema.parse(input.url));
   const payload: SourceIngestJobPayload = { collectionId, sourceId, url, profileId: input.profileId?.trim() || undefined };
   const jobKey = id("source_ingest");
-  const dedupeKey = `source_ingest:${collectionId}:${sourceId}:${hashText(url)}`;
+  const dedupeKey = ingestJobDedupeKey("source_ingest", collectionId, sourceId, url);
   const inserted = await db`
     INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at, dedupe_key)
     VALUES (${jobKey}, 'source_ingest', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now(), ${dedupeKey})
@@ -843,7 +839,7 @@ export async function enqueueSourceDiscoverJob(db: Db, input: SourceDiscoverJobP
   const feedUrl = canonicalizeUrl(PublicHttpUrlSchema.parse(input.feedUrl));
   const payload: SourceDiscoverJobPayload = { collectionId, sourceId, feedUrl, profileId: input.profileId?.trim() || undefined };
   const jobKey = id("source_discover");
-  const dedupeKey = `source_discover:${collectionId}:${sourceId}:${hashText(feedUrl)}`;
+  const dedupeKey = ingestJobDedupeKey("source_discover", collectionId, sourceId, feedUrl);
   const inserted = await db`
     INSERT INTO jobs (job_key, job_type, status, payload, priority, max_attempts, available_at, updated_at, dedupe_key)
     VALUES (${jobKey}, 'source_discover', 'queued', ${JSON.stringify(payload)}, 100, 5, now(), now(), ${dedupeKey})
@@ -942,7 +938,7 @@ export async function failIngestionJob(db: Db, jobKey: string, leaseToken: strin
     const attempts = Number(jobs[0].attempts);
     const maxAttempts = Number(jobs[0].max_attempts);
     const terminal = !retryable || attempts >= maxAttempts;
-    const delayMs = Math.min(300_000, 1_000 * 2 ** Math.max(0, attempts - 1));
+    const delayMs = jobRetryBackoffMs(attempts);
     const message = error instanceof Error ? error.message : String(error);
     await transaction`
       UPDATE jobs
@@ -973,7 +969,7 @@ export async function getIngestionJob(db: Db, jobKey: string): Promise<Ingestion
 }
 
 export async function acquireSourceFetchSlot(db: Db, sourceId: string, requestsPerMinute: number): Promise<number> {
-  if (!sourceId.trim() || !Number.isFinite(requestsPerMinute) || requestsPerMinute <= 0) {
+  if (!sourceId.trim()) {
     throw new Error("Source fetch pacing requires a positive request rate");
   }
   return inTransaction(db, async (transaction) => {
@@ -984,13 +980,14 @@ export async function acquireSourceFetchSlot(db: Db, sourceId: string, requestsP
     `;
     const rows = await transaction`SELECT next_allowed_at FROM source_fetch_pacing WHERE source_id = ${sourceId} FOR UPDATE`;
     const nextAllowedAt = new Date(rows[0].next_allowed_at as string).getTime();
-    const scheduledAt = Math.max(Date.now(), nextAllowedAt);
+    const now = Date.now();
+    const { scheduledAtMs, waitMs } = computeFetchSlot(now, nextAllowedAt, requestsPerMinute);
     await transaction`
       UPDATE source_fetch_pacing
-      SET next_allowed_at = ${new Date(scheduledAt + 60_000 / requestsPerMinute)}, updated_at = now()
+      SET next_allowed_at = ${new Date(scheduledAtMs)}, updated_at = now()
       WHERE source_id = ${sourceId}
     `;
-    return Math.max(0, scheduledAt - Date.now());
+    return waitMs;
   });
 }
 
@@ -1089,15 +1086,14 @@ export async function listClaimsForArticle(db: Db, articleId: string): Promise<i
 }
 
 function parseArticle(row: Record<string, unknown>): Article {
-  const jsonValue = <T>(value: unknown): T => typeof value === "string" ? JSON.parse(value) as T : value as T;
   return ArticleSchema.parse({
     id: row.id, collectionId: row.game_id, slug: row.slug, title: row.title, seoTitle: row.seo_title,
-    description: row.description, body: ArticleBodySchema.parse(jsonValue(row.body)), status: row.status,
+    description: row.description, body: ArticleBodySchema.parse(parseStoredJson(row.body)), status: row.status,
     newsworthiness: Number(row.newsworthiness), confidence: Number(row.confidence),
     sourceReviewCompleted: row.source_review_completed, editorReviewCompleted: row.editor_review_completed,
     articleSourcesComplete: row.article_sources_complete,
-    sourceRefs: jsonValue(row.source_refs ?? []),
-    coverMedia: row.cover_media ? ArticleCoverMediaSchema.parse(jsonValue(row.cover_media)) : null,
+    sourceRefs: parseStoredJson(row.source_refs ?? []),
+    coverMedia: row.cover_media ? ArticleCoverMediaSchema.parse(parseStoredJson(row.cover_media)) : null,
     approvedBy: row.approved_by,
     publishedAt: row.published_at ? new Date(row.published_at as string).toISOString() : null,
     updatedAt: row.updated_at ? new Date(row.updated_at as string).toISOString() : null,
@@ -1829,7 +1825,7 @@ function moderationSubmission(row: Record<string, unknown>): PublicSubmissionFor
 
 function moderationActor(actorId: string): string {
   const actor = actorId.trim();
-  if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(actor)) throw new Error("A valid moderation actor is required");
+  if (!SAFE_IDENTIFIER_PATTERN.test(actor)) throw new Error("A valid moderation actor is required");
   return actor;
 }
 

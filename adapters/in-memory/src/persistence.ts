@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import {
   IngestionLeaseLostError,
+  SAFE_IDENTIFIER_PATTERN,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
   type AnalysisRunInfo,
@@ -31,6 +32,8 @@ import {
   MediaCatalogSchema,
   mediaCoverScore,
   publicSubmissionFingerprint,
+  retainedExcerpt,
+  retentionUntilMs,
   SourcePolicySchema,
   SourceStrengthSchema,
   toSafeArticle,
@@ -159,8 +162,8 @@ export class InMemoryPersistence implements GameIntelPersistence {
     submittedBy: string | null = null,
   ): Promise<InsertedSourceItem> {
     const now = this.clock.nowIso();
-    const excerpt = policy.retainRawTextDays === 0 ? "" : item.text.slice(0, policy.mayStoreFullText ? 4_000 : 1_000);
-    const retentionUntil = this.clock.now() + policy.retainRawTextDays * 86_400_000;
+    const excerpt = retainedExcerpt(item.text, policy);
+    const retentionUntil = retentionUntilMs(policy, this.clock.now());
 
     const currentRevisionId = (sourceItemId: string): string => {
       const current = [...this.store.revisions.values()]
@@ -1377,7 +1380,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     notes?: string;
   }): Promise<{ id: string; state: import("@gameintel/core").PublicSubmissionReviewDecision }> {
     const actorId = input.actorId.trim();
-    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(actorId)) throw new Error("A valid moderation actor is required");
+    if (!SAFE_IDENTIFIER_PATTERN.test(actorId)) throw new Error("A valid moderation actor is required");
     const notes = input.notes?.trim() ?? "";
     if (notes.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
     const submission = this.store.publicSubmissions.get(input.submissionId);
@@ -1413,7 +1416,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
 
   async markPublicSubmissionPromoted(input: { submissionId: string; sourceItemId: string; actorId: string; notes?: string }): Promise<void> {
     const actorId = input.actorId.trim();
-    if (!/^[a-zA-Z0-9._:-]{1,128}$/.test(actorId)) throw new Error("A valid moderation actor is required");
+    if (!SAFE_IDENTIFIER_PATTERN.test(actorId)) throw new Error("A valid moderation actor is required");
     const notes = input.notes?.trim() ?? "";
     if (notes.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
     const submission = this.store.publicSubmissions.get(input.submissionId);

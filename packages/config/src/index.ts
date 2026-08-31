@@ -193,11 +193,6 @@ export function sourceRegistryPath(profileId?: string): URL {
 export function mediaSourcePath(profileId?: string): URL {
   return profileFile(resolvedProfileId(profileId), "media-source.json");
 }
-
 export function mediaShowcasePath(profileId?: string): URL {
   return profileFile(resolvedProfileId(profileId), "media-showcase.json");
-}
-
-export function validateSourcePolicy(policy: unknown) {
-  return SourcePolicySchema.parse(policy);
 }
