@@ -80,6 +80,11 @@ describe("recordJobHealth", () => {
     });
     expect(store.records).toEqual([]);
   });
+  test("never records proxy/transport failures", async () => {
+    const store = new FakeSourceHealthStore();
+    await recordJobHealth({ sourceHealth: store, clock: fakeClock, sourceId: "contract-source", job: job(1), error: new SourceFetchError("transport_unavailable", "Source fetch failed: fetch failed") });
+    expect(store.records).toEqual([]);
+  });
 
   test("never records application failures", async () => {
     const store = new FakeSourceHealthStore();

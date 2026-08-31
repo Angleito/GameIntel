@@ -183,6 +183,10 @@ export const GameBuildSchema = z.object({
   platform: z.string().nullable().default(null),
   mode: z.string().nullable().default(null),
   region: z.string().nullable().default(null),
+  // Numeric dot-separated constraint: deliberate, keeps compareBuildVersions'
+  // segment-wise parse safe and predictable. NOT the permanent generic version
+  // model — profiles may later adopt prerelease SemVer or non-numeric
+  // identifiers by replacing the comparator, not by relaxing this regex.
   version: z.string().min(1).regex(/^\d+(?:\.\d+)*$/, "Expected a numeric dot-separated build version"),
   releasedAt: z.string().datetime().nullable().default(null),
   active: z.boolean().default(true),
@@ -494,6 +498,12 @@ export const DiscoverySchema = z.object({
   confidence: z.number().min(0).max(1),
   newsworthiness: z.number().min(0).max(100),
   platforms: z.array(z.string()).default([]),
+  // Build versions validated for this discovery. Single-context invariant: all
+  // entries MUST belong to one applicability context (platform/mode/region).
+  // applyActiveBuildChange compares the list as one context, so a producer
+  // merging contexts could let a newer build on another platform mask a stale
+  // observation here. Producers must never merge contexts; retaining build
+  // id/platform/mode association is a later milestone.
   gameBuilds: z.array(z.string()).default([]),
   progressionContext: z.string().nullable().default(null),
   conditions: ConditionsSchema,
@@ -590,6 +600,7 @@ export function applyActiveBuildChange(discovery: Discovery, currentBuild: strin
   if (!currentBuild || discovery.gameBuilds.length === 0) return discovery;
   // Demote only when the newest recorded build is superseded: a discovery
   // that already covers the current build is still valid.
+  // Precondition: all gameBuilds share one applicability context (see DiscoverySchema).
   const newestBuild = discovery.gameBuilds.reduce((newest, build) => (compareBuildVersions(build, newest) > 0 ? build : newest));
   const superseded = compareBuildVersions(newestBuild, currentBuild) < 0;
   if (superseded && discovery.status === "verified") return { ...discovery, status: "needs_retest" };

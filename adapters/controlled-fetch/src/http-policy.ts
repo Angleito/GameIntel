@@ -3,12 +3,15 @@ import { isIP } from "node:net";
 import type { SourcePolicy } from "@gameintel/core";
 import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
-// Typed source-availability failures. Only `source_unavailable` counts against
-// source health: network-level failures (DNS/connect/TLS/timeout) and HTTP >=
-// 500 mean the external source itself is down. `url_not_found` (4xx) is a bad
-// URL, `response` (redirect/content-type/size violations) is a malformed
-// response — neither is a source outage. Policy errors stay plain `Error`.
-export type SourceFetchErrorKind = "source_unavailable" | "url_not_found" | "response";
+// Typed source-availability failures. `source_unavailable` counts against
+// source health: source-DNS resolution failure and HTTP >= 500 (origin
+// unreachable through the proxy). `transport_unavailable` is any fetch()
+// rejection through the configured egress proxy — proxy outage, proxy
+// connection failure, TLS, abort/timeout — never a proven origin outage, and
+// never counted. `url_not_found` (4xx) is a bad URL, `response` (redirect/
+// content-type/size violations) is a malformed response — neither counts.
+// Policy errors stay plain `Error`.
+export type SourceFetchErrorKind = "source_unavailable" | "transport_unavailable" | "url_not_found" | "response";
 
 export class SourceFetchError extends Error {
   readonly kind: SourceFetchErrorKind;
@@ -67,7 +70,14 @@ const defaultResolver: DnsResolver = (hostname) => lookup(hostname, { all: true 
 
 export async function assertPublicHost(hostname: string, resolver: DnsResolver = defaultResolver): Promise<void> {
   if (!hostname || hostname === "localhost" || hostname.endsWith(".local")) throw new Error("Private hostnames are not permitted");
-  const records = await resolver(hostname);
+  let records: Array<{ address: string; family: number }>;
+  try {
+    records = await resolver(hostname);
+  } catch (error) {
+    // DNS resolution failure: the source hostname cannot be resolved, so the
+    // source itself is unavailable.
+    throw new SourceFetchError("source_unavailable", `Source DNS resolution failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+  }
   if (!records.length || records.some((record) => privateIp(record.address))) throw new Error("Private or link-local address is not permitted");
 }
 
@@ -134,9 +144,13 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy, reso
         proxy: proxy.toString(),
       } as RequestInit & { proxy: string });
     } catch (error) {
-      // Network-level failure (DNS/connect/TLS/timeout): the source itself is
-      // unavailable. Policy/proxy errors were thrown before this point.
-      throw new SourceFetchError("source_unavailable", `Source fetch failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      // Every request goes through the configured egress proxy; a rejection
+      // here is proxy/infrastructure/local transport failure (proxy
+      // unreachable or refused, TLS, abort/timeout) — never a proven origin
+      // outage. Origin failures surface as proxy HTTP responses and are
+      // classified by status above. Transport failures never count against
+      // source health.
+      throw new SourceFetchError("transport_unavailable", `Source fetch failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
     if (response.status >= 300 && response.status < 400) {
       if (++redirects > (policy.maxRedirects ?? 3)) throw new SourceFetchError("response", "Too many redirects");

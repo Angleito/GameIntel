@@ -75,17 +75,29 @@ describe("typed source fetch failures", () => {
     );
   });
 
-  test("classifies network-level fetch rejections as source_unavailable", async () => {
+  test("classifies proxy/transport fetch rejections as transport_unavailable", async () => {
     await withFetchStub(
       async () => { throw new TypeError("fetch failed"); },
       async () => {
         const error = await fetchError("http://contract.example.com/unreachable");
         expect(error).toBeInstanceOf(SourceFetchError);
-        expect((error as SourceFetchError).kind).toBe("source_unavailable");
+        expect((error as SourceFetchError).kind).toBe("transport_unavailable");
         expect((error as Error).message).toContain("fetch failed");
         expect((error as SourceFetchError).status).toBeNull();
       },
     );
+  });
+
+  test("classifies DNS resolution failures as source_unavailable", async () => {
+    const dnsFailure = async () => { throw new Error("getaddrinfo ENOTFOUND contract.example.com"); };
+    const error = await fetchPermittedUrl("http://contract.example.com/report", policy(), dnsFailure).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(SourceFetchError);
+    expect((error as SourceFetchError).kind).toBe("source_unavailable");
+    expect((error as Error).message).toContain("DNS");
+    expect((error as SourceFetchError).status).toBeNull();
   });
 
   test("classifies unsupported content types as response failures", async () => {

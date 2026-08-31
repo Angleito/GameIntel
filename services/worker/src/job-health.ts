@@ -5,6 +5,8 @@ import { SourceFetchError } from "@gameintel/controlled-fetch";
 // health observations; application failures (persistence, queue, parser) never
 // count against the external source. Repeated attempts of the same job are not
 // independent checks: a down is recorded only on the job's first execution.
+// Transport/infrastructure failures (proxy unreachable, local fetch rejection)
+// never count — only failures proven to be the origin's.
 export function isSourceUnavailable(error: unknown): boolean {
   return error instanceof SourceFetchError && error.kind === "source_unavailable";
 }
