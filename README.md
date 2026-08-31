@@ -93,7 +93,7 @@ Implemented adapters:
 | SQLite portability persistence/jobs/pacing | `@gameintel/sqlite` | `bun:sqlite` portability proof; single-process only |
 | Local filesystem object store | `@gameintel/local-filesystem` | Zero-cost local storage |
 | Controlled-fetch transport | `@gameintel/controlled-fetch` | SSRF hardening, redirects, limits, pacing (Squid is only the reference egress proxy) |
-| Cloudflare R2 object store | `@gameintel/r2` | S3-compatible SigV4 client + ObjectStore adapter |
+| Cloudflare R2 SigV4 client | `@gameintel/r2` | S3-compatible signing client for profile media publishing |
 | Static operator identity / local abuse protection | `@gameintel/newsroom` | Constant-time token auth; HMAC submission identity hashing |
 
 See `docs/CAPABILITIES.md` for the full capability description.

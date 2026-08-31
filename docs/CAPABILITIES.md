@@ -93,10 +93,9 @@ worker performs controlled fetches.
 ## Object storage
 
 `@gameintel/local-filesystem` provides `LocalFilesystemObjectStore` for the
-zero-cost local environment. `@gameintel/r2` provides a Cloudflare R2 adapter
-(S3-compatible SigV4 client plus an `R2ObjectStore` satisfying the
-`ObjectStore` contract). Future implementations may include S3, MinIO, or
-other compatible stores.
+zero-cost local environment. `@gameintel/r2` provides the Cloudflare R2
+S3-compatible SigV4 client used by the profile media publishing tooling. Future
+implementations may include S3, MinIO, or other compatible stores.
 
 ## Identity and abuse protection
 

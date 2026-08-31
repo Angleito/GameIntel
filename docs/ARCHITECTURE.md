@@ -14,7 +14,6 @@ packages/                  reusable domain and capabilities
   config/                  project, profile, and source-registry loading
   pipeline/                reusable ingestion preparation and disposition
   source-sdk/              SourceAdapter implementations and parsing
-  ai-runtime/              downstream AI drafting wrapper (optional)
   output/                  versioned JSON artifacts and output writers
   adapter-contract-tests/  portable conformance suites
 adapters/                  replaceable infrastructure implementations
@@ -22,7 +21,7 @@ adapters/                  replaceable infrastructure implementations
   in-memory/               in-memory persistence, queue, pacing, object store
   local-filesystem/        local filesystem object store
   controlled-fetch/        HTTP controlled-fetch transport and policy engine
-  r2/                      Cloudflare R2 object-store adapter (SigV4 client)
+  r2/                      Cloudflare R2 S3-compatible SigV4 client
 profiles/                  game-specific data and tooling
   gta-vi/                  the first showcase profile (sources, media rules)
 services/
