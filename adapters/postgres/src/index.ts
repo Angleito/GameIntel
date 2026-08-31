@@ -914,10 +914,10 @@ async function acquireSourceFetchSlot(db: Db, sourceId: string, requestsPerMinut
     const rows = await transaction`SELECT next_allowed_at FROM source_fetch_pacing WHERE source_id = ${sourceId} FOR UPDATE`;
     const nextAllowedAt = new Date(rows[0].next_allowed_at as string).getTime();
     const now = Date.now();
-    const { scheduledAtMs, waitMs } = computeFetchSlot(now, nextAllowedAt, requestsPerMinute);
+    const { nextAllowedAtMs, waitMs } = computeFetchSlot(now, nextAllowedAt, requestsPerMinute);
     await transaction`
       UPDATE source_fetch_pacing
-      SET next_allowed_at = ${new Date(scheduledAtMs)}, updated_at = now()
+      SET next_allowed_at = ${new Date(nextAllowedAtMs)}, updated_at = now()
       WHERE source_id = ${sourceId}
     `;
     return waitMs;

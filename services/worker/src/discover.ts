@@ -43,8 +43,8 @@ function assertDiscoveryEntry(entry: RegistryEntry): void {
 }
 
 // Discovery job execution in the isolated ingestion worker: fetch the feed
-// through the controlled fetch transport (egress proxy, pacing, SSRF
-// hardening), parse its items, and enqueue bounded, validated item URLs as
+// through the controlled fetch transport (egress proxy and SSRF hardening),
+// parse its items, and enqueue bounded, validated item URLs as
 // source_ingest jobs. The queue deduplicates active item executions, and
 // completed items are safely re-refreshable later. The feed itself is never
 // ingested as an article.

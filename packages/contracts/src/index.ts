@@ -557,12 +557,15 @@ export function computeFetchSlot(
   nowMs: number,
   nextAllowedAtMs: number,
   requestsPerMinute: number,
-): { scheduledAtMs: number; waitMs: number } {
+): { nextAllowedAtMs: number; waitMs: number } {
   if (!Number.isFinite(requestsPerMinute) || requestsPerMinute <= 0) {
     throw new Error("Source fetch pacing requires a positive request rate");
   }
-  const scheduledAtMs = Math.max(nowMs, nextAllowedAtMs) + 60_000 / requestsPerMinute;
-  return { scheduledAtMs, waitMs: Math.max(0, scheduledAtMs - nowMs) };
+  const scheduledAtMs = Math.max(nowMs, nextAllowedAtMs);
+  return {
+    nextAllowedAtMs: scheduledAtMs + 60_000 / requestsPerMinute,
+    waitMs: Math.max(0, scheduledAtMs - nowMs),
+  };
 }
 // ---------------------------------------------------------------------------
 // Source health (TASK-004): persistent per-source health aggregation with an

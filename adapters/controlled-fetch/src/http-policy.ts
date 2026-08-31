@@ -1,7 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { SourcePolicy } from "@gameintel/core";
-import { computeFetchSlot } from "@gameintel/contracts";
 import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
 // Typed source-availability failures. `source_unavailable` counts against
@@ -109,23 +108,6 @@ export function assertRegisteredUrl(value: string, source: RegisteredSource): UR
   return url;
 }
 
-class RateLimiter {
-  private nextRequest = 0;
-  async wait(rpm: number): Promise<void> {
-    if (!rpm) throw new Error("Network access is disabled by source policy");
-    const { scheduledAtMs, waitMs } = computeFetchSlot(Date.now(), this.nextRequest, rpm);
-    this.nextRequest = scheduledAtMs;
-    if (waitMs) await Bun.sleep(waitMs);
-  }
-}
-
-const limiters = new Map<string, RateLimiter>();
-function limiterFor(sourceId: string): RateLimiter {
-  const current = limiters.get(sourceId) ?? new RateLimiter();
-  limiters.set(sourceId, current);
-  return current;
-}
-
 export async function fetchPermittedUrl(value: string, policy: FetchPolicy, resolver: DnsResolver = defaultResolver): Promise<{ url: string; contentType: string; status: number; text: string }> {
   if (!policy.source.enabled) throw new Error(`Source ${policy.source.id} is disabled`);
   if (policy.sourcePolicy.accessMode !== "rss" && policy.sourcePolicy.accessMode !== "permitted_scrape" && policy.sourcePolicy.accessMode !== "official_api") throw new Error("Source policy does not permit network fetching");
@@ -144,7 +126,6 @@ export async function fetchPermittedUrl(value: string, policy: FetchPolicy, reso
   let redirects = 0;
   while (true) {
     await assertPublicHost(url.hostname, resolver);
-    await limiterFor(policy.source.id).wait(policy.sourcePolicy.requestsPerMinute);
     let response: Response;
     try {
       response = await fetch(url, {

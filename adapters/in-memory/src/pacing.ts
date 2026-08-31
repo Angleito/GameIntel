@@ -8,8 +8,8 @@ export class InMemoryPacingStore implements SourcePacingStore {
   async acquireFetchSlot(sourceId: string, requestsPerMinute: number): Promise<number> {
     assertPacingSourceId(sourceId);
     const now = this.clock.now();
-    const { scheduledAtMs, waitMs } = computeFetchSlot(now, this.nextAllowedAt.get(sourceId) ?? now, requestsPerMinute);
-    this.nextAllowedAt.set(sourceId, scheduledAtMs);
+    const { nextAllowedAtMs, waitMs } = computeFetchSlot(now, this.nextAllowedAt.get(sourceId) ?? now, requestsPerMinute);
+    this.nextAllowedAt.set(sourceId, nextAllowedAtMs);
     return waitMs;
   }
 }
