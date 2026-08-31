@@ -14,8 +14,9 @@ mock.module("node:dns/promises", () => ({
 runFetchTransportContract((options) => ({ transport: new HttpControlledFetchTransport(options?.resolver) }));
 
 // Typed source-availability failures: only `source_unavailable` counts against
-// source health; 4xx (url_not_found) and malformed responses (`response`)
-// never do. Policy errors stay plain `Error`.
+// source health (permanent DNS failures, HTTP >= 500); transport failures
+// (proxy/transient DNS), 4xx (url_not_found) and malformed responses
+// (`response`) never do. Policy errors stay plain `Error`.
 type FetchStub = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 async function withFetchStub<T>(handler: FetchStub, callback: () => Promise<T>): Promise<T> {
@@ -88,8 +89,8 @@ describe("typed source fetch failures", () => {
     );
   });
 
-  test("classifies DNS resolution failures as source_unavailable", async () => {
-    const dnsFailure = async () => { throw new Error("getaddrinfo ENOTFOUND contract.example.com"); };
+  test("classifies permanent DNS resolution failures as source_unavailable", async () => {
+    const dnsFailure = async () => { throw Object.assign(new Error("getaddrinfo ENOTFOUND contract.example.com"), { code: "ENOTFOUND" }); };
     const error = await fetchPermittedUrl("http://contract.example.com/report", policy(), dnsFailure).then(
       () => null,
       (caught: unknown) => caught,
@@ -98,6 +99,24 @@ describe("typed source fetch failures", () => {
     expect((error as SourceFetchError).kind).toBe("source_unavailable");
     expect((error as Error).message).toContain("DNS");
     expect((error as SourceFetchError).status).toBeNull();
+  });
+
+  test("classifies transient resolver failures as transport_unavailable", async () => {
+    for (const [code, message] of [
+      ["EAI_AGAIN", "getaddrinfo EAI_AGAIN contract.example.com"],
+      ["ETIMEDOUT", "queryA ETIMEDOUT contract.example.com"],
+      [undefined, "resolver exploded"],
+    ] as const) {
+      const dnsFailure = code === undefined ? async () => { throw new Error(message); } : async () => { throw Object.assign(new Error(message), { code }); };
+      const error = await fetchPermittedUrl("http://contract.example.com/report", policy(), dnsFailure).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toBeInstanceOf(SourceFetchError);
+      expect((error as SourceFetchError).kind).toBe("transport_unavailable");
+      expect((error as Error).message).toContain("DNS");
+      expect((error as SourceFetchError).status).toBeNull();
+    }
   });
 
   test("classifies unsupported content types as response failures", async () => {

@@ -4,13 +4,15 @@ import type { SourcePolicy } from "@gameintel/core";
 import type { DnsResolver, FetchPolicy, RegisteredSource } from "@gameintel/contracts";
 
 // Typed source-availability failures. `source_unavailable` counts against
-// source health: source-DNS resolution failure and HTTP >= 500 (origin
-// unreachable through the proxy). `transport_unavailable` is any fetch()
-// rejection through the configured egress proxy — proxy outage, proxy
-// connection failure, TLS, abort/timeout — never a proven origin outage, and
-// never counted. `url_not_found` (4xx) is a bad URL, `response` (redirect/
-// content-type/size violations) is a malformed response — neither counts.
-// Policy errors stay plain `Error`.
+// source health: permanent source-DNS resolution failure (ENOTFOUND/ENODATA/
+// EAI_NONAME — the hostname does not exist or has no address records) and
+// HTTP >= 500 (origin unreachable through the proxy). `transport_unavailable`
+// is any fetch() rejection through the configured egress proxy — proxy
+// outage, proxy connection failure, TLS, abort/timeout — plus transient DNS
+// resolver failures (EAI_AGAIN, resolver timeout/server failure): never a
+// proven origin outage, and never counted. `url_not_found` (4xx) is a bad
+// URL, `response` (redirect/content-type/size violations) is a malformed
+// response — neither counts. Policy errors stay plain `Error`.
 export type SourceFetchErrorKind = "source_unavailable" | "transport_unavailable" | "url_not_found" | "response";
 
 export class SourceFetchError extends Error {
@@ -74,9 +76,18 @@ export async function assertPublicHost(hostname: string, resolver: DnsResolver =
   try {
     records = await resolver(hostname);
   } catch (error) {
-    // DNS resolution failure: the source hostname cannot be resolved, so the
-    // source itself is unavailable.
-    throw new SourceFetchError("source_unavailable", `Source DNS resolution failed: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    // Permanent DNS failures — the hostname does not exist or has no address
+    // records (ENOTFOUND, ENODATA, EAI_NONAME) — mean the source itself is
+    // unavailable and count against source health. Transient resolver
+    // failures (EAI_AGAIN, resolver timeouts/server failures, and uncoded
+    // errors) are infrastructure problems, not a proven origin outage, and
+    // never count (transport_unavailable).
+    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+    throw new SourceFetchError(
+      code === "ENOTFOUND" || code === "ENODATA" || code === "EAI_NONAME" ? "source_unavailable" : "transport_unavailable",
+      `Source DNS resolution failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
   if (!records.length || records.some((record) => privateIp(record.address))) throw new Error("Private or link-local address is not permitted");
 }
