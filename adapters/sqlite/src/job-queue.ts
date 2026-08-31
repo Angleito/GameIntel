@@ -3,6 +3,7 @@ import {
   SAFE_IDENTIFIER_PATTERN,
   ingestJobDedupeKey,
   jobRetryBackoffMs,
+  parseStoredJson,
   type Clock,
   type IdGenerator,
   type IngestionJob,
@@ -15,7 +16,7 @@ import {
 } from "@gameintel/contracts";
 import { canonicalizeUrl, PublicHttpUrlSchema } from "@gameintel/core";
 import type { Database } from "bun:sqlite";
-import { json, parseJson } from "./database.ts";
+import { json } from "./database.ts";
 
 type JobRow = {
   job_key: string;
@@ -42,13 +43,13 @@ function parseJob(row: JobRow): IngestionJob {
     jobKey: row.job_key,
     jobType: row.job_type,
     status: row.status,
-    payload: parseJson<SourceIngestJobPayload>(row.payload),
+    payload: parseStoredJson<SourceIngestJobPayload>(row.payload),
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
     leaseToken: row.lease_token,
     leaseExpiresAt: row.lease_expires_at === null ? null : new Date(row.lease_expires_at).toISOString(),
     lastError: row.last_error,
-    result: row.result === null ? null : parseJson(row.result),
+    result: row.result === null ? null : parseStoredJson(row.result),
   };
 }
 

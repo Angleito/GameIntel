@@ -1,22 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { assertUniqueMedia, MediaCatalogSchema, mediaCoverScore, type CatalogMedia } from "@gameintel/core";
-import type { CoverMediaCandidate } from "@gameintel/contracts";
+import { assertUniqueMedia, MediaCatalogSchema, mediaCoverScore, normalizedText, type CatalogMedia } from "@gameintel/core";
+import { jsonStringArray, type CoverMediaCandidate } from "@gameintel/contracts";
 import { inTransaction, refreshPublicArticleRecord, type Db } from "./index.ts";
-
-export type { CoverMediaCandidate };
-
-function jsonArray(value: unknown): string[] {
-  const parsed = typeof value === "string" ? JSON.parse(value) : value;
-  return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-}
-
-function candidateScore(candidate: CoverMediaCandidate, articleText: string): number {
-  return mediaCoverScore(candidate, articleText);
-}
-
-function normalized(value: string): string {
-  return value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
-}
 
 export async function importMediaCatalog(db: Db, catalogPath: string): Promise<{ imported: number; collectionIds: string[] }> {
   let parsed: unknown;
@@ -65,7 +50,7 @@ export async function listCoverCandidates(db: Db, articleId: string): Promise<Co
   `;
   return rows.map((row) => ({
     id: row.id as string, collection: row.collection as string, caption: row.caption as string, altText: row.alt_text as string,
-    tags: jsonArray(row.tags), spoilerTags: jsonArray(row.spoiler_tags), attribution: row.attribution as string,
+    tags: jsonStringArray(row.tags), spoilerTags: jsonStringArray(row.spoiler_tags), attribution: row.attribution as string,
     sourceUrl: row.source_url as string, publicUrl: row.public_url as string,
   }));
 }
@@ -79,7 +64,7 @@ export async function setCoverMedia(db: Db, articleId: string, mediaId: string, 
     `;
     if (!rows.length) throw new Error("Article or media asset not found");
     if (rows[0].article_game_id !== rows[0].media_game_id) throw new Error("Cover media must belong to the article collection");
-    if (jsonArray(rows[0].spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
+    if (jsonStringArray(rows[0].spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
     await transaction`
       INSERT INTO article_media (article_id, media_id, role, selection_source, review_status)
       VALUES (${articleId}, ${mediaId}, 'cover', ${selectionSource}, 'pending')
@@ -97,8 +82,8 @@ export async function setCoverMedia(db: Db, articleId: string, mediaId: string, 
 export async function recommendArticleCover(db: Db, input: { articleId: string; title: string; description: string; safeClaimText: string[] }): Promise<string | null> {
   const candidates = await listCoverCandidates(db, input.articleId);
   if (!candidates.length) return null;
-  const articleText = normalized([input.title, input.description, ...input.safeClaimText].join(" "));
-  const selected = candidates.map((candidate) => ({ candidate, score: candidateScore(candidate, articleText) }))
+  const articleText = normalizedText([input.title, input.description, ...input.safeClaimText].join(" "));
+  const selected = candidates.map((candidate) => ({ candidate, score: mediaCoverScore(candidate, articleText) }))
     .sort((left, right) => right.score - left.score || left.candidate.id.localeCompare(right.candidate.id))[0].candidate;
   await setCoverMedia(db, input.articleId, selected.id, "automatic");
   return selected.id;

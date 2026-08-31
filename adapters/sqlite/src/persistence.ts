@@ -2,9 +2,13 @@ import { readFile } from "node:fs/promises";
 import type { Database, Statement } from "bun:sqlite";
 import {
   IngestionLeaseLostError,
-  SAFE_IDENTIFIER_PATTERN,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
+  jsonStringArray,
+  parseStoredJson,
+  timestampMs,
+  validateModerationActor,
+  validateModerationNotes,
   type AnalysisRunInfo,
   type AnalysisVersions,
   type ArticleEvidenceForReview,
@@ -24,18 +28,23 @@ import {
 import {
   ArticleCoverMediaSchema,
   ArticleSchema,
+  articleEvidenceComplete,
+  articleSlug,
   assertUniqueMedia,
   calculateConfidence,
   canonicalClaimKey,
   deriveClaimState,
   evidenceReviewGate,
+  ingestHttpStatus,
   MediaCatalogSchema,
   mediaCoverScore,
+  normalizedText,
   publicSubmissionFingerprint,
   retainedExcerpt,
   retentionUntilMs,
   SourcePolicySchema,
   SourceStrengthSchema,
+  sourceStrengthOrder,
   toSafeArticle,
   type Article,
   type ArticleBody,
@@ -48,31 +57,7 @@ import {
   type SourcePolicy,
   type SourceStrength,
 } from "@gameintel/core";
-import { bool, isoAddSeconds, isoNow, isoToMs, json, openSqliteDatabase, parseJson } from "./database.ts";
-
-const sourceStrengthOrder: Record<SourceStrength, number> = {
-  UNVERIFIED: 0,
-  COMMUNITY: 1,
-  TRUSTED_SECONDARY: 2,
-  DIRECT_EVIDENCE: 3,
-  PRIMARY: 4,
-};
-
-function timestamp(value: string | null | undefined): number {
-  return isoToMs(value);
-}
-
-function parsePolicy(policy: SourcePolicy): SourcePolicy {
-  return SourcePolicySchema.parse(policy);
-}
-
-type SqliteTransaction = {
-  commit(): void;
-  rollback(): void;
-  run(sql: string, ...params: unknown[]): void;
-  get<T>(sql: string, ...params: unknown[]): T | null;
-  all<T>(sql: string, ...params: unknown[]): T[];
-};
+import { bool, isoNow, json, openSqliteDatabase } from "./database.ts";
 
 // SQLite reference persistence: a portability proof of the same capability
 // contracts as the PostgreSQL reference adapter. Writes are serialized on a
@@ -146,7 +131,7 @@ export class SQLitePersistence implements GameIntelPersistence {
          public_citation_url = excluded.public_citation_url, source_strength = excluded.source_strength,
          publication_mode = excluded.publication_mode, policy = excluded.policy, enabled = excluded.enabled`,
       source.id, source.type, source.canonicalUrl, source.publicCitationUrl, source.sourceStrength,
-      source.publicationMode, json(parsePolicy(source.policy)), source.enabled ? 1 : 0,
+      source.publicationMode, json(SourcePolicySchema.parse(source.policy)), source.enabled ? 1 : 0,
     );
   }
 
@@ -248,7 +233,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       this.run(
         `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content, created_at)
          VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-        revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, item.title, excerpt, now,
+        revisionId, itemId, rawHash, excerpt, item.contentType, ingestHttpStatus(item.inputKind), item.processingVersion ?? null, item.title, excerpt, now,
       );
       return {
         id: itemId,
@@ -272,7 +257,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     this.run(
       `INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content, created_at)
        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-      revisionId, itemId, rawHash, excerpt, item.contentType, item.inputKind === "url" || item.inputKind === "rss" ? 200 : null, item.processingVersion ?? null, item.title, excerpt, now,
+      revisionId, itemId, rawHash, excerpt, item.contentType, ingestHttpStatus(item.inputKind), item.processingVersion ?? null, item.title, excerpt, now,
     );
     return {
       id: itemId,
@@ -367,7 +352,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     let canonicalClaimId: string;
     if (existingClaim) {
       claimId = existingClaim.id;
-      const qualifiers = parseJson<Record<string, string>>(existingClaim.qualifiers);
+      const qualifiers = parseStoredJson<Record<string, string>>(existingClaim.qualifiers);
       canonicalClaimId = existingClaim.canonical_claim_id ?? this.resolveCanonicalClaimForRow(claimId, item.collectionId, claim.subject, claim.predicate, claim.value, qualifiers);
     } else {
       claimId = this.ids.generate("clm");
@@ -425,7 +410,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       sourceItemId,
     );
     for (const claim of unresolved) {
-      this.resolveCanonicalClaimForRow(claim.id, claim.game_id, claim.subject, claim.predicate, claim.value, parseJson<Record<string, string>>(claim.qualifiers));
+      this.resolveCanonicalClaimForRow(claim.id, claim.game_id, claim.subject, claim.predicate, claim.value, parseStoredJson<Record<string, string>>(claim.qualifiers));
     }
     return unresolved.length;
   }
@@ -534,7 +519,7 @@ export class SQLitePersistence implements GameIntelPersistence {
         publicCitationUrl: (row.public_citation_url as string | null) ?? null,
         sourceStrength: SourceStrengthSchema.parse(row.source_strength),
         publicationMode: row.source_publication_mode as import("@gameintel/core").PublicationMode,
-        policy: SourcePolicySchema.parse(parseJson(row.policy)),
+        policy: SourcePolicySchema.parse(parseStoredJson(row.policy)),
         enabled: bool(row.enabled),
       },
     };
@@ -599,11 +584,11 @@ export class SQLitePersistence implements GameIntelPersistence {
       reviews.map((review) => ({
         reviewerId: review.reviewer_id,
         decision: review.decision as "approved" | "rejected" | "disputed",
-        createdAt: timestamp(review.created_at),
+        createdAt: timestampMs(review.created_at),
       })),
       policy.evidenceReview,
     );
-    const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestamp(review.created_at)), 0);
+    const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestampMs(review.created_at)), 0);
     return { approved: gate.eligible, latestReviewAt, blockedBy: gate.blockedBy };
   }
 
@@ -613,7 +598,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       claimId,
     );
     if (!claim) throw new Error("Claim not found");
-    const qualifiers = parseJson<Record<string, unknown>>(claim.qualifiers);
+    const qualifiers = parseStoredJson<Record<string, unknown>>(claim.qualifiers);
     const identity = claim.canonical_claim_id ?? claimId;
     const evidenceRows = this.all<Record<string, unknown>>(
       `SELECT e.id AS evidence_id, e.source_item_id, e.provenance_family_id, e.stance, e.evidence_type, e.excerpt, e.start_ms, e.end_ms, e.lineage_id,
@@ -640,7 +625,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     let strongest: SourceStrength = "UNVERIFIED";
     const approvedEvidence: Array<Evidence & { sourceStrength?: SourceStrength }> = [];
     for (const row of evidenceRows) {
-      const policy = SourcePolicySchema.parse(parseJson(row.policy));
+      const policy = SourcePolicySchema.parse(parseStoredJson(row.policy));
       const review = this.evidenceApprovalState(row.evidence_id as string, row.source_item_revision_id as string, policy);
       if (!review.approved) continue;
       const sourceStrength = SourceStrengthSchema.parse(row.source_strength);
@@ -693,7 +678,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       const familyId = row.provenance_family_id as string | null;
       const strength = SourceStrengthSchema.parse(row.source_strength);
       if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
-      const policy = SourcePolicySchema.parse(parseJson(row.source_policy));
+      const policy = SourcePolicySchema.parse(parseStoredJson(row.source_policy));
       const review = this.evidenceApprovalState(row.evidence_id as string, row.source_item_revision_id as string, policy);
       if (review.approved && sourceStrengthOrder[strength] > sourceStrengthOrder[strongestApproved]) strongestApproved = strength;
       if (!familyId) continue;
@@ -822,7 +807,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     if ((evidence.current !== 1 && evidence.current !== true) || evidence.analysis_run_current !== 1) {
       throw new Error("Evidence review requires the current source revision and analysis run");
     }
-    const policy = SourcePolicySchema.parse(parseJson(evidence.policy));
+    const policy = SourcePolicySchema.parse(parseStoredJson(evidence.policy));
     if (decision === "approved" && policy.evidenceReview.preventSubmitterApproval && evidence.submitted_by === reviewerId) {
       throw new Error("Submitters cannot approve their own evidence");
     }
@@ -884,7 +869,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     for (const row of rows) {
       const referenceId = row.article_source_id as string;
       if (!references.has(referenceId)) references.set(referenceId, new Set());
-      latestChangeAt = Math.max(latestChangeAt, timestamp(row.article_source_updated_at as string));
+      latestChangeAt = Math.max(latestChangeAt, timestampMs(row.article_source_updated_at as string));
       const evidenceId = row.evidence_id as string | null;
       if (!evidenceId) continue;
       const direct = row.direct_evidence === 1 || row.direct_evidence === true;
@@ -898,10 +883,10 @@ export class SQLitePersistence implements GameIntelPersistence {
     for (const [evidenceId, evidence] of evidenceRows) {
       const { row, directReferenceIds } = evidence;
       const sourceItemRevisionId = row.source_item_revision_id as string | null;
-      latestChangeAt = Math.max(latestChangeAt, timestamp(row.evidence_created_at as string), timestamp(row.source_item_revision_created_at as string));
+      latestChangeAt = Math.max(latestChangeAt, timestampMs(row.evidence_created_at as string), timestampMs(row.source_item_revision_created_at as string));
       if (!sourceItemRevisionId || (row.source_item_revision_current !== 1 && row.source_item_revision_current !== true)
         || row.analysis_run_current !== 1 || !row.source_policy) continue;
-      const policy = SourcePolicySchema.parse(parseJson(row.source_policy));
+      const policy = SourcePolicySchema.parse(parseStoredJson(row.source_policy));
       const review = this.evidenceApprovalState(evidenceId, sourceItemRevisionId, policy);
       latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
       if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
@@ -913,8 +898,7 @@ export class SQLitePersistence implements GameIntelPersistence {
     }
     const sourceCount = references.size;
     const evidenceCount = directEvidenceCount;
-    const complete = blockedBy === null && sourceCount > 0 && evidenceCount > 0 && approvedCount === evidenceCount
-      && [...references.values()].every((evidenceIds) => evidenceIds.size > 0);
+    const complete = articleEvidenceComplete({ blockedBy, sourceCount, evidenceCount, approvedCount, references });
     return Promise.resolve({ sourceCount, evidenceCount, approvedCount, complete, latestChangeAt });
   }
 
@@ -958,7 +942,7 @@ export class SQLitePersistence implements GameIntelPersistence {
       "SELECT MAX(created_at) AS reviewed_at FROM reviews WHERE target_type = 'article' AND target_id = ? AND decision = 'approved'",
       articleId,
     );
-    const reviewedAt = timestamp(reviews?.reviewed_at);
+    const reviewedAt = timestampMs(reviews?.reviewed_at);
     if (!reviewedAt || reviewedAt < evidence.latestChangeAt) {
       throw new Error("Publication approval requires a current editorial review");
     }
@@ -1030,7 +1014,7 @@ const published = await this.getArticle(articleId);
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
   }): Promise<string> {
     const articleId = this.ids.generate("art");
-    const slug = `${input.title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/(^-|-$)/g, "")}-${articleId.slice(-8)}`;
+    const slug = articleSlug(input.title, articleId);
     const now = isoNow();
     this.run(
       `INSERT INTO articles (id, game_id, slug, title, seo_title, description, body, newsworthiness, confidence, article_sources_complete, status, created_at, updated_at)
@@ -1101,23 +1085,23 @@ const published = await this.getArticle(articleId);
       attributionType: row.attribution_type as import("@gameintel/core").AttributionType,
       statement: row.statement as string | null,
       editorialAssessment: row.editorial_assessment as string | null,
-      spoilerTags: parseJson<string[]>(row.spoiler_tags),
+      spoilerTags: parseStoredJson<string[]>(row.spoiler_tags),
     }));
   }
 
   private articleSelect(row: Record<string, unknown>): Article {
-    const parsedCover = row.cover_media ? parseJson<Record<string, unknown>>(row.cover_media) : null;
+    const parsedCover = row.cover_media ? parseStoredJson<Record<string, unknown>>(row.cover_media) : null;
     return ArticleSchema.parse({
       id: row.id, collectionId: row.game_id, slug: row.slug, title: row.title, seoTitle: row.seo_title,
-      description: row.description, body: ArticleBodySchema(row.body), status: row.status,
+      description: row.description, body: parseStoredJson<ArticleBody>(row.body), status: row.status,
       newsworthiness: Number(row.newsworthiness), confidence: Number(row.confidence),
       sourceReviewCompleted: bool(row.source_review_completed), editorReviewCompleted: bool(row.editor_review_completed),
       articleSourcesComplete: bool(row.article_sources_complete),
-      sourceRefs: parseJson<Array<Record<string, unknown>>>(row.source_refs ?? []),
+      sourceRefs: parseStoredJson<Array<Record<string, unknown>>>(row.source_refs ?? []),
       coverMedia: parsedCover ? ArticleCoverMediaSchema.parse({
         ...parsedCover,
-        tags: typeof parsedCover.tags === "string" ? JSON.parse(parsedCover.tags) : parsedCover.tags,
-        spoilerTags: typeof parsedCover.spoilerTags === "string" ? JSON.parse(parsedCover.spoilerTags) : parsedCover.spoilerTags,
+        tags: parseStoredJson(parsedCover.tags),
+        spoilerTags: parseStoredJson(parsedCover.spoilerTags),
       }) : null,
       approvedBy: row.approved_by as string | null,
       publishedAt: row.published_at ? new Date(row.published_at as string).toISOString() : null,
@@ -1303,8 +1287,8 @@ const published = await this.getArticle(articleId);
       state: row.state as PublicSubmissionForModeration["state"],
       title: row.title as string | null,
       report: row.report as string,
-      urls: parseJson<PublicSubmission["urls"]>(row.urls),
-      mediaRefs: parseJson<PublicSubmission["mediaRefs"]>(row.media_refs),
+      urls: parseStoredJson<PublicSubmission["urls"]>(row.urls),
+      mediaRefs: parseStoredJson<PublicSubmission["mediaRefs"]>(row.media_refs),
       promotedSourceItemId: row.promoted_source_item_id as string | null,
       retentionUntil: new Date(Number(row.retention_until)).toISOString(),
       createdAt: new Date(row.created_at as string).toISOString(),
@@ -1350,26 +1334,14 @@ const published = await this.getArticle(articleId);
     }));
   }
 
-  private moderationActor(actorId: string): string {
-    const actor = actorId.trim();
-    if (!SAFE_IDENTIFIER_PATTERN.test(actor)) throw new Error("A valid moderation actor is required");
-    return actor;
-  }
-
-  private moderationNotes(notes: string | undefined): string {
-    const value = notes?.trim() ?? "";
-    if (value.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
-    return value;
-  }
-
   async reviewPublicSubmission(input: {
     submissionId: string;
     actorId: string;
     decision: "under_review" | "rejected" | "blocked";
     notes?: string;
   }): Promise<{ id: string; state: "under_review" | "rejected" | "blocked" }> {
-    const actorId = this.moderationActor(input.actorId);
-    const notes = this.moderationNotes(input.notes);
+    const actorId = validateModerationActor(input.actorId);
+    const notes = validateModerationNotes(input.notes);
     const row = this.get<{ state: string; content_purged_at: number | null }>(
       "SELECT state, content_purged_at FROM public_submissions WHERE id = ?",
       input.submissionId,
@@ -1404,8 +1376,8 @@ const published = await this.getArticle(articleId);
   }
 
   async markPublicSubmissionPromoted(input: { submissionId: string; sourceItemId: string; actorId: string; notes?: string }): Promise<void> {
-    const actorId = this.moderationActor(input.actorId);
-    const notes = this.moderationNotes(input.notes);
+    const actorId = validateModerationActor(input.actorId);
+    const notes = validateModerationNotes(input.notes);
     const promoted = this.db.query(
       "UPDATE public_submissions SET state = 'promoted', promoted_source_item_id = ?, updated_at = ? WHERE id = ? AND state = 'under_review' AND content_purged_at IS NULL",
     ).run(input.sourceItemId, isoNow(), input.submissionId);
@@ -1484,11 +1456,6 @@ const published = await this.getArticle(articleId);
     return { imported: catalog.data.media.length, collectionIds: [...new Set(catalog.data.media.map((item) => item.collectionId))].sort() };
   }
 
-  private jsonArray(value: unknown): string[] {
-    const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  }
-
   async listCoverCandidates(articleId: string): Promise<CoverMediaCandidate[]> {
     return this.all<Record<string, unknown>>(
       `SELECT ma.id, ma.collection, ma.caption, ma.alt_text, ma.tags, ma.spoiler_tags, ma.attribution, ma.source_url, ma.public_url
@@ -1501,8 +1468,8 @@ const published = await this.getArticle(articleId);
       collection: row.collection as string,
       caption: row.caption as string,
       altText: row.alt_text as string,
-      tags: this.jsonArray(row.tags),
-      spoilerTags: this.jsonArray(row.spoiler_tags),
+      tags: jsonStringArray(row.tags),
+      spoilerTags: jsonStringArray(row.spoiler_tags),
       attribution: row.attribution as string,
       sourceUrl: row.source_url as string,
       publicUrl: row.public_url as string,
@@ -1516,7 +1483,7 @@ const published = await this.getArticle(articleId);
     );
     if (!rows) throw new Error("Article or media asset not found");
     if (rows.article_game_id !== rows.media_game_id) throw new Error("Cover media must belong to the article collection");
-    if (this.jsonArray(rows.spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
+    if (jsonStringArray(rows.spoiler_tags).length) throw new Error("Spoiler-tagged media cannot be a cover");
     this.run(
       `INSERT INTO article_media (article_id, media_id, role, selection_source, review_status, reviewed_by, reviewed_at, created_at)
        VALUES (?, ?, 'cover', ?, 'pending', NULL, NULL, ?)
@@ -1530,8 +1497,7 @@ const published = await this.getArticle(articleId);
   async recommendArticleCover(input: { articleId: string; title: string; description: string; safeClaimText: string[] }): Promise<string | null> {
     const candidates = await this.listCoverCandidates(input.articleId);
     if (!candidates.length) return null;
-    const normalized = (value: string) => value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
-    const articleText = normalized([input.title, input.description, ...input.safeClaimText].join(" "));
+    const articleText = normalizedText([input.title, input.description, ...input.safeClaimText].join(" "));
     const selected = candidates.map((candidate) => ({ candidate, score: mediaCoverScore(candidate, articleText) }))
       .sort((left, right) => right.score - left.score || left.candidate.id.localeCompare(right.candidate.id))[0].candidate;
     await this.setCoverMedia(input.articleId, selected.id, "automatic");
@@ -1586,8 +1552,4 @@ const published = await this.getArticle(articleId);
     );
     if (!held) throw new IngestionLeaseLostError(jobKey);
   }
-}
-
-function ArticleBodySchema(value: unknown): ArticleBody {
-  return typeof value === "string" ? JSON.parse(value) as ArticleBody : value as ArticleBody;
 }

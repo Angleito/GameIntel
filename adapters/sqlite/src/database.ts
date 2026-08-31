@@ -191,22 +191,8 @@ export function isoNow(): string {
   return new Date().toISOString();
 }
 
-export function isoAddSeconds(value: string, seconds: number): string {
-  return new Date(Date.parse(value) + seconds * 1_000).toISOString();
-}
-
 export function json(value: unknown): string {
   return JSON.stringify(value);
-}
-
-export function parseJson<T>(value: unknown): T {
-  return typeof value === "string" ? JSON.parse(value) as T : value as T;
-}
-
-export function isoToMs(value: string | null | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export function bool(value: unknown): boolean {

@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
 import {
   IngestionLeaseLostError,
-  SAFE_IDENTIFIER_PATTERN,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
+  timestampMs,
+  validateModerationActor,
+  validateModerationNotes,
   type AnalysisRunInfo,
   type AnalysisVersions,
   type ArticleEvidenceForReview,
@@ -23,19 +25,23 @@ import {
 import {
   ArticleCoverMediaSchema,
   ArticleSchema,
+  articleEvidenceComplete,
+  articleSlug,
   assertUniqueMedia,
   calculateConfidence,
   canonicalClaimKey,
   deriveClaimState,
-  effectivePublicationMode,
   evidenceReviewGate,
+  ingestHttpStatus,
   MediaCatalogSchema,
   mediaCoverScore,
+  normalizedText,
   publicSubmissionFingerprint,
   retainedExcerpt,
   retentionUntilMs,
   SourcePolicySchema,
   SourceStrengthSchema,
+  sourceStrengthOrder,
   toSafeArticle,
   type Article,
   type ArticleBody,
@@ -64,20 +70,6 @@ import {
   type SourceItemProvenanceRecord,
 } from "./store.ts";
 import type { MemoryLeaseRegistry } from "./job-queue.ts";
-
-const sourceStrengthOrder: Record<SourceStrength, number> = {
-  UNVERIFIED: 0,
-  COMMUNITY: 1,
-  TRUSTED_SECONDARY: 2,
-  DIRECT_EVIDENCE: 3,
-  PRIMARY: 4,
-};
-
-function timestamp(value: string | null | undefined): number {
-  if (!value) return 0;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
 
 function parsePolicy(policy: SourcePolicy): SourcePolicy {
   return SourcePolicySchema.parse(policy);
@@ -234,7 +226,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
         rawHash,
         excerpt,
         contentType: item.contentType,
-        httpStatus: item.inputKind === "url" || item.inputKind === "rss" ? 200 : null,
+        httpStatus: ingestHttpStatus(item.inputKind),
         isCurrent: true,
         processingVersion: item.processingVersion ?? null,
         title: item.title,
@@ -282,7 +274,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       rawHash,
       excerpt,
       contentType: item.contentType,
-      httpStatus: item.inputKind === "url" || item.inputKind === "rss" ? 200 : null,
+      httpStatus: ingestHttpStatus(item.inputKind),
       isCurrent: true,
       processingVersion: item.processingVersion ?? null,
       title: item.title,
@@ -629,10 +621,10 @@ export class InMemoryPersistence implements GameIntelPersistence {
     const latestByReviewer = new Map<string, (typeof reviews)[number]>();
     for (const review of reviews) latestByReviewer.set(review.reviewerId, review);
     const gate = evidenceReviewGate(
-      [...latestByReviewer.values()].map((review) => ({ reviewerId: review.reviewerId, decision: review.decision, createdAt: timestamp(review.createdAt) })),
+      [...latestByReviewer.values()].map((review) => ({ reviewerId: review.reviewerId, decision: review.decision, createdAt: timestampMs(review.createdAt) })),
       policy.evidenceReview,
     );
-    const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestamp(review.createdAt)), 0);
+    const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestampMs(review.createdAt)), 0);
     return { approved: gate.eligible, latestReviewAt, blockedBy: gate.blockedBy };
   }
 
@@ -868,7 +860,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       if (articleSource.articleId !== articleId) continue;
       const referenceId = articleSource.id;
       if (!references.has(referenceId)) references.set(referenceId, new Set());
-      latestChangeAt = Math.max(latestChangeAt, timestamp(articleSource.updatedAt));
+      latestChangeAt = Math.max(latestChangeAt, timestampMs(articleSource.updatedAt));
       const claim = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
       if (!claim) continue;
       const identity = claim.canonicalClaimId ?? claim.id;
@@ -893,7 +885,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
       const source = item ? this.store.sources.get(item.sourceId) : undefined;
       const run = this.store.analysisRuns.get(record.analysisRunId);
       const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
-      latestChangeAt = Math.max(latestChangeAt, timestamp(record.createdAt), revision ? timestamp(revision.createdAt) : 0);
+      latestChangeAt = Math.max(latestChangeAt, timestampMs(record.createdAt), revision ? timestampMs(revision.createdAt) : 0);
       if (!revision || !revision.isCurrent || !item || !source || !run || run.status !== "completed" || latestRun?.id !== run.id) continue;
       const review = this.evidenceApprovalState(record.id, record.sourceItemRevisionId, parsePolicy(source.policy));
       latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
@@ -906,10 +898,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     }
     const sourceCount = references.size;
     const evidenceCount = directEvidenceCount;
-    const complete = blockedBy === null && sourceCount > 0
-      && evidenceCount > 0
-      && approvedCount === evidenceCount
-      && [...references.values()].every((evidenceIds) => evidenceIds.size > 0);
+    const complete = articleEvidenceComplete({ blockedBy, sourceCount, evidenceCount, approvedCount, references });
     return { sourceCount, evidenceCount, approvedCount, complete, latestChangeAt };
   }
 
@@ -936,7 +925,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     }
     const reviewedAt = this.store.reviews
       .filter((review) => review.targetType === "article" && review.targetId === articleId && review.decision === "approved")
-      .reduce((latest, review) => Math.max(latest, timestamp(review.createdAt)), 0);
+      .reduce((latest, review) => Math.max(latest, timestampMs(review.createdAt)), 0);
     if (!reviewedAt || reviewedAt < evidence.latestChangeAt) {
       throw new Error("Publication approval requires a current editorial review");
     }
@@ -1075,7 +1064,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
   }): Promise<string> {
     const articleId = this.ids.generate("art");
-    const slug = `${input.title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/(^-|-$)/g, "")}-${articleId.slice(-8)}`;
+    const slug = articleSlug(input.title, articleId);
     const now = this.clock.nowIso();
     this.store.articles.set(articleId, {
       id: articleId,
@@ -1268,15 +1257,15 @@ export class InMemoryPersistence implements GameIntelPersistence {
       .find((submission) => submission.collectionId === input.submission.collectionId
         && submission.submitterSessionHash === input.submitterSessionHash
         && submission.contentHash === contentHash
-        && now - timestamp(submission.createdAt) < 86_400_000);
+        && now - timestampMs(submission.createdAt) < 86_400_000);
     if (duplicate) return { id: duplicate.id, duplicate: true };
 
     const submissionCount = (condition: "ip" | "session" | "account" | "global", identity?: string): number => {
       const all = [...this.store.publicSubmissions.values()];
-      if (condition === "ip") return all.filter((submission) => submission.submitterIpHash === identity && now - timestamp(submission.createdAt) < 60_000).length;
-      if (condition === "session") return all.filter((submission) => submission.submitterSessionHash === identity && now - timestamp(submission.createdAt) < 60_000).length;
-      if (condition === "account") return all.filter((submission) => submission.submitterAccountId === identity && now - timestamp(submission.createdAt) < 86_400_000).length;
-      return all.filter((submission) => now - timestamp(submission.createdAt) < 60_000).length;
+      if (condition === "ip") return all.filter((submission) => submission.submitterIpHash === identity && now - timestampMs(submission.createdAt) < 60_000).length;
+      if (condition === "session") return all.filter((submission) => submission.submitterSessionHash === identity && now - timestampMs(submission.createdAt) < 60_000).length;
+      if (condition === "account") return all.filter((submission) => submission.submitterAccountId === identity && now - timestampMs(submission.createdAt) < 86_400_000).length;
+      return all.filter((submission) => now - timestampMs(submission.createdAt) < 60_000).length;
     };
     if (submissionCount("global") >= limits.globalPerMinute
       || submissionCount("ip", input.submitterIpHash) >= limits.perIpPerMinute
@@ -1379,10 +1368,8 @@ export class InMemoryPersistence implements GameIntelPersistence {
     decision: import("@gameintel/core").PublicSubmissionReviewDecision;
     notes?: string;
   }): Promise<{ id: string; state: import("@gameintel/core").PublicSubmissionReviewDecision }> {
-    const actorId = input.actorId.trim();
-    if (!SAFE_IDENTIFIER_PATTERN.test(actorId)) throw new Error("A valid moderation actor is required");
-    const notes = input.notes?.trim() ?? "";
-    if (notes.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
+    const actorId = validateModerationActor(input.actorId);
+    const notes = validateModerationNotes(input.notes);
     const submission = this.store.publicSubmissions.get(input.submissionId);
     if (!submission) throw new Error("Submission not found");
     if (submission.contentPurgedAt !== null || submission.state === "expired" || submission.state === "promoted") {
@@ -1415,10 +1402,8 @@ export class InMemoryPersistence implements GameIntelPersistence {
   }
 
   async markPublicSubmissionPromoted(input: { submissionId: string; sourceItemId: string; actorId: string; notes?: string }): Promise<void> {
-    const actorId = input.actorId.trim();
-    if (!SAFE_IDENTIFIER_PATTERN.test(actorId)) throw new Error("A valid moderation actor is required");
-    const notes = input.notes?.trim() ?? "";
-    if (notes.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
+    const actorId = validateModerationActor(input.actorId);
+    const notes = validateModerationNotes(input.notes);
     const submission = this.store.publicSubmissions.get(input.submissionId);
     if (!submission || submission.state !== "under_review" || submission.contentPurgedAt !== null) {
       throw new Error("Submission is no longer eligible for promotion");
@@ -1565,7 +1550,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
   async recommendArticleCover(input: { articleId: string; title: string; description: string; safeClaimText: string[] }): Promise<string | null> {
     const candidates = await this.listCoverCandidates(input.articleId);
     if (!candidates.length) return null;
-    const articleText = [input.title, input.description, ...input.safeClaimText].join(" ").toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
+    const articleText = normalizedText([input.title, input.description, ...input.safeClaimText].join(" "));
     const selected = candidates
       .map((candidate) => ({ candidate, score: mediaCoverScore(candidate, articleText) }))
       .sort((left, right) => right.score - left.score || left.candidate.id.localeCompare(right.candidate.id))[0].candidate;

@@ -45,6 +45,12 @@ export const cryptoIdGenerator: IdGenerator = {
   generate: (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`,
 };
 
+export function timestampMs(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  const parsed = value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Domain-facing types shared by adapters
 // ---------------------------------------------------------------------------
@@ -490,6 +496,27 @@ export interface JobQueue {
 }
 
 export const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9._:-]{1,128}$/;
+
+export function validateModerationActor(actorId: string): string {
+	const actor = actorId.trim();
+	if (!SAFE_IDENTIFIER_PATTERN.test(actor)) throw new Error("A valid moderation actor is required");
+	return actor;
+}
+
+export function validateModerationNotes(notes: string | undefined): string {
+	const value = notes?.trim() ?? "";
+	if (value.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
+	return value;
+}
+
+export function parseStoredJson<T>(value: unknown): T {
+	return typeof value === "string" ? JSON.parse(value) as T : value as T;
+}
+
+export function jsonStringArray(value: unknown): string[] {
+	const parsed = typeof value === "string" ? JSON.parse(value) : value;
+	return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+}
 
 export function ingestJobDedupeKey(
   jobType: "source_ingest" | "source_discover",

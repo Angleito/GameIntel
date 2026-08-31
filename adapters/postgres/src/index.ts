@@ -6,8 +6,12 @@ import {
   ingestJobDedupeKey,
   IngestionLeaseLostError,
   jobRetryBackoffMs,
+  parseStoredJson,
+  timestampMs,
   SubmissionRateLimitError,
   defaultPublicSubmissionRateLimits,
+  validateModerationActor,
+  validateModerationNotes,
 } from "@gameintel/contracts";
 import type {
   ArticleEvidenceForReview,
@@ -27,17 +31,19 @@ import type {
 import {
   ArticleBodySchema,
   ArticleSchema,
+  articleEvidenceComplete,
+  articleSlug,
   type Article,
   type ArticleBody,
   ArticleCoverMediaSchema,
   calculateConfidence,
   canonicalClaimKey,
   canonicalizeUrl,
-  ClaimStateSchema,
   type ClaimState,
   deriveClaimState,
   EvidenceReviewDecisionSchema,
   evidenceReviewGate,
+  ingestHttpStatus,
   type Evidence,
   type EvidenceReviewDecision,
   type GameProfile,
@@ -62,6 +68,7 @@ import {
   type SourcePolicyReviewDecision,
   SourcePolicySchema,
   SourceStrengthSchema,
+  sourceStrengthOrder,
   type SourceStrength,
   type SafeArticle,
   toSafeArticle,
@@ -78,34 +85,6 @@ export {
   rejectCoverMedia,
   setCoverMedia,
 } from "./media.ts";
-
-// Shared capability types and errors live in @gameintel/contracts. These
-// re-exports keep the legacy function-based surface source-compatible while
-// the adapter classes take over.
-export {
-  ADAPTER_API_VERSION,
-  IngestionLeaseLostError,
-  SubmissionRateLimitError,
-  defaultPublicSubmissionRateLimits,
-} from "@gameintel/contracts";
-export type {
-  AnalysisRunInfo,
-  AnalysisVersions,
-  ArticleEvidenceForReview,
-  CoverMediaCandidate,
-  IngestionJob,
-  IngestionQueueStatus,
-  IngestionWorkerHeartbeat,
-  InsertedClaim,
-  PublicSubmissionForModeration,
-  PublicSubmissionModerationAction,
-  PublicSubmissionPurgeResult,
-  PublicSubmissionRateLimits,
-  RevisionForAnalysis,
-  SourceContentPurgeResult,
-  SourceIngestEnqueueResult,
-  SourceIngestJobPayload,
-} from "@gameintel/contracts";
 
 export type Db = Sql<{}>;
 
@@ -279,7 +258,7 @@ export async function insertSourceItem(
     `;
     await db`
       INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content)
-      VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${item.inputKind === "url" || item.inputKind === "rss" ? 200 : null}, true, ${item.processingVersion ?? null}, ${item.title}, ${excerpt})
+      VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${ingestHttpStatus(item.inputKind)}, true, ${item.processingVersion ?? null}, ${item.title}, ${excerpt})
     `;
     return {
       id: itemId,
@@ -297,7 +276,7 @@ export async function insertSourceItem(
   `;
   await db`
     INSERT INTO source_item_revisions (id, source_item_id, raw_hash, excerpt, content_type, http_status, is_current, processing_version, title, content)
-    VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${item.inputKind === "url" || item.inputKind === "rss" ? 200 : null}, true, ${item.processingVersion ?? null}, ${item.title}, ${excerpt})
+    VALUES (${revisionId}, ${itemId}, ${rawHash}, ${excerpt}, ${item.contentType}, ${ingestHttpStatus(item.inputKind)}, true, ${item.processingVersion ?? null}, ${item.title}, ${excerpt})
   `;
   return {
     id: itemId,
@@ -997,7 +976,7 @@ export async function createArticleDraft(db: Db, input: {
   sourceRefs: Array<{ sourceId: string; claimId: string | null; citationLabel: string; publicCitationUrl: string }>;
 }): Promise<string> {
   const articleId = id("art");
-  const slug = `${input.title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/(^-|-$)/g, "")}-${articleId.slice(-8)}`;
+  const slug = articleSlug(input.title, articleId);
   await db`
     INSERT INTO articles (id, game_id, slug, title, seo_title, description, body, newsworthiness, confidence, article_sources_complete)
     VALUES (${articleId}, ${input.collectionId}, ${slug}, ${input.title}, ${input.title}, ${input.description}, ${JSON.stringify(input.body)}, ${input.newsworthiness}, ${input.confidence}, false)
@@ -1191,11 +1170,6 @@ async function lockArticle(db: Db, articleId: string): Promise<Record<string, un
   return articles[0] as Record<string, unknown>;
 }
 
-function timestamp(value: unknown): number {
-  const parsed = value instanceof Date ? value.getTime() : typeof value === "string" ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
 type EvidenceApprovalState = {
   approved: boolean;
   latestReviewAt: number;
@@ -1218,21 +1192,13 @@ async function evidenceApprovalState(
     reviews.map((review) => ({
       reviewerId: review.reviewer_id as string,
       decision: review.decision as EvidenceReviewDecision,
-      createdAt: timestamp(review.created_at),
+      createdAt: timestampMs(review.created_at),
     })),
     policy.evidenceReview,
   );
-  const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestamp(review.created_at)), 0);
+  const latestReviewAt = reviews.reduce((latest, review) => Math.max(latest, timestampMs(review.created_at)), 0);
   return { approved: gate.eligible, latestReviewAt, blockedBy: gate.blockedBy };
 }
-
-const sourceStrengthOrder: Record<SourceStrength, number> = {
-  UNVERIFIED: 0,
-  COMMUNITY: 1,
-  TRUSTED_SECONDARY: 2,
-  DIRECT_EVIDENCE: 3,
-  PRIMARY: 4,
-};
 
 export async function calculateClaimConfidence(db: Db, claimId: string): Promise<number> {
   const claims = await db`SELECT game_id, qualifiers, canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
@@ -1351,7 +1317,7 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
   for (const row of rows as Array<Record<string, unknown>>) {
     const referenceId = row.article_source_id as string;
     if (!references.has(referenceId)) references.set(referenceId, new Set());
-    latestChangeAt = Math.max(latestChangeAt, timestamp(row.article_source_updated_at));
+    latestChangeAt = Math.max(latestChangeAt, timestampMs(row.article_source_updated_at));
     const evidenceId = row.evidence_id as string | null;
     if (!evidenceId) continue;
     const direct = row.direct_evidence === true;
@@ -1368,11 +1334,11 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
     const sourceItemRevisionId = row.source_item_revision_id as string | null;
     latestChangeAt = Math.max(
       latestChangeAt,
-      timestamp(row.evidence_created_at),
-      timestamp(row.source_item_revision_created_at),
+      timestampMs(row.evidence_created_at),
+      timestampMs(row.source_item_revision_created_at),
     );
     if (!sourceItemRevisionId || row.source_item_revision_current !== true || row.analysis_run_current !== true || !row.source_policy) continue;
-    const policy = SourcePolicySchema.parse(typeof row.source_policy === "string" ? JSON.parse(row.source_policy) : row.source_policy);
+    const policy = SourcePolicySchema.parse(parseStoredJson(row.source_policy));
     const review = await evidenceApprovalState(db, evidenceId, sourceItemRevisionId, policy);
     latestChangeAt = Math.max(latestChangeAt, review.latestReviewAt);
     if (review.blockedBy === "rejected" || (review.blockedBy === "disputed" && blockedBy !== "rejected")) blockedBy = review.blockedBy;
@@ -1385,11 +1351,7 @@ async function articleEvidenceState(db: Db, articleId: string): Promise<ArticleE
 
   const sourceCount = references.size;
   const evidenceCount = directEvidenceCount;
-  const complete = blockedBy === null
-    && sourceCount > 0
-    && evidenceCount > 0
-    && approvedCount === evidenceCount
-    && [...references.values()].every((evidenceIds) => evidenceIds.size > 0);
+  const complete = articleEvidenceComplete({ blockedBy, sourceCount, evidenceCount, approvedCount, references });
   return {
     sourceCount,
     evidenceCount,
@@ -1433,7 +1395,7 @@ async function assertPublicationRequirements(db: Db, articleId: string): Promise
     FROM reviews
     WHERE target_type = 'article' AND target_id = ${articleId} AND decision = 'approved'
   `;
-  const reviewedAt = timestamp((reviews[0] as Record<string, unknown> | undefined)?.reviewed_at);
+  const reviewedAt = timestampMs((reviews[0] as Record<string, unknown> | undefined)?.reviewed_at);
   if (!reviewedAt || reviewedAt < evidence.latestChangeAt) {
     throw new Error("Publication approval requires a current editorial review");
   }
@@ -1556,7 +1518,7 @@ export async function refreshClaimState(db: Db, claimId: string): Promise<ClaimS
     const familyId = row.provenance_family_id as string | null;
     const strength = SourceStrengthSchema.parse(row.source_strength);
     if (sourceStrengthOrder[strength] > sourceStrengthOrder[strongest]) strongest = strength;
-    const policy = SourcePolicySchema.parse(typeof row.source_policy === "string" ? JSON.parse(row.source_policy) : row.source_policy);
+    const policy = SourcePolicySchema.parse(parseStoredJson(row.source_policy));
     const review = await evidenceApprovalState(db, row.evidence_id as string, row.source_item_revision_id as string, policy);
     if (review.approved && sourceStrengthOrder[strength] > sourceStrengthOrder[strongestApproved]) strongestApproved = strength;
     if (!familyId) continue;
@@ -1803,10 +1765,6 @@ export async function createQuarantinedSubmission(db: Db, input: {
   });
 }
 
-function parseStoredJson<T>(value: unknown): T {
-  return typeof value === "string" ? JSON.parse(value) as T : value as T;
-}
-
 function moderationSubmission(row: Record<string, unknown>): PublicSubmissionForModeration {
   return {
     id: row.id as string,
@@ -1821,18 +1779,6 @@ function moderationSubmission(row: Record<string, unknown>): PublicSubmissionFor
     createdAt: new Date(row.created_at as string).toISOString(),
     updatedAt: new Date(row.updated_at as string).toISOString(),
   };
-}
-
-function moderationActor(actorId: string): string {
-  const actor = actorId.trim();
-  if (!SAFE_IDENTIFIER_PATTERN.test(actor)) throw new Error("A valid moderation actor is required");
-  return actor;
-}
-
-function moderationNotes(notes: string | undefined): string {
-  const value = notes?.trim() ?? "";
-  if (value.length > 2_000) throw new Error("Moderation notes exceed the 2,000 character limit");
-  return value;
 }
 
 export async function listPublicSubmissionsForModeration(
@@ -1894,9 +1840,9 @@ export async function reviewPublicSubmission(db: Db, input: {
   decision: PublicSubmissionReviewDecision;
   notes?: string;
 }): Promise<{ id: string; state: PublicSubmissionReviewDecision }> {
-  const actorId = moderationActor(input.actorId);
+  const actorId = validateModerationActor(input.actorId);
   const decision = PublicSubmissionReviewDecisionSchema.parse(input.decision);
-  const notes = moderationNotes(input.notes);
+  const notes = validateModerationNotes(input.notes);
   return inTransaction(db, async (transaction) => {
     const rows = await transaction`
       SELECT state, content_purged_at
@@ -1949,8 +1895,8 @@ export async function markPublicSubmissionPromoted(db: Db, input: {
   actorId: string;
   notes?: string;
 }): Promise<void> {
-  const actorId = moderationActor(input.actorId);
-  const notes = moderationNotes(input.notes);
+  const actorId = validateModerationActor(input.actorId);
+  const notes = validateModerationNotes(input.notes);
   const promoted = await db`
     UPDATE public_submissions
     SET state = 'promoted', promoted_source_item_id = ${input.sourceItemId}, updated_at = now()

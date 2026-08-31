@@ -35,6 +35,14 @@ export const SourceStrengthSchema = z.enum([
 ]);
 export type SourceStrength = z.infer<typeof SourceStrengthSchema>;
 
+export const sourceStrengthOrder: Record<SourceStrength, number> = {
+  UNVERIFIED: 0,
+  COMMUNITY: 1,
+  TRUSTED_SECONDARY: 2,
+  DIRECT_EVIDENCE: 3,
+  PRIMARY: 4,
+};
+
 export const PublicationModeSchema = z.enum(["normal", "discussion_only", "blocked"]);
 export type PublicationMode = z.infer<typeof PublicationModeSchema>;
 
@@ -65,6 +73,10 @@ export function retentionUntilMs(policy: Pick<SourcePolicy, "retainRawTextDays">
 
 export const InputKindSchema = z.enum(["url", "rss", "pasted_text", "local_file", "manual_fixture"]);
 export type InputKind = z.infer<typeof InputKindSchema>;
+
+export function ingestHttpStatus(inputKind: InputKind): number | null {
+  return inputKind === "url" || inputKind === "rss" ? 200 : null;
+}
 
 // Processing versions record which implementation produced a source revision
 // and which model computes claim confidence. Bump them when the corresponding
@@ -711,7 +723,7 @@ export function assertUniqueMedia(media: CatalogMedia[]): void {
   }
 }
 
-function normalizedText(value: string): string {
+export function normalizedText(value: string): string {
   return value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
 }
 
@@ -775,6 +787,22 @@ export const ArticleSchema = z.object({
   updatedAt: z.string().nullable(),
 });
 export type Article = z.infer<typeof ArticleSchema>;
+
+export function articleSlug(title: string, articleId: string): string {
+  return `${title.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/(^-|-$)/g, "")}-${articleId.slice(-8)}`;
+}
+
+export function articleEvidenceComplete(input: {
+  blockedBy: string | null;
+  sourceCount: number;
+  evidenceCount: number;
+  approvedCount: number;
+  references: Map<string, Set<string>>;
+}): boolean {
+  return input.blockedBy === null && input.sourceCount > 0 && input.evidenceCount > 0
+    && input.approvedCount === input.evidenceCount
+    && [...input.references.values()].every((evidenceIds) => evidenceIds.size > 0);
+}
 
 export type EventDisposition = "ignore" | "update_existing" | "research_new_article";
 
