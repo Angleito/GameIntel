@@ -314,6 +314,7 @@ describe("discovery schema", () => {
     conditions: ConditionsSchema.parse({}), firstSeenAt: "2026-08-27T00:00:00.000Z", gameBuilds: builds.map((version) => ({ buildId: `build-${version}`, version, platform: null, mode: null, region: null })),
     claims: [claim("c1", [evidence("family-a", "lineage-1", "official_document")])],
   });
+  const currentBuild = (version: string, context: Partial<Pick<GameBuildRef, "platform" | "mode" | "region">> = {}): GameBuildRef => ({ buildId: `build-${version}`, version, platform: context.platform ?? null, mode: context.mode ?? null, region: context.region ?? null });
 
   test("parses a full discovery document and applies defaults", () => {
     const parsed = DiscoverySchema.parse({
@@ -380,14 +381,31 @@ describe("discovery schema", () => {
   });
 
   test("demotes verified discoveries when an active build supersedes them", () => {
-    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), "1.4.0").status).toBe("needs_retest");
-    expect(applyActiveBuildChange(assemble("needs_retest", ["1.0"]), "1.4.0").status).toBe("needs_retest");
-    expect(applyActiveBuildChange(assemble("rejected", ["1.0"]), "1.4.0").status).toBe("rejected");
-    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), "1.0").status).toBe("verified");
-    expect(applyActiveBuildChange(assemble("verified", []), "1.4.0").status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), currentBuild("1.4.0")).status).toBe("needs_retest");
+    expect(applyActiveBuildChange(assemble("needs_retest", ["1.0"]), currentBuild("1.4.0")).status).toBe("needs_retest");
+    expect(applyActiveBuildChange(assemble("rejected", ["1.0"]), currentBuild("1.4.0")).status).toBe("rejected");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0"]), currentBuild("1.0")).status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", []), currentBuild("1.4.0")).status).toBe("verified");
     expect(applyActiveBuildChange(assemble("verified", ["1.0"]), null).status).toBe("verified");
-    expect(applyActiveBuildChange(assemble("verified", ["1.0", "1.4.0"]), "1.4.0").status).toBe("verified");
-    expect(applyActiveBuildChange(assemble("verified", ["1.0", "1.4.0"]), "1.5.0").status).toBe("needs_retest");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0", "1.4.0"]), currentBuild("1.4.0")).status).toBe("verified");
+    expect(applyActiveBuildChange(assemble("verified", ["1.0", "1.4.0"]), currentBuild("1.5.0")).status).toBe("needs_retest");
+  });
+
+  test("ignores current builds outside the discovery's applicability context", () => {
+    const pcDiscovery = (builds: string[], status: "verified" | "needs_retest" | "rejected" = "verified") => assembleDiscovery({
+      id: "d", collectionId: "gta-vi", gameProfileVersion: "1", canonicalTitle: "T",
+      categoryId: "vehicle", summary: "S", status, confidence: 0.9, newsworthiness: 80,
+      conditions: ConditionsSchema.parse({}), firstSeenAt: "2026-08-27T00:00:00.000Z",
+      gameBuilds: builds.map((version) => ({ buildId: `build-${version}`, version, platform: "pc", mode: null, region: null })),
+      claims: [claim("c1", [evidence("family-a", "lineage-1", "official_document")])],
+    });
+    // A PS5 current build must not retest a PC discovery; neither may a
+    // PC/online build (different mode) retest a PC-general one. A PC build
+    // in the matching context still demotes.
+    expect(applyActiveBuildChange(pcDiscovery(["1.0"]), currentBuild("1.8", { platform: "ps5" })).status).toBe("verified");
+    expect(applyActiveBuildChange(pcDiscovery(["1.0"]), currentBuild("1.8", { platform: "pc", mode: "online" })).status).toBe("verified");
+    expect(applyActiveBuildChange(pcDiscovery(["1.0"], "needs_retest"), currentBuild("1.8", { platform: "ps5" })).status).toBe("needs_retest");
+    expect(applyActiveBuildChange(pcDiscovery(["1.0"]), currentBuild("1.4", { platform: "pc" })).status).toBe("needs_retest");
   });
 
   test("requires a 64-character lowercase hex steps hash for reproductions", () => {
@@ -423,6 +441,9 @@ describe("discovery schema", () => {
     expect(DiscoverySchema.safeParse(document([ref("1.0", { platform: "pc" }), ref("1.4", { platform: "ps5" })])).success).toBe(false);
     expect(DiscoverySchema.safeParse(document([ref("1.0", { mode: "online" }), ref("1.4", { mode: "offline" })])).success).toBe(false);
     expect(DiscoverySchema.safeParse(document([ref("1.0", { region: "na" }), ref("1.4", { region: "eu" })])).success).toBe(false);
+    // pc/null is NOT the same context as pc/online/na — exact tuple including
+    // nulls is required.
+    expect(DiscoverySchema.safeParse(document([ref("1.0", { platform: "pc" }), ref("1.4", { platform: "pc", mode: "online", region: "na" })])).success).toBe(false);
   });
 
   test("accepts gameBuilds sharing one applicability context", () => {
@@ -444,7 +465,7 @@ describe("discovery schema", () => {
       gameBuilds,
     });
     const ref = (version: string, context: Partial<Pick<GameBuildRef, "platform" | "mode" | "region">> = {}): GameBuildRef => ({ buildId: `build-${version}`, version, platform: context.platform ?? null, mode: context.mode ?? null, region: context.region ?? null });
-    expect(DiscoverySchema.safeParse(document([ref("1.0", { platform: "pc" }), ref("1.4", { platform: "pc", mode: "online", region: "na" })])).success).toBe(true);
+    expect(DiscoverySchema.safeParse(document([ref("1.0", { platform: "pc", mode: "online", region: "na" }), ref("1.4", { platform: "pc", mode: "online", region: "na" })])).success).toBe(true);
     expect(DiscoverySchema.safeParse(document([ref("1.0"), ref("1.4")])).success).toBe(true);
   });
 });

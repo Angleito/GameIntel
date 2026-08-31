@@ -381,7 +381,7 @@ type Discovery = {
   confidence: number; // 0..1, evidence-derived
   newsworthiness: number; // 0..100, editorial triage only
   platforms: string[];
-  gameBuilds: string[];
+  gameBuilds: GameBuildRef[]; // { buildId, version, platform, mode, region } — one applicability context per discovery
   progressionContext: unknown | null;
   firstSeenAt: string;
   lastValidatedAt: string | null;

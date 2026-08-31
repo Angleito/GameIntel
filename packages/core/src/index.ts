@@ -508,22 +508,15 @@ export const DiscoverySchema = z.object({
   newsworthiness: z.number().min(0).max(100),
   platforms: z.array(z.string()).default([]),
   // Build references validated for this discovery. Single-context invariant,
-  // enforced here: all entries MUST share one applicability context
-  // (platform/mode/region). applyActiveBuildChange compares the list as one
-  // context, so a producer merging contexts could let a newer build on
-  // another platform mask a stale observation here. Producers must never
-  // merge contexts.
+  // enforced here: all entries MUST share one applicability context — the
+  // exact (platform, mode, region) tuple including nulls. applyActiveBuildChange
+  // compares the list as one context, so a producer merging contexts could
+  // let a newer build on another platform mask a stale observation here.
+  // Producers must never merge contexts.
   gameBuilds: z.array(GameBuildRefSchema).default([]).superRefine((refs, context) => {
     if (refs.length < 2) return;
-    // A ref that leaves a field null does not pin it; only conflicting
-    // non-null declarations across refs violate the single-context invariant
-    // (e.g. a pc build and a ps5 build in one list).
-    const fields: Array<"platform" | "mode" | "region"> = ["platform", "mode", "region"];
-    const conflict = fields.some((field) => {
-      const pinned = refs.filter((ref) => ref[field] !== null);
-      return pinned.some((ref) => ref[field] !== pinned[0][field]);
-    });
-    if (conflict) {
+    const first = refs[0];
+    if (!refs.every((ref) => ref.platform === first.platform && ref.mode === first.mode && ref.region === first.region)) {
       context.addIssue({ code: z.ZodIssueCode.custom, message: "All gameBuilds must share one applicability context (platform/mode/region)" });
     }
   }),
@@ -618,14 +611,18 @@ export function assembleDiscovery(input: {
   });
 }
 
-export function applyActiveBuildChange(discovery: Discovery, currentBuild: string | null): Discovery {
+export function applyActiveBuildChange(discovery: Discovery, currentBuild: GameBuildRef | null): Discovery {
   if (!currentBuild || discovery.gameBuilds.length === 0) return discovery;
+  // Context gate: only a current build in this discovery's exact applicability
+  // context can supersede its recorded builds. A newer build observed on
+  // another platform/mode/region must not force a retest here. (All
+  // gameBuilds share one exact tuple — enforced by DiscoverySchema.)
+  const context = discovery.gameBuilds[0];
+  if (currentBuild.platform !== context.platform || currentBuild.mode !== context.mode || currentBuild.region !== context.region) return discovery;
   // Demote only when the newest recorded build is superseded: a discovery
   // that already covers the current build is still valid.
-  // Precondition: all gameBuilds share one applicability context — enforced
-  // by the DiscoverySchema single-context refine (GameBuildRefSchema).
   const newestBuild = discovery.gameBuilds.reduce((newest, build) => (compareBuildVersions(build.version, newest.version) > 0 ? build : newest));
-  const superseded = compareBuildVersions(newestBuild.version, currentBuild) < 0;
+  const superseded = compareBuildVersions(newestBuild.version, currentBuild.version) < 0;
   if (superseded && discovery.status === "verified") return { ...discovery, status: "needs_retest" };
   return discovery;
 }
