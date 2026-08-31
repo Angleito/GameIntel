@@ -16,6 +16,7 @@ import type {
   SourceStrength,
   PublicationMode,
 } from "@gameintel/core";
+import type { Entity } from "@gameintel/core";
 import type { SourceDiscoverJobPayload, SourceIngestJobPayload, SourceInput } from "@gameintel/contracts";
 
 // In-memory adapter state. Records mirror the reference PostgreSQL schema.
@@ -66,6 +67,10 @@ export type CanonicalClaimRecord = {
   subject: string;
   predicate: string;
   value: string;
+  subjectEntityId: string | null;
+  objectEntityId: string | null;
+  validBuildFrom: string | null;
+  validBuildTo: string | null;
   qualifiers: Record<string, string>;
   canonicalKey: string;
   createdAt: string;
@@ -121,6 +126,10 @@ export type ClaimRecord = {
   subject: string;
   predicate: string;
   value: string;
+  subjectEntityId: string | null;
+  objectEntityId: string | null;
+  validBuildFrom: string | null;
+  validBuildTo: string | null;
   qualifiers: Record<string, string>;
   claimKey: string | null;
   spoilerTags: string[];
@@ -180,6 +189,25 @@ export type ArticleRecord = {
   publishedAt: string | null;
   createdAt: string;
   updatedAt: string;
+};
+export type EntityRecord = Entity;
+
+export type GuideRecord = {
+  id: string;
+  gameId: string;
+  slug: string;
+  title: string;
+  description: string;
+  spec: Record<string, unknown>;
+  status: "draft" | "published" | "retracted";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GuideClaimRecord = {
+  guideId: string;
+  claimId: string;
+  canonicalClaimId: string | null;
 };
 
 export type ArticleSourceRecord = {
@@ -315,6 +343,9 @@ export type MemoryStore = {
   articleMedia: Map<string, ArticleMediaRecord>;
   publicSubmissions: Map<string, PublicSubmissionRecord>;
   submissionActions: SubmissionActionRecord[];
+  entities: Map<string, EntityRecord>;
+  guides: Map<string, GuideRecord>;
+  guideClaims: GuideClaimRecord[];
 };
 
 export function createMemoryStore(): MemoryStore {
@@ -339,6 +370,9 @@ export function createMemoryStore(): MemoryStore {
     articleMedia: new Map(),
     publicSubmissions: new Map(),
     submissionActions: [],
+    entities: new Map(),
+    guides: new Map(),
+    guideClaims: [],
   };
 }
 

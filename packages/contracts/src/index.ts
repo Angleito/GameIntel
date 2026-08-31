@@ -14,6 +14,8 @@ import type {
   ProvenanceClusteringMethod,
   ProvenanceRelationship,
   ClaimState,
+  Entity,
+  EntityUpsertInput,
 } from "@gameintel/core";
 
 // GameIntel capability contracts. GameIntel Core depends on these interfaces,
@@ -289,6 +291,123 @@ export type CoverMediaCandidate = {
   publicUrl: string;
 };
 
+// ── Ontology knowledge views ───────────────────────────────────────────────
+// Typed read models over canonical claims, entities, and their publications.
+// The knowledge layer never exposes raw SQL; every query returns one of these
+// views.
+
+export type BuildApplicability = "current" | "historical" | "superseded" | "unknown";
+
+export type EntityResolution = {
+  status: "resolved" | "ambiguous" | "unresolved";
+  entityId: string | null;
+  candidates: string[];
+  entity: Entity | null;
+};
+
+export type RelationshipView = {
+  claimId: string;
+  canonicalClaimId: string;
+  predicate: string;
+  subject: { id: string; type: string; canonicalName: string } | null;
+  object: { id: string; type: string; canonicalName: string } | null;
+  objectValue: string | null;
+  qualifiers: Record<string, string>;
+  state: ClaimState;
+  buildApplicability: BuildApplicability;
+  evidenceFamilies: number;
+  stance: string;
+  hops: 1 | 2 | 3;
+};
+
+export type ClaimView = {
+  id: string;
+  collectionId: string;
+  subject: string;
+  predicate: string;
+  value: string;
+  qualifiers: Record<string, string>;
+  state: ClaimState;
+  evidenceLevel: string;
+  attributionType: string;
+  statement: string | null;
+  subjectEntityId: string | null;
+  objectEntityId: string | null;
+  validBuildFrom: string | null;
+  validBuildTo: string | null;
+  canonicalClaimId: string | null;
+};
+
+export type ClaimEvidenceView = {
+  id: string;
+  sourceItemId: string;
+  sourceItemRevisionId: string;
+  analysisRunId: string;
+  provenanceFamilyId: string;
+  stance: string;
+  evidenceType: string;
+  excerpt: string;
+  startMs: number | null;
+  endMs: number | null;
+  current: boolean;
+  approved: boolean;
+  sourceStrength: SourceStrength;
+  attributionType: string;
+  processingVersion: string | null;
+};
+
+export type ClaimExplanation = {
+  claim: ClaimView;
+  evidence: ClaimEvidenceView[];
+  provenanceFamilies: Array<{ id: string; memberCount: number; independent: boolean }>;
+  contradictions: Array<{ claimId: string; kind: "contradiction" | "build_change" }>;
+  publications: {
+    articles: Array<{ id: string; title: string; status: string }>;
+    guides: Array<{ id: string; title: string; status: string }>;
+  };
+};
+
+export type MapMarker = {
+  claimId: string;
+  canonicalClaimId: string;
+  predicate: string;
+  subject: { id: string; canonicalName: string; type: string };
+  object: { id: string; canonicalName: string; type: string };
+  coordinates: { x: number; y: number; z?: number };
+  state: ClaimState;
+  buildApplicability: BuildApplicability;
+};
+
+export type ClaimPublications = {
+  claimId: string;
+  articles: Array<{ id: string; title: string; status: string }>;
+  guides: Array<{ id: string; title: string; status: string }>;
+};
+
+export type GuideStatus = "draft" | "published" | "retracted";
+
+export type Guide = {
+  id: string;
+  collectionId: string;
+  slug: string;
+  title: string;
+  description: string;
+  spec: Record<string, unknown>;
+  status: GuideStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GuideClaimView = {
+  guideId: string;
+  claimId: string;
+  canonicalClaimId: string | null;
+  subject: string;
+  predicate: string;
+  value: string;
+  state: ClaimState | null;
+};
+
 export class IngestionLeaseLostError extends Error {
   constructor(jobKey: string) {
     super(`Ingestion job ${jobKey} lease is no longer held`);
@@ -302,9 +421,41 @@ export class SubmissionRateLimitError extends Error {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Persistence capabilities
-// ---------------------------------------------------------------------------
+export interface EntityRepository {
+  upsertEntity(input: EntityUpsertInput): Promise<{ id: string; created: boolean }>;
+  addEntityAlias(entityId: string, alias: string): Promise<void>;
+  getEntity(entityId: string): Promise<Entity | null>;
+  listEntities(collectionId: string): Promise<Entity[]>;
+  findEntities(input: { collectionId: string; type?: string; properties?: Record<string, string>; limit?: number }): Promise<Entity[]>;
+  resolveEntityMention(collectionId: string, mention: string): Promise<EntityResolution>;
+}
+
+export interface KnowledgeRepository {
+  getClaim(claimId: string): Promise<ClaimView | null>;
+  getClaimEvidence(claimId: string): Promise<ClaimEvidenceView[]>;
+  explainClaim(claimId: string, input?: { currentBuild?: string | null }): Promise<ClaimExplanation | null>;
+  findRelationships(input: {
+    collectionId: string;
+    subjectEntityId?: string;
+    predicate?: string;
+    objectEntityId?: string;
+    subjectType?: string;
+    objectType?: string;
+    states?: ClaimState[];
+    build?: string | null;
+  }): Promise<RelationshipView[]>;
+  getEntityRelationships(entityId: string, input: {
+    collectionId?: string;
+    hops?: 1 | 2 | 3;
+    predicates?: string[];
+    states?: ClaimState[];
+    build?: string | null;
+  }): Promise<RelationshipView[]>;
+  findClaimsByBuild(collectionId: string, build: string, input?: { predicate?: string; states?: ClaimState[] }): Promise<Array<ClaimView & { buildApplicability: BuildApplicability }>>;
+  findClaimsByLocation(collectionId: string, locationEntityId: string, input?: { predicates?: string[]; states?: ClaimState[] }): Promise<ClaimView[]>;
+  getMapProjection(collectionId: string, input?: { build?: string | null }): Promise<MapMarker[]>;
+  listPublicationsForClaims(claimIds: string[]): Promise<ClaimPublications[]>;
+}
 
 export interface SourceRepository {
   ensureGame(profile: GameProfile): Promise<void>;
@@ -349,7 +500,13 @@ export interface ClaimRepository {
   listAnalysisRuns(sourceItemRevisionId: string): Promise<AnalysisRunInfo[]>;
   getRevisionForAnalysis(revisionId: string): Promise<RevisionForAnalysis | null>;
   resolveExistingArticleForCanonicalClaims(canonicalClaimIds: string[]): Promise<string | null>;
-  refreshArticlesForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]>;
+  // Refreshes articles that cite the canonical claims and demotes guides that
+  // reference them (status -> "draft", audit `publication.invalidated`). A
+  // claim-state change always invalidates both publication surfaces.
+  refreshPublicationsForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<{ articleIds: string[]; guideIds: string[] }>;
+  // Sets the build validity range on the claim row AND its canonical claim
+  // row, so applicability queries agree across transports.
+  setClaimBuildRange(claimId: string, input: { from?: string | null; to?: string | null }): Promise<void>;
   // Canonical claim identity of EVERY claim belonging to the source item,
   // including claims from superseded revisions. Refreshing through the
   // union of old and new canonical ids is what makes a material source
@@ -410,6 +567,20 @@ export interface PublicationRepository {
   listPublicArticles(collectionId: string): Promise<SafeArticle[]>;
   markPublished(articleId: string, operator: string): Promise<Article>;
   purgeExpiredSourceContent(options?: { execute?: boolean }): Promise<SourceContentPurgeResult>;
+  // Guides are projections of canonical knowledge. Publishing requires every
+  // referenced claim's current state to be supported or confirmed; any
+  // claim-state change demotes the guide back to draft (publication boundary).
+  createGuideDraft(input: {
+    collectionId: string;
+    title: string;
+    description: string;
+    spec: Record<string, unknown>;
+    claimRefs: string[];
+  }): Promise<string>;
+  getGuide(guideId: string): Promise<Guide | null>;
+  listGuides(collectionId: string): Promise<Guide[]>;
+  listGuideClaims(guideId: string): Promise<GuideClaimView[]>;
+  publishGuide(guideId: string, operator: string): Promise<Guide>;
 }
 
 export interface SubmissionRepository {
@@ -463,7 +634,9 @@ export interface GameIntelPersistence extends
   PublicationRepository,
   SubmissionRepository,
   AuditRepository,
-  MediaRepository {
+  MediaRepository,
+  EntityRepository,
+  KnowledgeRepository {
   transaction<T>(callback: (transaction: GameIntelPersistence) => Promise<T>): Promise<T>;
   assertIngestionJobLeaseHeld(jobKey: string, leaseToken: string): Promise<void>;
 }

@@ -23,6 +23,18 @@ import {
   type SourceInput,
 } from "@gameintel/contracts";
 import {
+  type BuildApplicability,
+  type ClaimEvidenceView,
+  type ClaimExplanation,
+  type ClaimPublications,
+  type ClaimView,
+  type EntityResolution,
+  type Guide,
+  type GuideClaimView,
+  type MapMarker,
+  type RelationshipView,
+} from "@gameintel/contracts";
+import {
   ArticleCoverMediaSchema,
   ArticleSchema,
   articleEvidenceComplete,
@@ -43,6 +55,12 @@ import {
   SourceStrengthSchema,
   sourceStrengthOrder,
   toSafeArticle,
+  buildApplicability,
+  claimsPotentiallyContradict,
+  entityIdFor,
+  normalizeEntityName,
+  normalizePredicate,
+  resolveMention,
   type Article,
   type ArticleBody,
   type ClaimState,
@@ -53,6 +71,8 @@ import {
   type SafeArticle,
   type SourcePolicy,
   type SourceStrength,
+  type Entity,
+  type EntityUpsertInput,
 } from "@gameintel/core";
 import {
   articleRecordToArticle,
@@ -344,19 +364,18 @@ export class InMemoryPersistence implements GameIntelPersistence {
     for (const evidence of this.store.evidence.values()) {
       if (evidence.sourceItemId === input.sourceItemId) evidence.provenanceFamilyId = provenanceFamilyId;
     }
-    const affectedArticles = new Set<string>();
-    for (const articleSource of this.store.articleSources.values()) {
-      const claim = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
-      if (!claim) continue;
+    const affectedCanonicalIds = new Set<string>();
+    for (const claim of this.store.claims.values()) {
+      if (claim.sourceItemId !== input.sourceItemId) continue;
       const memberIds = [...this.store.claims.values()]
         .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === (claim.canonicalClaimId ?? claim.id))
         .map((candidate) => candidate.id);
       const hasEvidence = [...this.store.evidence.values()]
         .some((record) => record.sourceItemId === input.sourceItemId && memberIds.includes(record.claimId));
-      if (hasEvidence) affectedArticles.add(articleSource.articleId);
+      if (hasEvidence) affectedCanonicalIds.add(claim.canonicalClaimId ?? claim.id);
     }
-    for (const articleId of affectedArticles) {
-      await this.refreshArticleConfidence(articleId);
+    if (affectedCanonicalIds.size) {
+      await this.refreshPublicationsForCanonicalClaims([...affectedCanonicalIds], `provenance.${input.relationship}`, `Provenance changed for source item ${input.sourceItemId}`);
     }
     await this.audit(input.reviewerId, `provenance.${input.relationship}`, "source_item", input.sourceItemId, notes || `Related to ${input.relatedSourceItemId}`);
   }
@@ -374,12 +393,12 @@ export class InMemoryPersistence implements GameIntelPersistence {
     claim: NormalizedSourceItem["claims"][number],
     lineageId: string,
   ): Promise<InsertedClaim> {
-    const claimKey = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, qualifiers: claim.qualifiers });
+    const claimKey = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, subjectEntityId: claim.subjectEntityId, objectEntityId: claim.objectEntityId, qualifiers: claim.qualifiers });
     let claimRecord = [...this.store.claims.values()]
       .find((candidate) => candidate.sourceItemId === sourceItemId && candidate.claimKey === claimKey);
     let canonicalClaimId: string;
     if (claimRecord) {
-      canonicalClaimId = claimRecord.canonicalClaimId ?? this.resolveCanonicalClaimForRow(claimRecord.id, item.collectionId, claim.subject, claim.predicate, claim.value, claimRecord.qualifiers);
+      canonicalClaimId = claimRecord.canonicalClaimId ?? this.resolveCanonicalClaimForRow(claimRecord.id, item.collectionId, claim.subject, claim.predicate, claim.value, claim.subjectEntityId, claim.objectEntityId, claim.validBuildFrom, claim.validBuildTo, claimRecord.qualifiers);
     } else {
       const claimId = this.ids.generate("clm");
       claimRecord = {
@@ -389,6 +408,10 @@ export class InMemoryPersistence implements GameIntelPersistence {
         subject: claim.subject,
         predicate: claim.predicate,
         value: claim.value,
+        subjectEntityId: claim.subjectEntityId,
+        objectEntityId: claim.objectEntityId,
+        validBuildFrom: claim.validBuildFrom,
+        validBuildTo: claim.validBuildTo,
         qualifiers: { ...claim.qualifiers },
         claimKey,
         spoilerTags: [...claim.spoilerTags],
@@ -402,7 +425,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
         createdAt: this.clock.nowIso(),
       };
       this.store.claims.set(claimId, claimRecord);
-      canonicalClaimId = this.resolveCanonicalClaimForRow(claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
+      canonicalClaimId = this.resolveCanonicalClaimForRow(claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.subjectEntityId, claim.objectEntityId, claim.validBuildFrom, claim.validBuildTo, claim.qualifiers);
     }
     const existingEvidence = [...this.store.evidence.values()]
       .find((candidate) => candidate.claimId === claimRecord!.id && candidate.analysisRunId === analysisRunId);
@@ -433,9 +456,13 @@ export class InMemoryPersistence implements GameIntelPersistence {
     subject: string,
     predicate: string,
     value: string,
+    subjectEntityId: string | null,
+    objectEntityId: string | null,
+    validBuildFrom: string | null,
+    validBuildTo: string | null,
     qualifiers: Record<string, string>,
   ): string {
-    const key = canonicalClaimKey({ subject, predicate, value, qualifiers });
+    const key = canonicalClaimKey({ subject, predicate, value, subjectEntityId, objectEntityId, qualifiers });
     let canonical = [...this.store.canonicalClaims.values()]
       .find((candidate) => candidate.gameId === collectionId && candidate.canonicalKey === key);
     if (!canonical) {
@@ -445,6 +472,10 @@ export class InMemoryPersistence implements GameIntelPersistence {
         subject,
         predicate,
         value,
+        subjectEntityId,
+        objectEntityId,
+        validBuildFrom,
+        validBuildTo,
         qualifiers: { ...qualifiers },
         canonicalKey: key,
         createdAt: this.clock.nowIso(),
@@ -455,6 +486,10 @@ export class InMemoryPersistence implements GameIntelPersistence {
     if (claim) {
       claim.canonicalClaimId = canonical.id;
       claim.claimKey = key;
+      claim.subjectEntityId = canonical.subjectEntityId ?? claim.subjectEntityId;
+      claim.objectEntityId = canonical.objectEntityId ?? claim.objectEntityId;
+      claim.validBuildFrom = canonical.validBuildFrom ?? claim.validBuildFrom;
+      claim.validBuildTo = canonical.validBuildTo ?? claim.validBuildTo;
     }
     return canonical.id;
   }
@@ -462,7 +497,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
   private ensureCanonicalClaimsForSourceItem(sourceItemId: string): number {
     const unresolved = [...this.store.claims.values()].filter((claim) => claim.sourceItemId === sourceItemId && claim.canonicalClaimId === null);
     for (const claim of unresolved) {
-      this.resolveCanonicalClaimForRow(claim.id, claim.gameId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
+      this.resolveCanonicalClaimForRow(claim.id, claim.gameId, claim.subject, claim.predicate, claim.value, claim.subjectEntityId, claim.objectEntityId, claim.validBuildFrom, claim.validBuildTo, claim.qualifiers);
     }
     return unresolved.length;
   }
@@ -581,7 +616,7 @@ export class InMemoryPersistence implements GameIntelPersistence {
     return articles[0]?.id ?? null;
   }
 
-  async refreshArticlesForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]> {
+  async refreshPublicationsForCanonicalClaims(canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<{ articleIds: string[]; guideIds: string[] }> {
     const unique = new Set(canonicalClaimIds);
     const articleIds = new Set<string>();
     for (const articleSource of this.store.articleSources.values()) {
@@ -594,7 +629,20 @@ export class InMemoryPersistence implements GameIntelPersistence {
       await this.refreshArticleConfidence(articleId);
       await this.audit("system", auditAction, "article", articleId, auditReason);
     }
-    return [...articleIds];
+    const guideIds = new Set<string>();
+    for (const guideClaim of this.store.guideClaims) {
+      const claim = this.store.claims.get(guideClaim.claimId);
+      if (claim && unique.has(claim.canonicalClaimId ?? claim.id)) guideIds.add(guideClaim.guideId);
+    }
+    for (const guideId of guideIds) {
+      const guide = this.store.guides.get(guideId);
+      if (guide) {
+        guide.status = "draft";
+        guide.updatedAt = this.clock.nowIso();
+      }
+      await this.audit("system", "publication.invalidated", "guide", guideId, auditReason);
+    }
+    return { articleIds: [...articleIds], guideIds: [...guideIds] };
   }
 
   async canonicalClaimIdsForSourceItem(sourceItemId: string): Promise<string[]> {
@@ -725,20 +773,17 @@ export class InMemoryPersistence implements GameIntelPersistence {
   // -------------------------------------------------------------------------
 
   async invalidateEvidenceApprovalsForSourceItem(sourceItemId: string): Promise<void> {
-    const affectedArticles = new Set<string>();
-    for (const articleSource of this.store.articleSources.values()) {
-      const claim = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
-      if (!claim) continue;
+    const affectedCanonicalIds = new Set<string>();
+    for (const claim of this.store.claims.values()) {
+      if (claim.sourceItemId !== sourceItemId) continue;
       const memberIds = [...this.store.claims.values()]
         .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === (claim.canonicalClaimId ?? claim.id))
         .map((candidate) => candidate.id);
       const memberClaims = memberIds.map((id) => this.store.claims.get(id)).filter((candidate): candidate is ClaimRecord => candidate !== undefined);
-      if (memberClaims.some((candidate) => candidate.sourceItemId === sourceItemId)) affectedArticles.add(articleSource.articleId);
+      if (memberClaims.some((candidate) => candidate.sourceItemId === sourceItemId)) affectedCanonicalIds.add(claim.canonicalClaimId ?? claim.id);
     }
-    for (const articleId of affectedArticles) {
-      await this.refreshArticleEvidenceState(articleId);
-      await this.refreshArticleConfidence(articleId);
-      await this.audit("system", "evidence_review.invalidated", "article", articleId, "Underlying source evidence changed");
+    if (affectedCanonicalIds.size) {
+      await this.refreshPublicationsForCanonicalClaims([...affectedCanonicalIds], "evidence_review.invalidated", "Underlying source evidence changed");
     }
   }
 
@@ -813,18 +858,9 @@ export class InMemoryPersistence implements GameIntelPersistence {
       createdAt: this.clock.nowIso(),
     });
     await this.refreshClaimState(record.claimId);
-    const affectedArticles = new Set<string>();
     const claim = this.store.claims.get(record.claimId);
     if (claim) {
-      const identity = claim.canonicalClaimId ?? claim.id;
-      for (const articleSource of this.store.articleSources.values()) {
-        const referenced = articleSource.claimId ? this.store.claims.get(articleSource.claimId) : undefined;
-        if (referenced && (referenced.canonicalClaimId ?? referenced.id) === identity) affectedArticles.add(articleSource.articleId);
-      }
-    }
-    for (const articleId of affectedArticles) {
-      await this.refreshArticleEvidenceState(articleId);
-      await this.refreshArticleConfidence(articleId);
+      await this.refreshPublicationsForCanonicalClaims([claim.canonicalClaimId ?? claim.id], `evidence_review.${decision}`, `Evidence review ${decision} on ${evidenceId}`);
     }
     await this.audit(reviewerId, `evidence_review.${decision}`, "evidence", evidenceId, notes);
   }
@@ -1552,6 +1588,578 @@ export class InMemoryPersistence implements GameIntelPersistence {
     for (const [id, record] of this.store.articleMedia) {
       if (record.articleId === articleId && record.role === "cover") this.store.articleMedia.delete(id);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // EntityRepository
+  // -------------------------------------------------------------------------
+
+  async upsertEntity(input: EntityUpsertInput): Promise<{ id: string; created: boolean }> {
+    const collectionId = input.collectionId.trim();
+    if (!collectionId) throw new Error("Entity upsert requires a collection");
+    const type = input.type.trim();
+    if (!type) throw new Error("Entity upsert requires a type");
+    const canonicalName = input.canonicalName.trim();
+    if (!canonicalName) throw new Error("Entity upsert requires a canonical name");
+    const id = input.id?.trim() || entityIdFor(type, canonicalName);
+    const existingAtId = this.store.entities.get(id);
+    if (existingAtId && existingAtId.canonicalName !== canonicalName) {
+      throw new Error("Entity id collision; provide an explicit id");
+    }
+    const normalizedName = normalizeEntityName(canonicalName);
+    const aliases = (input.aliases ?? []).map((alias) => alias.trim()).filter((alias) => alias.length > 0);
+    // The ambiguity guard is two-directional: an identical canonical name
+    // returns the existing entity; a normalized-equal name or alias collision
+    // throws (never create duplicate entities).
+    let sameName: Entity | null = null;
+    let aliasOwner: Entity | null = null;
+    for (const entity of this.store.entities.values()) {
+      if (entity.collectionId !== collectionId) continue;
+      if (entity.canonicalName === canonicalName) sameName = entity;
+      if (normalizeEntityName(entity.canonicalName) === normalizedName || entity.aliases.some((alias) => normalizeEntityName(alias) === normalizedName)) aliasOwner = entity;
+      for (const alias of aliases) {
+        const normalizedAlias = normalizeEntityName(alias);
+        if (normalizeEntityName(entity.canonicalName) === normalizedAlias || entity.aliases.some((candidate) => normalizeEntityName(candidate) === normalizedAlias)) {
+          aliasOwner = entity;
+        }
+      }
+    }
+    if (sameName) return { id: sameName.id, created: false };
+    if (aliasOwner) throw new Error(`Alias already belongs to entity ${aliasOwner.id}`);
+    const now = this.clock.nowIso();
+    const existing = this.store.entities.get(id);
+    if (existing) {
+      // Entity ids are a global namespace; an id owned by another collection
+      // must never be hijacked by an upsert.
+      if (existing.collectionId !== collectionId) throw new Error("Entity id collision; provide an explicit id");
+      this.store.entities.set(id, {
+        ...existing,
+        canonicalName,
+        aliases: [...new Set([...existing.aliases, ...aliases])],
+        properties: { ...existing.properties, ...(input.properties ?? {}) },
+        coordinates: input.coordinates !== undefined ? input.coordinates : existing.coordinates,
+        updatedAt: now,
+      });
+      return { id, created: false };
+    }
+    this.store.entities.set(id, {
+      id,
+      collectionId,
+      type,
+      canonicalName,
+      aliases,
+      properties: { ...(input.properties ?? {}) },
+      coordinates: input.coordinates ?? null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { id, created: true };
+  }
+
+  async addEntityAlias(entityId: string, alias: string): Promise<void> {
+    const entity = this.store.entities.get(entityId);
+    if (!entity) throw new Error("Entity not found");
+    const normalizedAlias = normalizeEntityName(alias);
+    if (!normalizedAlias) throw new Error("Alias cannot be empty");
+    for (const candidate of this.store.entities.values()) {
+      if (candidate.collectionId !== entity.collectionId || candidate.id === entityId) continue;
+      if (normalizeEntityName(candidate.canonicalName) === normalizedAlias || candidate.aliases.some((existing) => normalizeEntityName(existing) === normalizedAlias)) {
+        throw new Error(`Alias already belongs to entity ${candidate.id}`);
+      }
+    }
+    entity.aliases = [...new Set([...entity.aliases, alias.trim()])];
+    entity.updatedAt = this.clock.nowIso();
+  }
+
+  async getEntity(entityId: string): Promise<Entity | null> {
+    return this.store.entities.get(entityId) ?? null;
+  }
+
+  async listEntities(collectionId: string): Promise<Entity[]> {
+    return [...this.store.entities.values()]
+      .filter((entity) => entity.collectionId === collectionId)
+      .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async findEntities(input: { collectionId: string; type?: string; properties?: Record<string, string>; limit?: number }): Promise<Entity[]> {
+    const properties = input.properties ?? {};
+    const matches = [...this.store.entities.values()]
+      .filter((entity) => entity.collectionId === input.collectionId)
+      .filter((entity) => input.type === undefined || entity.type === input.type)
+      .filter((entity) => Object.entries(properties).every(([key, value]) => entity.properties[key] === value))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    return input.limit !== undefined ? matches.slice(0, input.limit) : matches;
+  }
+
+  async resolveEntityMention(collectionId: string, mention: string): Promise<EntityResolution> {
+    const candidates = await this.listEntities(collectionId);
+    const result = resolveMention(candidates, mention);
+    if (result.status === "resolved") {
+      return { ...result, entity: this.store.entities.get(result.entityId!) ?? null };
+    }
+    return { ...result, entity: null };
+  }
+
+  // -------------------------------------------------------------------------
+  // KnowledgeRepository
+  // -------------------------------------------------------------------------
+
+  private claimViewFor(record: ClaimRecord): ClaimView {
+    return {
+      id: record.id,
+      collectionId: record.gameId,
+      subject: record.subject,
+      predicate: record.predicate,
+      value: record.value,
+      qualifiers: { ...record.qualifiers },
+      state: record.state,
+      evidenceLevel: record.evidenceLevel,
+      attributionType: record.attributionType,
+      statement: record.statement,
+      subjectEntityId: record.subjectEntityId,
+      objectEntityId: record.objectEntityId,
+      validBuildFrom: record.validBuildFrom,
+      validBuildTo: record.validBuildTo,
+      canonicalClaimId: record.canonicalClaimId,
+    };
+  }
+
+  private memberIdsFor(identity: string): Set<string> {
+    return new Set([...this.store.claims.values()]
+      .filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === identity)
+      .map((candidate) => candidate.id));
+  }
+
+  private currentEvidenceForIdentity(identity: string): EvidenceRecord[] {
+    const memberIds = this.memberIdsFor(identity);
+    return [...this.store.evidence.values()].filter((record) => {
+      if (!memberIds.has(record.claimId)) return false;
+      const revision = this.store.revisions.get(record.sourceItemRevisionId);
+      const run = this.store.analysisRuns.get(record.analysisRunId);
+      const latestRun = this.latestAnalysisRunForRevision(record.sourceItemRevisionId);
+      return revision?.isCurrent === true && run?.status === "completed" && latestRun?.id === run.id;
+    });
+  }
+
+  private canonicalRecordFor(record: ClaimRecord): CanonicalClaimRecord | null {
+    return record.canonicalClaimId ? this.store.canonicalClaims.get(record.canonicalClaimId) ?? null : null;
+  }
+
+  private applicabilityFor(record: ClaimRecord, build: string | null): BuildApplicability {
+    const canonical = this.canonicalRecordFor(record);
+    return buildApplicability(
+      {
+        validBuildFrom: canonical?.validBuildFrom ?? record.validBuildFrom,
+        validBuildTo: canonical?.validBuildTo ?? record.validBuildTo,
+      },
+      build,
+    );
+  }
+
+  async getClaim(claimId: string): Promise<ClaimView | null> {
+    const record = this.store.claims.get(claimId);
+    return record ? this.claimViewFor(record) : null;
+  }
+
+  async getClaimEvidence(claimId: string): Promise<ClaimEvidenceView[]> {
+    const record = this.store.claims.get(claimId);
+    if (!record) return [];
+    const identity = record.canonicalClaimId ?? record.id;
+    const rows: ClaimEvidenceView[] = [];
+    for (const evidence of this.currentEvidenceForIdentity(identity)) {
+      const revision = this.store.revisions.get(evidence.sourceItemRevisionId);
+      const item = this.store.sourceItems.get(evidence.sourceItemId);
+      const source = item ? this.store.sources.get(item.sourceId) : undefined;
+      const review = source ? this.evidenceApprovalState(evidence.id, evidence.sourceItemRevisionId, parsePolicy(source.policy)) : { approved: false, latestReviewAt: 0, blockedBy: null };
+      rows.push({
+        id: evidence.id,
+        sourceItemId: evidence.sourceItemId,
+        sourceItemRevisionId: evidence.sourceItemRevisionId,
+        analysisRunId: evidence.analysisRunId,
+        provenanceFamilyId: evidence.provenanceFamilyId,
+        stance: evidence.stance,
+        evidenceType: evidence.evidenceType,
+        excerpt: evidence.excerpt,
+        startMs: evidence.startMs,
+        endMs: evidence.endMs,
+        current: true,
+        approved: review.approved,
+        sourceStrength: SourceStrengthSchema.parse(item?.sourceStrength ?? "UNVERIFIED"),
+        attributionType: item ? this.store.sourceItemProvenance.get(item.id)?.relationship === "contradiction" ? "community" : item.sourceStrength : "unverified",
+        processingVersion: revision?.processingVersion ?? null,
+      });
+    }
+    return rows.sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async explainClaim(claimId: string, input: { currentBuild?: string | null } = {}): Promise<ClaimExplanation | null> {
+    const record = this.store.claims.get(claimId);
+    if (!record) return null;
+    const identity = record.canonicalClaimId ?? record.id;
+    const memberClaims = [...this.store.claims.values()].filter((candidate) => (candidate.canonicalClaimId ?? candidate.id) === identity);
+    const evidence = await this.getClaimEvidence(claimId);
+    const familyCounts = new Map<string, number>();
+    const familyIndependent = new Set<string>();
+    for (const row of evidence) {
+      familyCounts.set(row.provenanceFamilyId, (familyCounts.get(row.provenanceFamilyId) ?? 0) + 1);
+      if (row.evidenceType !== "copied_report") familyIndependent.add(row.provenanceFamilyId);
+    }
+    const provenanceFamilies = [...familyCounts.entries()].map(([id, memberCount]) => ({
+      id,
+      memberCount,
+      independent: familyIndependent.has(id),
+    })).sort((left, right) => left.id.localeCompare(right.id));
+    // Contradiction scanning is triple-wide, not canonical-family-wide: a
+    // claim whose build qualifier differs is a build_change (each true of its
+    // own build), which can only be seen across canonical families.
+    // ponytail: O(collection claims) pairwise scan per explainClaim; index
+    // by triple when knowledge queries dominate.
+    const contradictions: Array<{ claimId: string; kind: "contradiction" | "build_change" }> = [];
+    const recordStance = this.memberStance(record.id, identity);
+    for (const candidate of this.store.claims.values()) {
+      if (candidate.id === record.id || candidate.gameId !== record.gameId) continue;
+      const candidateIdentity = candidate.canonicalClaimId ?? candidate.id;
+      const kind = claimsPotentiallyContradict(
+        {
+          subjectEntityId: record.subjectEntityId,
+          subject: record.subject,
+          predicate: record.predicate,
+          objectEntityId: record.objectEntityId,
+          value: record.value,
+          qualifiers: record.qualifiers,
+          stance: recordStance,
+        },
+        {
+          subjectEntityId: candidate.subjectEntityId,
+          subject: candidate.subject,
+          predicate: candidate.predicate,
+          objectEntityId: candidate.objectEntityId,
+          value: candidate.value,
+          qualifiers: candidate.qualifiers,
+          stance: this.memberStance(candidate.id, candidateIdentity),
+        },
+      );
+      if (kind !== "distinct") contradictions.push({ claimId: candidate.id, kind });
+    }
+    const publications = await this.publicationsForIdentity(identity);
+    return {
+      claim: this.claimViewFor(record),
+      evidence,
+      provenanceFamilies,
+      contradictions,
+      publications,
+    };
+  }
+
+  private memberStance(claimId: string, identity: string): "supports" | "contradicts" | "context" {
+    const evidence = [...this.store.evidence.values()]
+      .filter((record) => record.claimId === claimId && this.memberIdsFor(identity).has(record.claimId));
+    const stances = new Set(evidence.map((record) => record.stance));
+    if (stances.has("contradicts")) return "contradicts";
+    if (stances.has("supports")) return "supports";
+    return "context";
+  }
+
+  private async publicationsForIdentity(identity: string): Promise<ClaimExplanation["publications"]> {
+    const articles: Array<{ id: string; title: string; status: string }> = [];
+    for (const articleSource of this.store.articleSources.values()) {
+      if (articleSource.claimId === null) continue;
+      const claim = this.store.claims.get(articleSource.claimId);
+      if (!claim || (claim.canonicalClaimId ?? claim.id) !== identity) continue;
+      const article = this.store.articles.get(articleSource.articleId);
+      if (article) articles.push({ id: article.id, title: article.title, status: article.status });
+    }
+    const guides: Array<{ id: string; title: string; status: string }> = [];
+    for (const guideClaim of this.store.guideClaims) {
+      const claim = this.store.claims.get(guideClaim.claimId);
+      if (!claim || (claim.canonicalClaimId ?? claim.id) !== identity) continue;
+      const guide = this.store.guides.get(guideClaim.guideId);
+      if (guide) guides.push({ id: guide.id, title: guide.title, status: guide.status });
+    }
+    return { articles, guides };
+  }
+
+  async findRelationships(input: {
+    collectionId: string;
+    subjectEntityId?: string;
+    predicate?: string;
+    objectEntityId?: string;
+    subjectType?: string;
+    objectType?: string;
+    states?: ClaimState[];
+    build?: string | null;
+  }): Promise<RelationshipView[]> {
+    const predicate = input.predicate !== undefined ? normalizePredicate(input.predicate) : undefined;
+    const states = input.states ? new Set(input.states) : null;
+    const entityType = (id: string | null): string | null => {
+      if (id === null) return null;
+      return this.store.entities.get(id)?.type ?? null;
+    };
+    const rows: RelationshipView[] = [];
+    for (const record of this.store.claims.values()) {
+      if (record.gameId !== input.collectionId) continue;
+      if (input.subjectEntityId !== undefined && record.subjectEntityId !== input.subjectEntityId) continue;
+      if (input.objectEntityId !== undefined && record.objectEntityId !== input.objectEntityId) continue;
+      if (predicate !== undefined && normalizePredicate(record.predicate) !== predicate) continue;
+      if (states && !states.has(record.state)) continue;
+      if (input.subjectType !== undefined && entityType(record.subjectEntityId) !== input.subjectType) continue;
+      if (input.objectType !== undefined && entityType(record.objectEntityId) !== input.objectType) continue;
+      rows.push(await this.relationshipViewFor(record, 1, input.build ?? null));
+    }
+    return rows.sort((left, right) => left.claimId.localeCompare(right.claimId));
+  }
+
+  private async relationshipViewFor(record: ClaimRecord, hops: 1 | 2 | 3, build: string | null): Promise<RelationshipView> {
+    const identity = record.canonicalClaimId ?? record.id;
+    const subject = record.subjectEntityId ? this.store.entities.get(record.subjectEntityId) : undefined;
+    const object = record.objectEntityId ? this.store.entities.get(record.objectEntityId) : undefined;
+    const evidenceFamilies = new Set(this.currentEvidenceForIdentity(identity).map((evidence) => evidence.provenanceFamilyId));
+    return {
+      claimId: record.id,
+      canonicalClaimId: record.canonicalClaimId ?? record.id,
+      predicate: record.predicate,
+      subject: subject ? { id: subject.id, type: subject.type, canonicalName: subject.canonicalName } : null,
+      object: object ? { id: object.id, type: object.type, canonicalName: object.canonicalName } : null,
+      objectValue: object ? null : record.value,
+      qualifiers: { ...record.qualifiers },
+      state: record.state,
+      buildApplicability: this.applicabilityFor(record, build),
+      evidenceFamilies: evidenceFamilies.size,
+      stance: this.memberStance(record.id, identity),
+      hops,
+    };
+  }
+
+  async getEntityRelationships(entityId: string, input: {
+    collectionId?: string;
+    hops?: 1 | 2 | 3;
+    predicates?: string[];
+    states?: ClaimState[];
+    build?: string | null;
+  } = {}): Promise<RelationshipView[]> {
+    const maxHops = input.hops ?? 1;
+    const predicates = input.predicates?.map((predicate) => normalizePredicate(predicate));
+    const states = input.states ? new Set(input.states) : null;
+    const build = input.build ?? null;
+    const seenClaimIds = new Set<string>();
+    const results: RelationshipView[] = [];
+    let frontier = new Set<string>([entityId]);
+    for (let hop = 1; hop <= maxHops; hop += 1) {
+      const next = new Set<string>();
+      for (const record of this.store.claims.values()) {
+        if (input.collectionId !== undefined && record.gameId !== input.collectionId) continue;
+        if (seenClaimIds.has(record.id)) continue;
+        const touches = (record.subjectEntityId !== null && frontier.has(record.subjectEntityId)) || (record.objectEntityId !== null && frontier.has(record.objectEntityId));
+        if (!touches) continue;
+        if (predicates && !predicates.includes(normalizePredicate(record.predicate))) continue;
+        if (states && !states.has(record.state)) continue;
+        const applicability = this.applicabilityFor(record, build);
+        if (build !== null && applicability === "unknown") continue;
+        seenClaimIds.add(record.id);
+        results.push(await this.relationshipViewFor(record, hop as 1 | 2 | 3, build));
+        if (record.subjectEntityId && !frontier.has(record.subjectEntityId)) next.add(record.subjectEntityId);
+        if (record.objectEntityId && !frontier.has(record.objectEntityId)) next.add(record.objectEntityId);
+      }
+      frontier = next;
+    }
+    return results.sort((left, right) => left.claimId.localeCompare(right.claimId));
+  }
+
+  async findClaimsByBuild(collectionId: string, build: string, input: { predicate?: string; states?: ClaimState[] } = {}): Promise<Array<ClaimView & { buildApplicability: BuildApplicability }>> {
+    const predicate = input.predicate !== undefined ? normalizePredicate(input.predicate) : undefined;
+    const states = input.states ? new Set(input.states) : null;
+    const rows: Array<ClaimView & { buildApplicability: BuildApplicability }> = [];
+    for (const record of this.store.claims.values()) {
+      if (record.gameId !== collectionId) continue;
+      if (predicate !== undefined && normalizePredicate(record.predicate) !== predicate) continue;
+      if (states && !states.has(record.state)) continue;
+      const applicability = this.applicabilityFor(record, build);
+      if (applicability === "unknown") continue;
+      rows.push({ ...this.claimViewFor(record), buildApplicability: applicability });
+    }
+    return rows.sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async findClaimsByLocation(collectionId: string, locationEntityId: string, input: { predicates?: string[]; states?: ClaimState[] } = {}): Promise<ClaimView[]> {
+    const predicates = input.predicates?.map((predicate) => normalizePredicate(predicate));
+    const states = input.states ? new Set(input.states) : null;
+    const rows: ClaimView[] = [];
+    for (const record of this.store.claims.values()) {
+      if (record.gameId !== collectionId) continue;
+      if (predicates && !predicates.includes(normalizePredicate(record.predicate))) continue;
+      if (states && !states.has(record.state)) continue;
+      const isObject = record.objectEntityId === locationEntityId;
+      const isSubject = record.subjectEntityId === locationEntityId && normalizePredicate(record.predicate) === "LOCATED_IN";
+      if (!isObject && !isSubject) continue;
+      rows.push(this.claimViewFor(record));
+    }
+    return rows.sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async getMapProjection(collectionId: string, input: { build?: string | null } = {}): Promise<MapMarker[]> {
+    const build = input.build ?? null;
+    const markers: MapMarker[] = [];
+    for (const record of this.store.claims.values()) {
+      if (record.gameId !== collectionId) continue;
+      if (record.state === "retracted") continue;
+      const predicate = normalizePredicate(record.predicate);
+      if (predicate !== "SPAWNS_AT" && predicate !== "LOCATED_AT") continue;
+      if (!record.subjectEntityId || !record.objectEntityId) continue;
+      const subject = this.store.entities.get(record.subjectEntityId);
+      const object = this.store.entities.get(record.objectEntityId);
+      if (!subject || !object || !object.coordinates) continue;
+      markers.push({
+        claimId: record.id,
+        canonicalClaimId: record.canonicalClaimId ?? record.id,
+        predicate: record.predicate,
+        subject: { id: subject.id, canonicalName: subject.canonicalName, type: subject.type },
+        object: { id: object.id, canonicalName: object.canonicalName, type: object.type },
+        coordinates: object.coordinates,
+        state: record.state,
+        buildApplicability: this.applicabilityFor(record, build),
+      });
+    }
+    return markers.sort((left, right) => left.claimId.localeCompare(right.claimId));
+  }
+
+  async listPublicationsForClaims(claimIds: string[]): Promise<ClaimPublications[]> {
+    const rows: ClaimPublications[] = [];
+    for (const claimId of claimIds) {
+      const record = this.store.claims.get(claimId);
+      if (!record) continue;
+      const identity = record.canonicalClaimId ?? record.id;
+      const publications = await this.publicationsForIdentity(identity);
+      rows.push({ claimId, ...publications });
+    }
+    return rows;
+  }
+
+  // -------------------------------------------------------------------------
+  // ClaimRepository: build ranges
+  // -------------------------------------------------------------------------
+
+  async setClaimBuildRange(claimId: string, input: { from?: string | null; to?: string | null }): Promise<void> {
+    const claim = this.store.claims.get(claimId);
+    if (!claim) throw new Error("Claim not found");
+    if (input.from !== undefined) {
+      claim.validBuildFrom = input.from;
+      const canonical = claim.canonicalClaimId ? this.store.canonicalClaims.get(claim.canonicalClaimId) : undefined;
+      if (canonical) canonical.validBuildFrom = input.from;
+    }
+    if (input.to !== undefined) {
+      claim.validBuildTo = input.to;
+      const canonical = claim.canonicalClaimId ? this.store.canonicalClaims.get(claim.canonicalClaimId) : undefined;
+      if (canonical) canonical.validBuildTo = input.to;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // PublicationRepository: guides
+  // -------------------------------------------------------------------------
+
+  async createGuideDraft(input: {
+    collectionId: string;
+    title: string;
+    description: string;
+    spec: Record<string, unknown>;
+    claimRefs: string[];
+  }): Promise<string> {
+    if (!this.store.games.has(input.collectionId)) throw new Error("Collection not found");
+    if (!input.title.trim() || !input.description.trim()) throw new Error("Guide title and description are required");
+    const guideId = this.ids.generate("gde");
+    const now = this.clock.nowIso();
+    this.store.guides.set(guideId, {
+      id: guideId,
+      gameId: input.collectionId,
+      slug: articleSlug(input.title, guideId),
+      title: input.title,
+      description: input.description,
+      spec: input.spec,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (const claimId of input.claimRefs) {
+      const claim = this.store.claims.get(claimId);
+      if (!claim) throw new Error(`Claim ${claimId} not found`);
+      this.store.guideClaims.push({
+        guideId,
+        claimId,
+        canonicalClaimId: claim.canonicalClaimId ?? claim.id,
+      });
+    }
+    return guideId;
+  }
+
+  async getGuide(guideId: string): Promise<Guide | null> {
+    const record = this.store.guides.get(guideId);
+    if (!record) return null;
+    return {
+      id: record.id,
+      collectionId: record.gameId,
+      slug: record.slug,
+      title: record.title,
+      description: record.description,
+      spec: record.spec,
+      status: record.status,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  async listGuides(collectionId: string): Promise<Guide[]> {
+    const guides = [...this.store.guides.values()]
+      .filter((record) => record.gameId === collectionId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map((record) => ({
+        id: record.id,
+        collectionId: record.gameId,
+        slug: record.slug,
+        title: record.title,
+        description: record.description,
+        spec: record.spec,
+        status: record.status,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+      }));
+    return guides;
+  }
+
+  async listGuideClaims(guideId: string): Promise<GuideClaimView[]> {
+    const rows: GuideClaimView[] = [];
+    for (const guideClaim of this.store.guideClaims) {
+      if (guideClaim.guideId !== guideId) continue;
+      const claim = this.store.claims.get(guideClaim.claimId);
+      rows.push({
+        guideId,
+        claimId: guideClaim.claimId,
+        canonicalClaimId: guideClaim.canonicalClaimId,
+        subject: claim?.subject ?? "",
+        predicate: claim?.predicate ?? "",
+        value: claim?.value ?? "",
+        state: claim?.state ?? null,
+      });
+    }
+    return rows.sort((left, right) => left.claimId.localeCompare(right.claimId));
+  }
+
+  async publishGuide(guideId: string, operator: string): Promise<Guide> {
+    const record = this.store.guides.get(guideId);
+    if (!record) throw new Error("Guide not found");
+    for (const guideClaim of this.store.guideClaims) {
+      if (guideClaim.guideId !== guideId) continue;
+      const claim = this.store.claims.get(guideClaim.claimId);
+      if (!claim) throw new Error(`Guide references missing claim ${guideClaim.claimId}`);
+      if (claim.state !== "supported" && claim.state !== "confirmed") {
+        throw new Error(`Guide cannot be published: claim ${claim.id} is ${claim.state}`);
+      }
+    }
+    record.status = "published";
+    record.updatedAt = this.clock.nowIso();
+    await this.audit(operator, "guide.published", "guide", guideId, "Published guide projection");
+    const guide = await this.getGuide(guideId);
+    if (!guide) throw new Error("Published guide is not readable");
+    return guide;
   }
 
   // -------------------------------------------------------------------------

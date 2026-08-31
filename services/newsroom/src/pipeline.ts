@@ -1,15 +1,23 @@
 import {
   CONFIDENCE_MODEL_VERSION,
   NORMALIZATION_VERSION,
+  defaultOntology,
   effectivePublicationMode,
+  mergedOntology,
+  normalizePredicate,
+  normalizeQualifiers,
   PublicationModeSchema,
+  resolveMention,
   SourcePolicySchema,
   SourceStrengthSchema,
   trustClassificationFor,
+  validateClaimAgainstOntology,
   type AttributionType,
+  type Entity,
   type EvidenceLevel,
   type InputKind,
   type NormalizedSourceItem,
+  type Ontology,
   type SourcePolicy,
 } from "@gameintel/core";
 import type {
@@ -18,7 +26,8 @@ import type {
   SourceInput,
 } from "@gameintel/contracts";
 import { CLAIM_EXTRACTOR_VERSION, extractClaims, prepareIngestion } from "@gameintel/pipeline";
-import { PiArticleDraftRuntime, type ArticleDraft } from "@gameintel/agent-runtime";
+import { type AiRuntime, type ArticleDraft } from "@gameintel/agent-runtime";
+import { loadCollectionProfile, profilePath } from "@gameintel/config";
 import type { Fixture } from "@gameintel/source-sdk";
 
 const authority: Record<NormalizedSourceItem["sourceStrength"], number> = {
@@ -167,14 +176,80 @@ function buildBodyFromClaims(claims: Array<{
 }
 
 export type LeaseFence = { jobKey: string; leaseToken: string };
+export type ProcessNormalizedItemResult = {
+  sourceItemId: string;
+  eventId: string;
+  articleId: string | null;
+  disposition: string;
+  duplicate: boolean;
+  warnings: string[];
+};
+
+export type ProcessFixtureResult = ProcessNormalizedItemResult;
 
 // Canonical claim resolution: the newest non-retracted article referencing
 // any member claim of the given canonical claims.
 async function resolveArticleForClaims(transaction: GameIntelPersistence, canonicalClaimIds: string[]): Promise<string | null> {
   return transaction.resolveExistingArticleForCanonicalClaims(canonicalClaimIds);
 }
+// The collection ontology is core ∪ profile. Profiles are operator-managed
+// files; a load failure must never block ingestion, so it degrades to the
+// core vocabulary (which is still enough to link canonical entities).
+const ontologyCache = new Map<string, Ontology>();
 
-export async function processNormalizedItem(persistence: GameIntelPersistence, item: NormalizedSourceItem, source: SourceInput, options: { submittedBy?: string | null; leaseFence?: LeaseFence | null } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; disposition: string; duplicate: boolean; warnings: string[] }> {
+async function ontologyFor(collectionId: string): Promise<Ontology> {
+  const cached = ontologyCache.get(collectionId);
+  if (cached) return cached;
+  let ontology: Ontology;
+  try {
+    const profile = await loadCollectionProfile(profilePath(collectionId));
+    ontology = mergedOntology(profile.ontology ?? { entityTypes: [], predicates: [] });
+  } catch {
+    ontology = defaultOntology();
+  }
+  ontologyCache.set(collectionId, ontology);
+  return ontology;
+}
+
+// Entity resolution for extracted claims: subject/object mentions link to
+// catalog entities when resolution AND ontology validation both pass.
+// Unresolved or ambiguous mentions leave the claim stored as plain text
+// (never auto-created entities); ambiguous subjects surface a warning.
+function resolveClaimEntities(
+  entities: Entity[],
+  claims: NormalizedSourceItem["claims"][number][],
+  ontology: Ontology,
+): { claims: NormalizedSourceItem["claims"][number][]; warnings: string[] } {
+  const warnings: string[] = [];
+  const resolved = claims.map((claim) => {
+    const predicate = normalizePredicate(claim.predicate);
+    const definition = ontology.predicates.find((candidate) => candidate.id === predicate);
+    let subjectEntityId: string | null = null;
+    let objectEntityId: string | null = null;
+    if (definition) {
+      const literalObject = definition.objectTypes.includes("literal");
+      const subject = resolveMention(entities, claim.subject);
+      const object = literalObject ? null : resolveMention(entities, claim.value);
+      if (subject.status === "ambiguous") warnings.push(`Ambiguous entity mention '${claim.subject}'`);
+      const subjectEntity = subject.status === "resolved" ? entities.find((entity) => entity.id === subject.entityId) : undefined;
+      const objectEntity = object?.status === "resolved" ? entities.find((entity) => entity.id === object.entityId) : undefined;
+      const issues = validateClaimAgainstOntology({
+        predicate,
+        subjectType: subjectEntity?.type ?? null,
+        objectType: literalObject ? null : objectEntity?.type ?? null,
+        ontology,
+      });
+      if (issues.length === 0) {
+        if (subjectEntity) subjectEntityId = subjectEntity.id;
+        if (objectEntity) objectEntityId = objectEntity.id;
+      }
+    }
+    return { ...claim, subjectEntityId, objectEntityId };
+  });
+  return { claims: resolved, warnings };
+}
+
+export async function processNormalizedItem(persistence: GameIntelPersistence, item: NormalizedSourceItem, source: SourceInput, options: { submittedBy?: string | null; leaseFence?: LeaseFence | null; ai?: AiRuntime | null } = {}): Promise<ProcessNormalizedItemResult> {
   if (!source.enabled) throw new Error(`Source ${source.id} is disabled by source policy`);
   if (item.sourceId !== source.id) throw new Error("Source item does not match its source policy");
   const sourceStrength = SourceStrengthSchema.parse(source.sourceStrength);
@@ -236,6 +311,7 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
 
     const claimIds: string[] = [];
     const canonicalClaimIds: string[] = [];
+    const resolutionWarnings: string[] = [];
     if (!existingRun) {
       const run = await transaction.createAnalysisRun({
         sourceItemRevisionId: currentRevisionId,
@@ -244,15 +320,58 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
         triggerReason: inserted.materialChange ? "material-change" : "initial-analysis",
       });
       // Extraction runs over the retained content so a later rerun of this
-      // revision reproduces the exact same claims.
+      // revision reproduces the exact same claims. LLM semantic extraction
+      // applies only to operator pasted-text/local-file intake with no
+      // pre-extracted claims and an analysis run that does not exist yet;
+      // it replaces the deterministic extraction when it returns claims and
+      // falls back silently (null) otherwise. Reprocessing never re-runs the
+      // LLM: a versioned run must stay reproducible.
       const analysisItem = { ...item, text: retainedText(item.text, policy) };
-      const extracted = extractClaims(analysisItem, item.sourceStrength);
-      for (const claim of extracted) {
+      let extracted: NormalizedSourceItem["claims"][number][] | null = null;
+      if (item.claims.length === 0
+        && (item.inputKind === "pasted_text" || item.inputKind === "local_file")
+        && options.ai?.extract) {
+        const entityCatalog = await transaction.listEntities(item.collectionId);
+        const semanticClaims = await options.ai.extract({
+          title: item.title,
+          text: retainedText(item.text, policy),
+          entityCatalog,
+        });
+        if (semanticClaims) {
+          const retained = retainedText(item.text, policy);
+          extracted = semanticClaims.map((claim) => ({
+            subject: claim.subject.name,
+            predicate: claim.predicate,
+            value: "name" in claim.object ? claim.object.name : claim.object.value,
+            subjectEntityId: null,
+            objectEntityId: null,
+            validBuildFrom: claim.validBuildFrom,
+            validBuildTo: claim.validBuildTo,
+            qualifiers: normalizeQualifiers(claim.qualifiers),
+            spoilerTags: [],
+            exploitClass: null,
+            evidenceLevel: "suspected",
+            attributionType: trust.attributionType,
+            statement: null,
+            editorialAssessment: null,
+            stance: claim.stance,
+            evidenceType: trust.evidenceType,
+            excerpt: retained.slice(0, 1_000),
+            startMs: null,
+            endMs: null,
+          }));
+        }
+      }
+      const finalClaims = extracted ?? extractClaims(analysisItem, item.sourceStrength);
+      const entities = await transaction.listEntities(item.collectionId);
+      const resolved = resolveClaimEntities(entities, finalClaims, await ontologyFor(item.collectionId));
+      resolutionWarnings.push(...resolved.warnings);
+      item = { ...item, claims: resolved.claims };
+      for (const claim of resolved.claims) {
         const insertedClaim = await transaction.insertClaim(analysisItem, inserted.id, currentRevisionId, run.id, inserted.provenanceFamilyId, claim, lineageId);
         claimIds.push(insertedClaim.claimId);
         canonicalClaimIds.push(insertedClaim.canonicalClaimId);
       }
-      item = { ...item, claims: extracted };
     }
     await transaction.refreshClaimStatesForSourceItem(inserted.id);
 
@@ -273,7 +392,7 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     // Discussion-only intake remains knowledge-only under the operator role.
     const refreshedForMaterialChange = inserted.materialChange && mayRefreshPublication;
     if (refreshedForMaterialChange) {
-      await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source materially changed; articles referencing old or new canonical claims were refreshed");
+      await transaction.refreshPublicationsForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source materially changed; articles or guides referencing old or new canonical claims were refreshed");
     }
 
     // Unchanged content whose analysis run is stale: the revision was just
@@ -284,9 +403,9 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
     // propagate to publication state.
     if (inserted.duplicate) {
       if (mayRefreshPublication) {
-        await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source unchanged; analysis rerun with current pipeline versions");
+        await transaction.refreshPublicationsForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source unchanged; analysis rerun with current pipeline versions");
       }
-      return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: ["Source content unchanged; analysis rerun with current pipeline versions"] };
+      return { sourceItemId: inserted.id, eventId: "duplicate", articleId: null, disposition: "duplicate", duplicate: true, warnings: [...resolutionWarnings, "Source content unchanged; analysis rerun with current pipeline versions"] };
     }
 
     const eventId = await transaction.createEvent({ collectionId: item.collectionId, sourceItemId: inserted.id, newsworthiness: score, disposition, existingArticleId });
@@ -310,12 +429,12 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
 
     if (disposition !== "research_new_article" || !source.publicCitationUrl || source.publicationMode !== "normal" || claimIds.length === 0) {
       if (mayRefreshPublication && !refreshedForMaterialChange) {
-        await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source evidence changed; articles referencing its canonical claims were refreshed");
+        await transaction.refreshPublicationsForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source evidence changed; articles or guides referencing its canonical claims were refreshed");
       }
       const warning = claimIds.length === 0
         ? "No claims were extracted from the source item"
         : "Source policy or public citation does not permit article output";
-      return { sourceItemId: inserted.id, eventId, articleId: null, disposition, duplicate: false, warnings: [warning] };
+      return { sourceItemId: inserted.id, eventId, articleId: null, disposition, duplicate: false, warnings: [...resolutionWarnings, warning] };
     }
 
     const claimConfidences: number[] = [];
@@ -325,14 +444,21 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
       : 0;
    const safeClaims = item.claims.map((claim, index) => ({ claim, claimId: claimIds[index] })).filter(({ claim }) => claim.spoilerTags.length === 0);
    let aiDraft: ArticleDraft | null = null;
-    if (process.env.PI_ENABLED === "true") {
-      aiDraft = await new PiArticleDraftRuntime().draft({
-       jobId: eventId,
-       collectionId: item.collectionId,
-        sourceItems: [{ id: inserted.id, title: item.title, excerpt: retainedText(item.text, policy), publicCitationUrl: source.publicCitationUrl!, lineageId }],
-       claims: item.claims.map((claim) => ({ subject: claim.subject, predicate: claim.predicate, value: claim.value, evidenceSourceId: inserted.id })),
-     });
-   }
+    if (options.ai) {
+      // AI is an assist: a provider failure must never block ingestion or
+      // publication, so drafting degrades to the deterministic draft.
+      try {
+        aiDraft = await options.ai.draft({
+          jobId: eventId,
+          collectionId: item.collectionId,
+          sourceItems: [{ id: inserted.id, title: item.title, excerpt: retainedText(item.text, policy), publicCitationUrl: source.publicCitationUrl!, lineageId }],
+          claims: item.claims.map((claim) => ({ subject: claim.subject, predicate: claim.predicate, value: claim.value, evidenceSourceId: inserted.id })),
+        });
+      } catch (error) {
+        resolutionWarnings.push(`AI drafting failed: ${error instanceof Error ? error.message : String(error)}`);
+        aiDraft = null;
+      }
+    }
    const content = buildDraftContent(item, source, claimIds, aiDraft);
    const articleId = await transaction.createArticleDraft({
      collectionId: item.collectionId,
@@ -349,19 +475,19 @@ export async function processNormalizedItem(persistence: GameIntelPersistence, i
      description: content.description,
      safeClaimText: safeClaims.map(({ claim }) => claimStatement(claim)),
    });
-   return { sourceItemId: inserted.id, eventId, articleId, disposition, duplicate: false, warnings: safeClaims.length ? [] : ["No spoiler-safe claims were available for the public draft"] };
+   return { sourceItemId: inserted.id, eventId, articleId, disposition, duplicate: false, warnings: [...resolutionWarnings, ...(safeClaims.length ? [] : ["No spoiler-safe claims were available for the public draft"])] };
   });
 }
 
-export async function processFixture(persistence: GameIntelPersistence, fixture: Fixture, options: { allowFixture?: boolean } = {}): Promise<{ sourceItemId: string; eventId: string; articleId: string | null; duplicate: boolean }> {
+export async function processFixture(persistence: GameIntelPersistence, fixture: Fixture, options: { allowFixture?: boolean; ai?: AiRuntime | null } = {}): Promise<ProcessFixtureResult> {
   if (!options.allowFixture) throw new Error("Fixture ingestion requires an explicit trusted local invocation");
   if (!fixture.source.enabled) throw new Error(`Fixture source ${fixture.source.id} is disabled by source policy`);
   if (fixture.item.sourceStrength !== fixture.source.sourceStrength || fixture.item.publicationMode !== fixture.source.publicationMode) {
     throw new Error("Fixture item trust metadata must match its source");
   }
   const item = { ...fixture.item, sourceId: fixture.source.id } as NormalizedSourceItem;
-  const result = await processNormalizedItem(persistence, item, fixture.source);
-  return { sourceItemId: result.sourceItemId, eventId: result.eventId, articleId: result.articleId, duplicate: result.duplicate };
+  const result = await processNormalizedItem(persistence, item, fixture.source, { ai: options.ai ?? null });
+  return { sourceItemId: result.sourceItemId, eventId: result.eventId, articleId: result.articleId, disposition: result.disposition, duplicate: result.duplicate, warnings: result.warnings };
 }
 
 // Explicit reprocessing: re-interprets an immutable source revision with the
@@ -411,20 +537,24 @@ export async function reprocessSourceRevision(persistence: GameIntelPersistence,
     const canonicalClaimIds: string[] = [];
     const provenance = await transaction.getSourceItemProvenance(revision.sourceItemId);
     const provenanceFamilyId = provenance?.provenanceFamilyId ?? revision.sourceItem.lineageId;
+    // Reprocessing is deterministic only: a versioned run must reproduce the
+    // original extraction exactly, so the LLM is never re-run here.
     const extracted = extractClaims(item, revision.sourceItem.sourceStrength);
-    for (const claim of extracted) {
-      const insertedClaim = await transaction.insertClaim(item, revision.sourceItemId, revision.id, run.id, provenanceFamilyId, claim, revision.sourceItem.lineageId);
+    const entities = await transaction.listEntities(revision.sourceItem.collectionId);
+    const resolved = resolveClaimEntities(entities, extracted, await ontologyFor(revision.sourceItem.collectionId));
+    const analyzedItem = { ...item, claims: resolved.claims };
+    for (const claim of resolved.claims) {
+      const insertedClaim = await transaction.insertClaim(analyzedItem, revision.sourceItemId, revision.id, run.id, provenanceFamilyId, claim, revision.sourceItem.lineageId);
       claimIds.push(insertedClaim.claimId);
       canonicalClaimIds.push(insertedClaim.canonicalClaimId);
     }
-    const analyzedItem = { ...item, claims: extracted };
     await transaction.refreshClaimStatesForSourceItem(revision.sourceItemId);
     const sourceCanonicalClaimIds = await transaction.canonicalClaimIdsForSourceItem(revision.sourceItemId);
     const affectedCanonicalClaimIds = [...new Set([...canonicalClaimIds, ...sourceCanonicalClaimIds])];
     // The CLI uses the privileged runtime, so it can invalidate publications
     // before resolving continuity. As above, only the re-extracted claims can
     // select an existing article; historical claims are invalidation-only.
-    await transaction.refreshArticlesForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source revision reprocessed with the current pipeline");
+    await transaction.refreshPublicationsForCanonicalClaims(affectedCanonicalClaimIds, "analysis_run.completed", "Source revision reprocessed with the current pipeline");
     const existingArticleId = await resolveArticleForClaims(transaction, canonicalClaimIds);
     if (existingArticleId && claimIds.length > 0 && revision.source.publicationMode === "normal" && revision.source.publicCitationUrl) {
       const publicCitationUrl = revision.source.publicCitationUrl;

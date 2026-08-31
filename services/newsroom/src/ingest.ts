@@ -8,6 +8,8 @@ import type { GameIntelPersistence, GameIntelRuntime, SourceInput } from "@gamei
 import { loadSourceRegistry, sourceRegistryPath, type SourceRegistryEntry } from "@gameintel/config";
 import { createManualSourceItem, parseArticleHtml } from "@gameintel/source-sdk";
 import { processNormalizedItem, reprocessSourceRevision } from "./pipeline.ts";
+import type { ProcessNormalizedItemResult } from "./pipeline.ts";
+import type { AiRuntime } from "@gameintel/agent-runtime";
 
 export { processNormalizedItem, reprocessSourceRevision } from "./pipeline.ts";
 
@@ -43,7 +45,7 @@ export async function sourceFor(entry: RegistryEntry, citationUrl: string | null
   } as const;
 }
 
-export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId: string; sourceId: string; url: string; profileId?: string }, fence?: { jobKey: string; leaseToken: string }): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
+export async function ingestUrl(runtime: GameIntelRuntime, input: { collectionId: string; sourceId: string; url: string; profileId?: string }, fence?: { jobKey: string; leaseToken: string }): Promise<ProcessNormalizedItemResult> {
   if (process.env.GAMEINTEL_FETCH_WORKER !== "true") {
     throw new Error("Registered URL ingestion is restricted to the isolated ingestion worker");
   }
@@ -84,7 +86,7 @@ export async function ingestText(persistence: GameIntelPersistence, input: {
   inputKind: "pasted_text" | "local_file";
   profileId?: string;
   submittedBy?: string | null;
-}): Promise<Awaited<ReturnType<typeof processNormalizedItem>>> {
+}, options: { ai?: AiRuntime | null } = {}): Promise<ProcessNormalizedItemResult> {
   const entry = (await loadRegistry(input.profileId ? sourceRegistryPath(input.profileId) : undefined)).find((candidate) => candidate.id === input.sourceId);
   if (!entry) throw new Error(`Source ${input.sourceId} is not registered`);
   if (entry.access !== "manual") throw new Error(`Source ${input.sourceId} requires URL ingestion`);
@@ -92,7 +94,7 @@ export async function ingestText(persistence: GameIntelPersistence, input: {
   const item = createManualSourceItem({ sourceId: entry.id, collectionId: input.collectionId, title: input.title, text: input.text, citationUrl: input.citationUrl, inputKind: input.inputKind });
   item.sourceStrength = entry.source_strength;
   item.publicationMode = source.publicationMode;
-  return processNormalizedItem(persistence, item, source, { submittedBy: input.submittedBy });
+  return processNormalizedItem(persistence, item, source, { submittedBy: input.submittedBy, ai: options.ai ?? null });
 }
 
 // Public report promotion is deliberate and preserves its lower trust class.
@@ -102,7 +104,7 @@ export async function promotePublicSubmission(runtime: GameIntelRuntime, input: 
   actorId: string;
   notes?: string;
   profileId?: string;
-}): Promise<{ submissionId: string; sourceItemId: string; eventId: string; duplicate: boolean }> {
+}, options: { ai?: AiRuntime | null } = {}): Promise<{ submissionId: string; sourceItemId: string; eventId: string; duplicate: boolean }> {
   if (!input.submissionId.trim()) throw new Error("A submission id is required");
   if (!input.actorId.trim()) throw new Error("A promotion actor is required");
   return runtime.persistence.transaction(async (transaction) => {
@@ -118,7 +120,7 @@ export async function promotePublicSubmission(runtime: GameIntelRuntime, input: 
       inputKind: "pasted_text",
       profileId,
       submittedBy: input.actorId,
-    });
+    }, { ai: options.ai ?? null });
     await transaction.markPublicSubmissionPromoted({
       submissionId: submission.id,
       sourceItemId: result.sourceItemId,

@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/ingest.ts",
     "./runtime": "./src/runtime.ts",
-    "./identity": "./src/identity.ts"
+    "./identity": "./src/identity.ts",
+    "./guides": "./src/guides.ts"
   },
   "scripts": {
     "typecheck": "bunx tsc --noEmit -p tsconfig.json"

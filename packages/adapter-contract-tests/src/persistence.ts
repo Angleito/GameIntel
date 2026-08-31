@@ -230,7 +230,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(changed.materialChange).toBe(true);
       const changedRun = await persistence.createAnalysisRun({ sourceItemRevisionId: changed.revisionId, versions: testVersions, triggerReason: "material-change" });
       const changedClaim = await persistence.insertClaim(changedA, changed.id, changed.revisionId, changedRun.id, changed.provenanceFamilyId, claimY, sourceA.lineageId!);
-      await persistence.refreshArticlesForCanonicalClaims([claimA.canonicalClaimId, changedClaim.canonicalClaimId], "analysis_run.completed", "Source A changed from X to Y");
+      await persistence.refreshPublicationsForCanonicalClaims([claimA.canonicalClaimId, changedClaim.canonicalClaimId], "analysis_run.completed", "Source A changed from X to Y");
 
       expect(await persistence.getArticle(articleId)).toMatchObject({ status: "draft", sourceReviewCompleted: false, approvedBy: null });
       await expect(persistence.reviewArticle(articleId, "editor", "Stale citation")).rejects.toThrow("current evidence approval");
@@ -244,9 +244,9 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(runs).toHaveLength(1);
       expect(runs[0].status).toBe("completed");
 
-      const newVersions: AnalysisVersions = { ...testVersions, claimExtractorVersion: "2" };
+      const newVersions: AnalysisVersions = { ...testVersions, claimExtractorVersion: "3" };
       const rerunRun = await persistence.createAnalysisRun({ sourceItemRevisionId: seededResult.revisionId, versions: newVersions, triggeredBy: "operator", triggerReason: "extractor-upgrade" });
-      expect(rerunRun.claimExtractorVersion).toBe("2");
+      expect(rerunRun.claimExtractorVersion).toBe("3");
       const after = await persistence.listAnalysisRuns(seededResult.revisionId);
       expect(after).toHaveLength(2);
       expect(after.find((run) => run.status === "completed")?.id).toBe(rerunRun.id);
@@ -281,7 +281,7 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       const evidence = await persistence.listArticleEvidence(articleId);
       expect(evidence).toHaveLength(2);
       expect(evidence.filter((row) => row.current)).toHaveLength(1);
-      await persistence.refreshArticlesForCanonicalClaims([seededResult.canonicalClaimId], "analysis_run.completed", "Rerun refresh");
+      await persistence.refreshPublicationsForCanonicalClaims([seededResult.canonicalClaimId], "analysis_run.completed", "Rerun refresh");
       expect(await persistence.getArticle(articleId)).toMatchObject({ status: "draft", sourceReviewCompleted: false });
     });
 
@@ -583,6 +583,181 @@ export function runPersistenceContract(factory: PersistenceFactory): void {
       expect(JSON.stringify(listed[0])).not.toContain("a".repeat(64));
       expect(await persistence.getPublicSubmissionForModeration(first.id)).toMatchObject({ state: "quarantined" });
       expect((await persistence.listPublicSubmissionModerationActions(first.id)).map((action) => action.action)).toEqual(["submitted"]);
+    });
+  });
+}
+// Ontology knowledge contract (plan section 9): entities, entity-linked
+// claims, build ranges, guides, and the map projection. Runs for every
+// transport in the release gate.
+export function runOntologyKnowledgeContract(factory: PersistenceFactory): void {
+  describe("ontology knowledge contract", () => {
+    let persistence: GameIntelPersistence;
+    let close: (() => Promise<void>) | undefined;
+
+    beforeEach(async () => {
+      const created = await factory();
+      persistence = created.persistence;
+      close = created.close;
+    });
+
+    afterEach(async () => {
+      await close?.();
+    });
+
+    async function seedEntities(): Promise<void> {
+      await persistence.ensureGame(testProfile());
+      // Explicit ids: entity ids are a global namespace, and the contract
+      // suite may share a database with other collections' catalogs.
+      await persistence.upsertEntity({
+        id: "vehicle:ct-turismo",
+        collectionId: "contract-test",
+        type: "vehicle",
+        canonicalName: "Grotti Turismo Omaggio",
+        aliases: ["Turismo", "Grotti Turismo"],
+        properties: { acquisition_cost: "0" },
+      });
+      await persistence.upsertEntity({
+        id: "location:ct-casino",
+        collectionId: "contract-test",
+        type: "location",
+        canonicalName: "Casino Parking Lot",
+        aliases: ["Vice City casino parking lot"],
+        coordinates: { x: 100, y: 200 },
+      });
+      await persistence.upsertEntity({ id: "patch:ct-1-04", collectionId: "contract-test", type: "patch", canonicalName: "1.04" });
+      await persistence.upsertEntity({ id: "patch:ct-1-05", collectionId: "contract-test", type: "patch", canonicalName: "1.05" });
+    }
+
+    async function insertEntityClaim(input: {
+      subject: string;
+      subjectEntityId: string;
+      predicate: string;
+      value: string;
+      objectEntityId: string | null;
+      qualifiers?: Record<string, string>;
+      validBuildTo?: string | null;
+      validBuildFrom?: string | null;
+      stance?: "supports" | "contradicts" | "context";
+    }): Promise<{ claimId: string; canonicalClaimId: string; item: ReturnType<typeof testItem> }> {
+      await persistence.ensureGame(testProfile());
+      await persistence.ensureSource(testSourceInput());
+      const item = testItem(undefined, {
+        claims: [{
+          subject: input.subject,
+          predicate: input.predicate,
+          value: input.value,
+          subjectEntityId: input.subjectEntityId,
+          objectEntityId: input.objectEntityId,
+          validBuildFrom: input.validBuildFrom ?? null,
+          validBuildTo: input.validBuildTo ?? null,
+          qualifiers: input.qualifiers ?? {},
+          spoilerTags: [],
+          exploitClass: null,
+          evidenceLevel: "suspected",
+          attributionType: "trusted_secondary",
+          statement: null,
+          editorialAssessment: null,
+          stance: input.stance ?? "supports",
+          evidenceType: "trusted_reporting",
+          excerpt: "Entity-linked contract observation.",
+          startMs: null,
+          endMs: null,
+        }],
+      });
+      const rawHash = hashText(`${item.title}\n${item.text}`);
+      const lineageId = lineageFor(item);
+      const inserted = await persistence.insertSourceItem(item, rawHash, lineageId, testPolicy(), null);
+      const run = await persistence.createAnalysisRun({ sourceItemRevisionId: inserted.revisionId, versions: testVersions, triggerReason: "ontology-contract" });
+      const insertedClaim = await persistence.insertClaim(item, inserted.id, inserted.revisionId, run.id, inserted.provenanceFamilyId, item.claims[0], lineageId);
+      await persistence.refreshClaimStatesForSourceItem(inserted.id);
+      return { claimId: insertedClaim.claimId, canonicalClaimId: insertedClaim.canonicalClaimId, item };
+    }
+
+    test("entity upsert, alias, collision guard, and mention resolution", async () => {
+      await seedEntities();
+      const entity = await persistence.getEntity("vehicle:ct-turismo");
+      expect(entity?.canonicalName).toBe("Grotti Turismo Omaggio");
+      const resolved = await persistence.resolveEntityMention("contract-test", "Turismo");
+      expect(resolved).toMatchObject({ status: "resolved", entityId: "vehicle:ct-turismo" });
+      expect(resolved.entity?.aliases).toContain("Turismo");
+      expect(await persistence.resolveEntityMention("contract-test", "Unknown Thing")).toMatchObject({ status: "unresolved", entityId: null });
+      // A new canonical name colliding with an existing alias is the ambiguity
+      // guard: never create duplicate entities.
+      await expect(persistence.upsertEntity({ collectionId: "contract-test", type: "location", canonicalName: "Vice City casino parking lot" })).rejects.toThrow(/alias already belongs to entity/i);
+      await persistence.addEntityAlias("vehicle:ct-turismo", "Turismo Omaggio");
+      expect(await persistence.resolveEntityMention("contract-test", "Turismo Omaggio")).toMatchObject({ status: "resolved", entityId: "vehicle:ct-turismo" });
+      await expect(persistence.upsertEntity({ collectionId: "contract-test", type: "vehicle", canonicalName: "Turismo" })).rejects.toThrow(/alias already belongs to entity/i);
+      const created = await persistence.upsertEntity({ collectionId: "contract-test", type: "vehicle", canonicalName: "Grotti Turismo Omaggio" });
+      expect(created.created).toBe(false);
+    });
+
+    test("entity-linked claims from two transports converge on one canonical claim", async () => {
+      await seedEntities();
+      const first = await insertEntityClaim({ subject: "Turismo", subjectEntityId: "vehicle:ct-turismo", predicate: "SPAWNS_AT", value: "Casino", objectEntityId: "location:ct-casino" });
+      const second = await insertEntityClaim({ subject: "Grotti Turismo Omaggio", subjectEntityId: "vehicle:ct-turismo", predicate: "spawns at", value: "Casino Parking Lot", objectEntityId: "location:ct-casino" });
+      expect(second.canonicalClaimId).toBe(first.canonicalClaimId);
+      const relationships = await persistence.findRelationships({ collectionId: "contract-test", predicate: "SPAWNS_AT" });
+      expect(relationships).toHaveLength(2);
+      expect(relationships[0].subject).toMatchObject({ id: "vehicle:ct-turismo" });
+      expect(relationships[0].object).toMatchObject({ id: "location:ct-casino" });
+    });
+
+    test("build ranges drive applicability and filter relationships", async () => {
+      await seedEntities();
+      const result = await insertEntityClaim({ subject: "Turismo", subjectEntityId: "vehicle:ct-turismo", predicate: "SPAWNS_AT", value: "Casino", objectEntityId: "location:ct-casino", validBuildFrom: "1.04", validBuildTo: "1.05" });
+      await persistence.setClaimBuildRange(result.claimId, { from: "1.04", to: "1.05" });
+      const at104 = await persistence.findClaimsByBuild("contract-test", "1.04");
+      expect(at104[0].buildApplicability).toBe("current");
+      const at106 = await persistence.findClaimsByBuild("contract-test", "1.06");
+      expect(at106[0].buildApplicability).toBe("superseded");
+      const at103 = await persistence.findClaimsByBuild("contract-test", "1.03");
+      expect(at103[0].buildApplicability).toBe("historical");
+      const filtered = await persistence.findRelationships({ collectionId: "contract-test", predicate: "SPAWNS_AT", build: "1.06" });
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].buildApplicability).toBe("superseded");
+      const subjectFilter = await persistence.findRelationships({ collectionId: "contract-test", subjectEntityId: "vehicle:ct-turismo" });
+      expect(subjectFilter).toHaveLength(1);
+      const objectFilter = await persistence.findRelationships({ collectionId: "contract-test", objectEntityId: "vehicle:ct-turismo" });
+      expect(objectFilter).toHaveLength(0);
+    });
+
+    test("guide draft, publish boundary, and demotion on claim change", async () => {
+      await seedEntities();
+      const result = await insertEntityClaim({ subject: "Turismo", subjectEntityId: "vehicle:ct-turismo", predicate: "SPAWNS_AT", value: "Casino", objectEntityId: "location:ct-casino" });
+      await persistence.refreshClaimState(result.claimId);
+      const guideId = await persistence.createGuideDraft({
+        collectionId: "contract-test",
+        title: "Turismo guide",
+        description: "Where the Turismo spawns.",
+        spec: { id: "turismo-guide", title: "Turismo guide", description: "Where the Turismo spawns.", query: { subjectType: "vehicle", properties: {}, minState: "supported", build: null }, sections: [] },
+        claimRefs: [result.claimId],
+      });
+      const published = await persistence.publishGuide(guideId, "operator");
+      expect(published.status).toBe("published");
+      // A contradicting member claim makes the canonical claim contested,
+      // which drops it below the guide publication boundary; the guide must
+      // demote and refuse re-publication until the claim recovers.
+      await insertEntityClaim({ subject: "Turismo", subjectEntityId: "vehicle:ct-turismo", predicate: "SPAWNS_AT", value: "Casino", objectEntityId: "location:ct-casino", stance: "contradicts" });
+      await persistence.refreshClaimState(result.claimId);
+      expect((await persistence.getClaim(result.claimId))?.state).toBe("contested");
+      await persistence.refreshPublicationsForCanonicalClaims([result.canonicalClaimId], "evidence_review.disputed", "Contract demotion test");
+      expect((await persistence.getGuide(guideId))?.status).toBe("draft");
+      await expect(persistence.publishGuide(guideId, "operator")).rejects.toThrow(/cannot be published/);
+    });
+
+    test("map projection returns markers with coordinates and claim ids", async () => {
+      await seedEntities();
+      const result = await insertEntityClaim({ subject: "Turismo", subjectEntityId: "vehicle:ct-turismo", predicate: "SPAWNS_AT", value: "Casino", objectEntityId: "location:ct-casino" });
+      const markers = await persistence.getMapProjection("contract-test");
+      expect(markers).toHaveLength(1);
+      expect(markers[0]).toMatchObject({
+        claimId: result.claimId,
+        canonicalClaimId: result.canonicalClaimId,
+        predicate: "SPAWNS_AT",
+        coordinates: { x: 100, y: 200 },
+      });
+      expect(markers[0].subject.id).toBe("vehicle:ct-turismo");
+      expect(markers[0].object.id).toBe("location:ct-casino");
     });
   });
 }

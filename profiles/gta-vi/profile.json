@@ -8,5 +8,9 @@
   "spoilerSafeCategories": ["news", "release"],
   "defaultExploitMode": "intended_only",
   "platforms": ["PS5", "Xbox Series X|S", "PC"],
-  "sourceQueries": ["GTA VI", "GTA 6", "Grand Theft Auto VI"]
+  "sourceQueries": ["GTA VI", "GTA 6", "Grand Theft Auto VI"],
+  "ontology": {
+    "entityTypes": ["safehouse", "heist", "business", "wanted_level"],
+    "predicates": []
+  }
 }

@@ -42,6 +42,18 @@ import type {
   SourcePacingStore,
 } from "@gameintel/contracts";
 import {
+  type BuildApplicability,
+  type ClaimEvidenceView,
+  type ClaimExplanation,
+  type ClaimPublications,
+  type ClaimView,
+  type EntityResolution,
+  type Guide,
+  type GuideClaimView,
+  type MapMarker,
+  type RelationshipView,
+} from "@gameintel/contracts";
+import {
   ArticleBodySchema,
   ArticleSchema,
   articleEvidenceComplete,
@@ -61,6 +73,14 @@ import {
   type EvidenceReviewDecision,
   type GameProfile,
   type NormalizedSourceItem,
+  buildApplicability,
+  claimsPotentiallyContradict,
+  entityIdFor,
+  normalizeEntityName,
+  normalizePredicate,
+  resolveMention,
+  type Entity,
+  type EntityUpsertInput,
   type PublicationMode,
   MediaCatalogSchema,
   mediaCoverScore,
@@ -282,11 +302,23 @@ async function createEvent(db: Db, input: { collectionId: string; sourceItemId: 
 // used for cross-source identity, so per-source and cross-source identity
 // share one rule. Legacy claim rows without a key/canonical link resolve
 // lazily here on their next touch.
-async function resolveCanonicalClaimForRow(db: Db, claimId: string, collectionId: string, subject: string, predicate: string, value: string, qualifiers: Record<string, string>): Promise<string> {
-  const key = canonicalClaimKey({ subject, predicate, value, qualifiers });
+async function resolveCanonicalClaimForRow(
+  db: Db,
+  claimId: string,
+  collectionId: string,
+  subject: string,
+  predicate: string,
+  value: string,
+  subjectEntityId: string | null,
+  objectEntityId: string | null,
+  validBuildFrom: string | null,
+  validBuildTo: string | null,
+  qualifiers: Record<string, string>,
+): Promise<string> {
+  const key = canonicalClaimKey({ subject, predicate, value, subjectEntityId, objectEntityId, qualifiers });
   const inserted = await db`
-    INSERT INTO canonical_claims (id, game_id, subject, predicate, value, qualifiers, canonical_key)
-    VALUES (${id("cc")}, ${collectionId}, ${subject}, ${predicate}, ${value}, ${JSON.stringify(qualifiers)}, ${key})
+    INSERT INTO canonical_claims (id, game_id, subject, predicate, value, subject_entity_id, object_entity_id, valid_build_from, valid_build_to, qualifiers, canonical_key)
+    VALUES (${id("cc")}, ${collectionId}, ${subject}, ${predicate}, ${value}, ${subjectEntityId}, ${objectEntityId}, ${validBuildFrom}, ${validBuildTo}, ${JSON.stringify(qualifiers)}, ${key})
     ON CONFLICT (game_id, canonical_key) DO NOTHING
     RETURNING id
   `;
@@ -300,13 +332,25 @@ async function resolveCanonicalClaimForRow(db: Db, claimId: string, collectionId
 
 async function ensureCanonicalClaimsForSourceItem(db: Db, sourceItemId: string): Promise<number> {
   const unresolved = await db`
-    SELECT id, game_id, subject, predicate, value, qualifiers
+    SELECT id, game_id, subject, predicate, value, subject_entity_id, object_entity_id, valid_build_from, valid_build_to, qualifiers
     FROM claims
     WHERE source_item_id = ${sourceItemId} AND canonical_claim_id IS NULL
   `;
   for (const claim of unresolved as Array<Record<string, unknown>>) {
     const qualifiers = typeof claim.qualifiers === "string" ? JSON.parse(claim.qualifiers) : claim.qualifiers as Record<string, string>;
-    await resolveCanonicalClaimForRow(db, claim.id as string, claim.game_id as string, claim.subject as string, claim.predicate as string, claim.value as string, qualifiers);
+    await resolveCanonicalClaimForRow(
+      db,
+      claim.id as string,
+      claim.game_id as string,
+      claim.subject as string,
+      claim.predicate as string,
+      claim.value as string,
+      (claim.subject_entity_id as string | null) ?? null,
+      (claim.object_entity_id as string | null) ?? null,
+      (claim.valid_build_from as string | null) ?? null,
+      (claim.valid_build_to as string | null) ?? null,
+      qualifiers,
+    );
   }
   return unresolved.length;
 }
@@ -326,8 +370,9 @@ export async function insertClaim(
 ): Promise<{ claimId: string; canonicalClaimId: string }> {
   // Per-source claim identity is qualifier-aware: the claim key includes
   // semantic qualifiers, so {time: night} and {time: day} are distinct
-  // claims even with the same subject/predicate/value.
-  const key = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, qualifiers: claim.qualifiers });
+  // claims even with the same subject/predicate/value. Entity ids participate
+  // in the identity when present.
+  const key = canonicalClaimKey({ subject: claim.subject, predicate: claim.predicate, value: claim.value, subjectEntityId: claim.subjectEntityId, objectEntityId: claim.objectEntityId, qualifiers: claim.qualifiers });
   let claimId: string;
   let canonicalClaimId: string;
   let existing = await db`SELECT id, canonical_claim_id, qualifiers FROM claims WHERE source_item_id = ${sourceItemId} AND claim_key = ${key} LIMIT 1`;
@@ -358,14 +403,14 @@ export async function insertClaim(
     const storedQualifiers = typeof (existing[0] as Record<string, unknown>).qualifiers === "string"
       ? JSON.parse((existing[0] as Record<string, unknown>).qualifiers as string)
       : (existing[0] as Record<string, unknown>).qualifiers as Record<string, string>;
-    canonicalClaimId = (existing[0].canonical_claim_id as string | null) ?? await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, storedQualifiers);
+    canonicalClaimId = (existing[0].canonical_claim_id as string | null) ?? await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.subjectEntityId, claim.objectEntityId, claim.validBuildFrom, claim.validBuildTo, storedQualifiers);
   } else {
     claimId = id("clm");
     await db`
-      INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, qualifiers, claim_key, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state)
-      VALUES (${claimId}, ${item.collectionId}, ${sourceItemId}, ${claim.subject}, ${claim.predicate}, ${claim.value}, ${JSON.stringify(claim.qualifiers)}, ${key}, ${JSON.stringify(claim.spoilerTags)}, ${claim.exploitClass}, ${claim.evidenceLevel}, ${claim.attributionType}, ${claim.statement}, ${claim.editorialAssessment}, 'unverified')
+      INSERT INTO claims (id, game_id, source_item_id, subject, predicate, value, subject_entity_id, object_entity_id, valid_build_from, valid_build_to, qualifiers, claim_key, spoiler_tags, exploit_class, evidence_level, attribution_type, statement, editorial_assessment, state)
+      VALUES (${claimId}, ${item.collectionId}, ${sourceItemId}, ${claim.subject}, ${claim.predicate}, ${claim.value}, ${claim.subjectEntityId}, ${claim.objectEntityId}, ${claim.validBuildFrom}, ${claim.validBuildTo}, ${JSON.stringify(claim.qualifiers)}, ${key}, ${JSON.stringify(claim.spoilerTags)}, ${claim.exploitClass}, ${claim.evidenceLevel}, ${claim.attributionType}, ${claim.statement}, ${claim.editorialAssessment}, 'unverified')
     `;
-    canonicalClaimId = await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.qualifiers);
+    canonicalClaimId = await resolveCanonicalClaimForRow(db, claimId, item.collectionId, claim.subject, claim.predicate, claim.value, claim.subjectEntityId, claim.objectEntityId, claim.validBuildFrom, claim.validBuildTo, claim.qualifiers);
   }
   const existingEvidence = await db`
     SELECT id FROM evidence
@@ -538,17 +583,19 @@ async function resolveExistingArticleForCanonicalClaims(db: Db, canonicalClaimId
 }
 
 // Refreshes every article that references any member claim of the given
-// canonical claims. Used after a source revision is re-analyzed so that new
+// canonical claims and demotes every guide that references them. Used after
+// a source revision is re-analyzed or an evidence review lands so that new
 // evidence (which needs fresh review) demotes stale publication state and
 // contradiction from any member source propagates to every referencing
-// article.
-async function refreshArticlesForCanonicalClaims(db: Db, canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<string[]> {
-  if (!canonicalClaimIds.length) return [];
+// article and guide.
+async function refreshPublicationsForCanonicalClaims(db: Db, canonicalClaimIds: string[], auditAction: string, auditReason: string): Promise<{ articleIds: string[]; guideIds: string[] }> {
+  if (!canonicalClaimIds.length) return { articleIds: [], guideIds: [] };
+  const unique = [...new Set(canonicalClaimIds)];
   const articles = await db`
     SELECT DISTINCT article_source.article_id
     FROM article_sources article_source
     JOIN claims claim ON claim.id = article_source.claim_id
-    WHERE COALESCE(claim.canonical_claim_id, claim.id) = ANY(${db.array([...new Set(canonicalClaimIds)])})
+    WHERE COALESCE(claim.canonical_claim_id, claim.id) = ANY(${db.array(unique)})
   `;
   const articleIds = articles.map((article) => article.article_id as string);
   for (const articleId of articleIds) {
@@ -556,7 +603,18 @@ async function refreshArticlesForCanonicalClaims(db: Db, canonicalClaimIds: stri
     await refreshArticleConfidence(db, articleId);
     await audit(db, "system", auditAction, "article", articleId, auditReason);
   }
-  return articleIds;
+  const guides = await db`
+    SELECT DISTINCT guide_claims.guide_id
+    FROM guide_claims
+    JOIN claims claim ON claim.id = guide_claims.claim_id
+    WHERE COALESCE(claim.canonical_claim_id, claim.id) = ANY(${db.array(unique)})
+  `;
+  const guideIds = guides.map((guide) => guide.guide_id as string);
+  for (const guideId of guideIds) {
+    await db`UPDATE guides SET status = 'draft', updated_at = now() WHERE id = ${guideId}`;
+    await audit(db, "system", "publication.invalidated", "guide", guideId, auditReason);
+  }
+  return { articleIds, guideIds };
 }
 
 async function canonicalClaimIdsForSourceItem(db: Db, sourceItemId: string): Promise<string[]> {
@@ -627,16 +685,17 @@ async function linkSourceItemProvenance(db: Db, input: {
       SET provenance_family_id = ${provenanceFamilyId}
       WHERE source_item_id = ${input.sourceItemId}
     `;
-    const affectedArticles = await transaction`
-      SELECT DISTINCT article_source.article_id
-      FROM article_sources article_source
-      JOIN claims claim ON claim.id = article_source.claim_id
+    const affectedCanonicalIds = await transaction`
+      SELECT DISTINCT COALESCE(cc.id, claim.id) AS canonical_claim_id
+      FROM claims claim
       LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
       JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
       JOIN evidence linked_evidence ON linked_evidence.claim_id = member.id
       WHERE linked_evidence.source_item_id = ${input.sourceItemId}
     `;
-    for (const article of affectedArticles) await refreshArticleConfidence(transaction, article.article_id as string);
+    if (affectedCanonicalIds.length) {
+      await refreshPublicationsForCanonicalClaims(transaction, affectedCanonicalIds.map((row) => row.canonical_claim_id as string), `provenance.${relationship}`, `Provenance changed for source item ${input.sourceItemId}`);
+    }
     await audit(
       transaction,
       input.reviewerId,
@@ -1422,19 +1481,9 @@ async function reviewEvidence(
       VALUES (${id("evrev")}, ${evidenceId}, ${record.source_item_revision_id as string}, ${reviewerId}, ${decision}, ${notes})
     `;
     await refreshClaimState(transaction, record.claim_id as string);
-    const articles = await transaction`
-      SELECT DISTINCT article_source.article_id
-      FROM article_sources article_source
-      JOIN claims claim ON claim.id = article_source.claim_id
-      LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
-      JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
-      JOIN evidence linked_evidence ON linked_evidence.claim_id = member.id
-      WHERE linked_evidence.id = ${evidenceId}
-    `;
-    for (const article of articles) {
-      const articleId = article.article_id as string;
-      await refreshArticleEvidenceState(transaction, articleId);
-      await refreshArticleConfidence(transaction, articleId);
+    const identity = await transaction`SELECT COALESCE(canonical_claim_id, id) AS identity FROM claims WHERE id = ${record.claim_id as string} LIMIT 1`;
+    if (identity.length) {
+      await refreshPublicationsForCanonicalClaims(transaction, [identity[0].identity as string], `evidence_review.${decision}`, `Evidence review ${decision} on ${evidenceId}`);
     }
     await audit(transaction, reviewerId, `evidence_review.${decision}`, "evidence", evidenceId, notes);
   });
@@ -1510,19 +1559,15 @@ async function refreshClaimStatesForSourceItem(db: Db, sourceItemId: string): Pr
 }
 
 async function invalidateEvidenceApprovalsForSourceItem(db: Db, sourceItemId: string): Promise<void> {
-  const articles = await db`
-    SELECT DISTINCT article_source.article_id
-    FROM article_sources article_source
-    JOIN claims claim ON claim.id = article_source.claim_id
+  const canonicalIds = await db`
+    SELECT DISTINCT COALESCE(cc.id, claim.id) AS canonical_claim_id
+    FROM claims claim
     LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
     JOIN claims member ON COALESCE(member.canonical_claim_id, member.id) = COALESCE(cc.id, claim.id)
     WHERE member.source_item_id = ${sourceItemId}
   `;
-  for (const article of articles) {
-    const articleId = article.article_id as string;
-    await refreshArticleEvidenceState(db, articleId);
-    await refreshArticleConfidence(db, articleId);
-    await audit(db, "system", "evidence_review.invalidated", "article", articleId, "Underlying source evidence changed");
+  if (canonicalIds.length) {
+    await refreshPublicationsForCanonicalClaims(db, canonicalIds.map((row) => row.canonical_claim_id as string), "evidence_review.invalidated", "Underlying source evidence changed");
   }
 }
 
@@ -2050,6 +2095,669 @@ export async function clearCoverMedia(db: Db, articleId: string): Promise<void> 
   });
 }
 
+// ── Ontology: entities, knowledge, guides ──────────────────────────────────
+
+async function entityFromRow(row: Record<string, unknown>): Promise<Entity> {
+  return {
+    id: row.id as string,
+    collectionId: row.collection_id as string,
+    type: row.type as string,
+    canonicalName: row.canonical_name as string,
+    aliases: parseStoredJson<string[]>(row.aliases) ?? [],
+    properties: parseStoredJson<Record<string, string>>(row.properties) ?? {},
+    coordinates: row.coordinates !== null && row.coordinates !== undefined ? parseStoredJson<{ x: number; y: number; z?: number }>(row.coordinates) : null,
+    createdAt: new Date(row.created_at as string).toISOString(),
+    updatedAt: new Date(row.updated_at as string).toISOString(),
+  };
+}
+
+export async function upsertEntity(db: Db, input: EntityUpsertInput): Promise<{ id: string; created: boolean }> {
+  const collectionId = input.collectionId.trim();
+  if (!collectionId) throw new Error("Entity upsert requires a collection");
+  const type = input.type.trim();
+  if (!type) throw new Error("Entity upsert requires a type");
+  const canonicalName = input.canonicalName.trim();
+  if (!canonicalName) throw new Error("Entity upsert requires a canonical name");
+  const entityId = input.id?.trim() || entityIdFor(type, canonicalName);
+  const existingAtId = await db`SELECT canonical_name FROM entities WHERE id = ${entityId} LIMIT 1`;
+  if (existingAtId.length && (existingAtId[0].canonical_name as string) !== canonicalName) {
+    throw new Error("Entity id collision; provide an explicit id");
+  }
+  const sameName = await db`SELECT id FROM entities WHERE collection_id = ${collectionId} AND canonical_name = ${canonicalName} LIMIT 1`;
+  if (sameName.length) return { id: sameName[0].id as string, created: false };
+  const aliases = (input.aliases ?? []).map((alias) => alias.trim()).filter((alias) => alias.length > 0);
+  const aliasOwners = await db`
+    SELECT id, canonical_name, aliases FROM entities WHERE collection_id = ${collectionId} AND id <> ${entityId}
+  `;
+  // The ambiguity guard is two-directional: the new canonical name must not
+  // collide with an existing entity's canonical name or aliases, and none of
+  // the new aliases may collide with an existing entity's names.
+  const normalizedName = normalizeEntityName(canonicalName);
+  const normalizedAliases = new Set(aliases.map((alias) => normalizeEntityName(alias)));
+  for (const candidate of aliasOwners as Array<Record<string, unknown>>) {
+    const owned = new Set([
+      normalizeEntityName(candidate.canonical_name as string),
+      ...(parseStoredJson<string[]>(candidate.aliases) ?? []).map((alias) => normalizeEntityName(alias)),
+    ]);
+    if (owned.has(normalizedName)) throw new Error(`Alias already belongs to entity ${candidate.id as string}`);
+    for (const normalizedAlias of normalizedAliases) {
+      if (owned.has(normalizedAlias)) throw new Error(`Alias already belongs to entity ${candidate.id as string}`);
+    }
+  }
+  const existing = await db`SELECT id, collection_id, aliases, properties, coordinates FROM entities WHERE id = ${entityId} LIMIT 1`;
+  if (existing.length) {
+    // Entity ids are a global namespace; an id owned by another collection
+    // must never be hijacked by an upsert.
+    if ((existing[0].collection_id as string) !== collectionId) {
+      throw new Error("Entity id collision; provide an explicit id");
+    }
+    const row = existing[0] as Record<string, unknown>;
+    const mergedAliases = [...new Set([...(parseStoredJson<string[]>(row.aliases) ?? []), ...aliases])];
+    const mergedProperties = { ...(parseStoredJson<Record<string, string>>(row.properties) ?? {}), ...(input.properties ?? {}) };
+    const coordinates: string | null = input.coordinates !== undefined
+      ? JSON.stringify(input.coordinates)
+      : row.coordinates !== null && row.coordinates !== undefined
+        ? JSON.stringify(row.coordinates)
+        : null;
+    await db`
+      UPDATE entities SET canonical_name = ${canonicalName}, aliases = ${JSON.stringify(mergedAliases)},
+        properties = ${JSON.stringify(mergedProperties)}, coordinates = ${coordinates}, updated_at = now()
+      WHERE id = ${entityId}
+    `;
+    return { id: entityId, created: false };
+  }
+  await db`
+    INSERT INTO entities (id, collection_id, type, canonical_name, aliases, properties, coordinates, created_at, updated_at)
+    VALUES (${entityId}, ${collectionId}, ${type}, ${canonicalName}, ${JSON.stringify(aliases)}, ${JSON.stringify(input.properties ?? {})}, ${input.coordinates !== undefined ? JSON.stringify(input.coordinates) : null}, now(), now())
+  `;
+  return { id: entityId, created: true };
+}
+
+export async function addEntityAlias(db: Db, entityId: string, alias: string): Promise<void> {
+  const entity = await db`SELECT collection_id, aliases FROM entities WHERE id = ${entityId} LIMIT 1`;
+  if (!entity.length) throw new Error("Entity not found");
+  const normalizedAlias = normalizeEntityName(alias);
+  if (!normalizedAlias) throw new Error("Alias cannot be empty");
+  const siblings = await db`
+    SELECT id, canonical_name, aliases FROM entities
+    WHERE collection_id = ${entity[0].collection_id as string} AND id <> ${entityId}
+  `;
+  for (const sibling of siblings as Array<Record<string, unknown>>) {
+    const owned = new Set([
+      normalizeEntityName(sibling.canonical_name as string),
+      ...(parseStoredJson<string[]>(sibling.aliases) ?? []).map((candidate) => normalizeEntityName(candidate)),
+    ]);
+    if (owned.has(normalizedAlias)) throw new Error(`Alias already belongs to entity ${sibling.id as string}`);
+  }
+  const aliases = [...new Set([...(parseStoredJson<string[]>(entity[0].aliases) ?? []), alias.trim()])];
+  await db`UPDATE entities SET aliases = ${JSON.stringify(aliases)}, updated_at = now() WHERE id = ${entityId}`;
+}
+
+export async function getEntity(db: Db, entityId: string): Promise<Entity | null> {
+  const rows = await db`
+    SELECT id, collection_id, type, canonical_name, aliases, properties, coordinates, created_at, updated_at
+    FROM entities WHERE id = ${entityId} LIMIT 1
+  `;
+  return rows.length ? entityFromRow(rows[0] as Record<string, unknown>) : null;
+}
+
+export async function listEntities(db: Db, collectionId: string): Promise<Entity[]> {
+  const rows = await db`
+    SELECT id, collection_id, type, canonical_name, aliases, properties, coordinates, created_at, updated_at
+    FROM entities WHERE collection_id = ${collectionId} ORDER BY id
+  `;
+  return Promise.all(rows.map((row) => entityFromRow(row as Record<string, unknown>)));
+}
+
+export async function findEntities(db: Db, input: { collectionId: string; type?: string; properties?: Record<string, string>; limit?: number }): Promise<Entity[]> {
+  const entities = await listEntities(db, input.collectionId);
+  const properties = input.properties ?? {};
+  const matches = entities
+    .filter((entity) => input.type === undefined || entity.type === input.type)
+    .filter((entity) => Object.entries(properties).every(([key, value]) => entity.properties[key] === value));
+  return input.limit !== undefined ? matches.slice(0, input.limit) : matches;
+}
+
+export async function resolveEntityMention(db: Db, collectionId: string, mention: string): Promise<EntityResolution> {
+  const candidates = await listEntities(db, collectionId);
+  const result = resolveMention(candidates, mention);
+  if (result.status === "resolved") {
+    return { ...result, entity: await getEntity(db, result.entityId!) };
+  }
+  return { ...result, entity: null };
+}
+
+const CLAIM_VIEW_SELECT = `
+  SELECT claim.id, claim.game_id, claim.subject, claim.predicate, claim.value,
+    claim.subject_entity_id, claim.object_entity_id, claim.valid_build_from, claim.valid_build_to,
+    claim.qualifiers, claim.state, claim.evidence_level, claim.attribution_type, claim.statement,
+    claim.canonical_claim_id, cc.valid_build_from AS cc_valid_build_from, cc.valid_build_to AS cc_valid_build_to
+`;
+
+function claimViewFromRow(row: Record<string, unknown>): ClaimView {
+  return {
+    id: row.id as string,
+    collectionId: row.game_id as string,
+    subject: row.subject as string,
+    predicate: row.predicate as string,
+    value: row.value as string,
+    qualifiers: parseStoredJson<Record<string, string>>(row.qualifiers) ?? {},
+    state: row.state as ClaimState,
+    evidenceLevel: row.evidence_level as string,
+    attributionType: row.attribution_type as string,
+    statement: (row.statement as string | null) ?? null,
+    subjectEntityId: (row.subject_entity_id as string | null) ?? null,
+    objectEntityId: (row.object_entity_id as string | null) ?? null,
+    validBuildFrom: (row.valid_build_from as string | null) ?? null,
+    validBuildTo: (row.valid_build_to as string | null) ?? null,
+    canonicalClaimId: (row.canonical_claim_id as string | null) ?? null,
+  };
+}
+
+function applicabilityFromRow(row: Record<string, unknown>, build: string | null): BuildApplicability {
+  return buildApplicability(
+    {
+      validBuildFrom: (row.cc_valid_build_from as string | null) ?? (row.valid_build_from as string | null),
+      validBuildTo: (row.cc_valid_build_to as string | null) ?? (row.valid_build_to as string | null),
+    },
+    build,
+  );
+}
+
+export async function getClaim(db: Db, claimId: string): Promise<ClaimView | null> {
+  const rows = await db`
+    ${db.unsafe(CLAIM_VIEW_SELECT)}
+    FROM claims claim
+    LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+    WHERE claim.id = ${claimId}
+    LIMIT 1
+  `;
+  return rows.length ? claimViewFromRow(rows[0] as Record<string, unknown>) : null;
+}
+
+async function currentEvidenceForIdentity(db: Db, identity: string): Promise<Array<Record<string, unknown>>> {
+  return (await db`
+    SELECT e.id, e.source_item_id, e.source_item_revision_id, e.analysis_run_id, e.provenance_family_id,
+      e.stance, e.evidence_type, e.excerpt, e.start_ms, e.end_ms, e.lineage_id,
+      revision.processing_version AS processing_version, item.source_strength AS source_strength,
+      source.policy AS source_policy
+    FROM claims member
+    JOIN evidence e ON e.claim_id = member.id
+    JOIN analysis_runs run ON run.id = e.analysis_run_id AND run.status = 'completed'
+      AND run.id = (
+        SELECT latest_run.id FROM analysis_runs latest_run
+        WHERE latest_run.source_item_revision_id = e.source_item_revision_id AND latest_run.status = 'completed'
+        ORDER BY latest_run.completed_at DESC, latest_run.id DESC LIMIT 1
+      )
+    JOIN source_item_revisions revision ON revision.id = e.source_item_revision_id AND revision.is_current = true
+    JOIN source_items item ON item.id = e.source_item_id
+    LEFT JOIN sources source ON source.id = item.source_id
+    WHERE COALESCE(member.canonical_claim_id, member.id) = ${identity}
+    ORDER BY e.id
+  `) as Array<Record<string, unknown>>;
+}
+
+export async function getClaimEvidence(db: Db, claimId: string): Promise<ClaimEvidenceView[]> {
+  const claim = await db`SELECT canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
+  if (!claim.length) return [];
+  const identity = (claim[0].canonical_claim_id as string | null) ?? claimId;
+  const rows = await currentEvidenceForIdentity(db, identity);
+  const views: ClaimEvidenceView[] = [];
+  for (const row of rows) {
+    const policy = row.source_policy !== null && row.source_policy !== undefined ? SourcePolicySchema.parse(parseStoredJson(row.source_policy)) : null;
+    const review = policy ? await evidenceApprovalState(db, row.id as string, row.source_item_revision_id as string, policy) : { approved: false, latestReviewAt: 0, blockedBy: null };
+    views.push({
+      id: row.id as string,
+      sourceItemId: row.source_item_id as string,
+      sourceItemRevisionId: row.source_item_revision_id as string,
+      analysisRunId: row.analysis_run_id as string,
+      provenanceFamilyId: row.provenance_family_id as string,
+      stance: row.stance as string,
+      evidenceType: row.evidence_type as string,
+      excerpt: row.excerpt as string,
+      startMs: row.start_ms as number | null,
+      endMs: row.end_ms as number | null,
+      current: true,
+      approved: review.approved,
+      sourceStrength: SourceStrengthSchema.parse(row.source_strength as string),
+      attributionType: (row.source_strength as string).toLowerCase(),
+      processingVersion: (row.processing_version as string | null) ?? null,
+    });
+  }
+  return views;
+}
+
+async function publicationsForIdentity(db: Db, identity: string): Promise<ClaimExplanation["publications"]> {
+  const articles = await db`
+    SELECT DISTINCT article.id, article.title, article.status
+    FROM article_sources article_source
+    JOIN claims claim ON claim.id = article_source.claim_id
+    JOIN articles article ON article.id = article_source.article_id
+    WHERE COALESCE(claim.canonical_claim_id, claim.id) = ${identity}
+  `;
+  const guides = await db`
+    SELECT DISTINCT guide.id, guide.title, guide.status
+    FROM guide_claims
+    JOIN claims claim ON claim.id = guide_claims.claim_id
+    JOIN guides guide ON guide.id = guide_claims.guide_id
+    WHERE COALESCE(claim.canonical_claim_id, claim.id) = ${identity}
+  `;
+  return {
+    articles: articles.map((row) => ({ id: row.id as string, title: row.title as string, status: row.status as string })),
+    guides: guides.map((row) => ({ id: row.id as string, title: row.title as string, status: row.status as string })),
+  };
+}
+
+async function memberStanceFor(db: Db, claimId: string, identity: string): Promise<"supports" | "contradicts" | "context"> {
+  const rows = await db`
+    SELECT e.stance FROM evidence e
+    JOIN claims member ON member.id = e.claim_id
+    WHERE member.id = ${claimId} AND COALESCE(member.canonical_claim_id, member.id) = ${identity}
+  `;
+  const stances = new Set(rows.map((row) => row.stance as string));
+  if (stances.has("contradicts")) return "contradicts";
+  if (stances.has("supports")) return "supports";
+  return "context";
+}
+
+export async function explainClaim(db: Db, claimId: string, input: { currentBuild?: string | null } = {}): Promise<ClaimExplanation | null> {
+  const rows = await db`
+    ${db.unsafe(CLAIM_VIEW_SELECT)}
+    FROM claims claim
+    LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+    WHERE claim.id = ${claimId}
+    LIMIT 1
+  `;
+  if (!rows.length) return null;
+  const row = rows[0] as Record<string, unknown>;
+  const identity = (row.canonical_claim_id as string | null) ?? claimId;
+  const evidence = await getClaimEvidence(db, claimId);
+  const familyCounts = new Map<string, number>();
+  const familyIndependent = new Set<string>();
+  for (const evidenceRow of evidence) {
+    familyCounts.set(evidenceRow.provenanceFamilyId, (familyCounts.get(evidenceRow.provenanceFamilyId) ?? 0) + 1);
+    if (evidenceRow.evidenceType !== "copied_report") familyIndependent.add(evidenceRow.provenanceFamilyId);
+  }
+  const provenanceFamilies = [...familyCounts.entries()].map(([id, memberCount]) => ({
+    id,
+    memberCount,
+    independent: familyIndependent.has(id),
+  })).sort((left, right) => left.id.localeCompare(right.id));
+  // Contradiction scanning is triple-wide, not canonical-family-wide: a
+  // claim whose build qualifier differs is a build_change (each true of its
+  // own build), which can only be seen across canonical families.
+  // ponytail: O(collection claims) pairwise scan per explainClaim; index
+  // by triple when knowledge queries dominate.
+  const candidates = await db`
+    SELECT id, game_id, subject, predicate, value, subject_entity_id, object_entity_id, valid_build_from, valid_build_to, qualifiers, canonical_claim_id
+    FROM claims
+    WHERE game_id = ${row.game_id as string}
+    ORDER BY id
+  `;
+  const recordStance = await memberStanceFor(db, claimId, identity);
+  const contradictions: Array<{ claimId: string; kind: "contradiction" | "build_change" }> = [];
+  for (const candidate of candidates as Array<Record<string, unknown>>) {
+    if ((candidate.id as string) === claimId) continue;
+    const candidateIdentity = (candidate.canonical_claim_id as string | null) ?? (candidate.id as string);
+    const kind = claimsPotentiallyContradict(
+      {
+        subjectEntityId: (row.subject_entity_id as string | null) ?? null,
+        subject: row.subject as string,
+        predicate: row.predicate as string,
+        objectEntityId: (row.object_entity_id as string | null) ?? null,
+        value: row.value as string,
+        qualifiers: parseStoredJson<Record<string, string>>(row.qualifiers) ?? {},
+        stance: recordStance,
+      },
+      {
+        subjectEntityId: (candidate.subject_entity_id as string | null) ?? null,
+        subject: candidate.subject as string,
+        predicate: candidate.predicate as string,
+        objectEntityId: (candidate.object_entity_id as string | null) ?? null,
+        value: candidate.value as string,
+        qualifiers: parseStoredJson<Record<string, string>>(candidate.qualifiers) ?? {},
+        stance: await memberStanceFor(db, candidate.id as string, candidateIdentity),
+      },
+    );
+    if (kind !== "distinct") contradictions.push({ claimId: candidate.id as string, kind });
+  }
+  return {
+    claim: claimViewFromRow(row),
+    evidence,
+    provenanceFamilies,
+    contradictions,
+    publications: await publicationsForIdentity(db, identity),
+  };
+}
+
+export async function findRelationships(db: Db, input: {
+  collectionId: string;
+  subjectEntityId?: string;
+  predicate?: string;
+  objectEntityId?: string;
+  subjectType?: string;
+  objectType?: string;
+  states?: ClaimState[];
+  build?: string | null;
+}): Promise<RelationshipView[]> {
+  const conditions = ["claim.game_id = ${collectionId}"];
+  const subjectType = input.subjectType !== undefined
+    ? await db`SELECT id FROM entities WHERE type = ${input.subjectType}`.then((rows) => new Set(rows.map((row) => row.id as string)))
+    : null;
+  const objectType = input.objectType !== undefined
+    ? await db`SELECT id FROM entities WHERE type = ${input.objectType}`.then((rows) => new Set(rows.map((row) => row.id as string)))
+    : null;
+  const rows = await db`
+    ${db.unsafe(CLAIM_VIEW_SELECT)},
+      subject_entity.type AS subject_type, subject_entity.canonical_name AS subject_canonical_name,
+      object_entity.type AS object_type, object_entity.canonical_name AS object_canonical_name
+    FROM claims claim
+    LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+    LEFT JOIN entities subject_entity ON subject_entity.id = claim.subject_entity_id
+    LEFT JOIN entities object_entity ON object_entity.id = claim.object_entity_id
+    WHERE claim.game_id = ${input.collectionId}
+    ORDER BY claim.id
+  `;
+  const build = input.build ?? null;
+  const out: RelationshipView[] = [];
+  for (const raw of rows as Array<Record<string, unknown>>) {
+    const claimId = raw.id as string;
+    if (input.subjectEntityId !== undefined && raw.subject_entity_id !== input.subjectEntityId) continue;
+    if (input.objectEntityId !== undefined && raw.object_entity_id !== input.objectEntityId) continue;
+    if (input.predicate !== undefined && normalizePredicate(raw.predicate as string) !== normalizePredicate(input.predicate)) continue;
+    if (subjectType && !subjectType.has(raw.subject_entity_id as string)) continue;
+    if (objectType && !objectType.has(raw.object_entity_id as string)) continue;
+    if (input.states && input.states.length && !input.states.includes(raw.state as ClaimState)) continue;
+    const applicability = applicabilityFromRow(raw, build);
+    const identity = (raw.canonical_claim_id as string | null) ?? claimId;
+    const subject = raw.subject_entity_id !== null && raw.subject_entity_id !== undefined
+      ? { id: raw.subject_entity_id as string, type: raw.subject_type as string, canonicalName: raw.subject_canonical_name as string }
+      : null;
+    const object = raw.object_entity_id !== null && raw.object_entity_id !== undefined
+      ? { id: raw.object_entity_id as string, type: raw.object_type as string, canonicalName: raw.object_canonical_name as string }
+      : null;
+    out.push({
+      claimId,
+      canonicalClaimId: identity,
+      predicate: raw.predicate as string,
+      subject,
+      object,
+      objectValue: object ? null : (raw.value as string),
+      qualifiers: parseStoredJson<Record<string, string>>(raw.qualifiers) ?? {},
+      state: raw.state as ClaimState,
+      buildApplicability: applicability,
+      evidenceFamilies: new Set((await currentEvidenceForIdentity(db, identity)).map((evidence) => evidence.provenance_family_id as string)).size,
+      stance: await memberStanceFor(db, claimId, identity),
+      hops: 1,
+    });
+  }
+  return out.sort((left, right) => left.claimId.localeCompare(right.claimId));
+}
+
+export async function getEntityRelationships(db: Db, entityId: string, input: {
+  collectionId?: string;
+  hops?: 1 | 2 | 3;
+  predicates?: string[];
+  states?: ClaimState[];
+  build?: string | null;
+} = {}): Promise<RelationshipView[]> {
+  const maxHops = input.hops ?? 1;
+  const build = input.build ?? null;
+  const predicates = input.predicates?.map((predicate) => normalizePredicate(predicate));
+  const states = input.states ? new Set(input.states) : null;
+  const seenClaimIds = new Set<string>();
+  const results: RelationshipView[] = [];
+  let frontier = new Set<string>([entityId]);
+  for (let hop = 1; hop <= maxHops; hop += 1) {
+    const next = new Set<string>();
+    const rows = await db`
+      ${db.unsafe(CLAIM_VIEW_SELECT)},
+        subject_entity.type AS subject_type, subject_entity.canonical_name AS subject_canonical_name,
+        object_entity.type AS object_type, object_entity.canonical_name AS object_canonical_name
+      FROM claims claim
+      LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+      LEFT JOIN entities subject_entity ON subject_entity.id = claim.subject_entity_id
+      LEFT JOIN entities object_entity ON object_entity.id = claim.object_entity_id
+      WHERE claim.subject_entity_id = ANY(${db.array([...frontier])})
+         OR claim.object_entity_id = ANY(${db.array([...frontier])})
+      ORDER BY claim.id
+    `;
+    for (const raw of rows as Array<Record<string, unknown>>) {
+      const claimId = raw.id as string;
+      if (seenClaimIds.has(claimId)) continue;
+      if (input.collectionId !== undefined && raw.game_id !== input.collectionId) continue;
+      if (predicates && !predicates.includes(normalizePredicate(raw.predicate as string))) continue;
+      if (states && !states.has(raw.state as ClaimState)) continue;
+      const applicability = applicabilityFromRow(raw, build);
+      if (build !== null && applicability === "unknown") continue;
+      seenClaimIds.add(claimId);
+      const identity = (raw.canonical_claim_id as string | null) ?? claimId;
+      const subject = raw.subject_entity_id !== null && raw.subject_entity_id !== undefined
+        ? { id: raw.subject_entity_id as string, type: raw.subject_type as string, canonicalName: raw.subject_canonical_name as string }
+        : null;
+      const object = raw.object_entity_id !== null && raw.object_entity_id !== undefined
+        ? { id: raw.object_entity_id as string, type: raw.object_type as string, canonicalName: raw.object_canonical_name as string }
+        : null;
+      results.push({
+        claimId,
+        canonicalClaimId: identity,
+        predicate: raw.predicate as string,
+        subject,
+        object,
+        objectValue: object ? null : (raw.value as string),
+        qualifiers: parseStoredJson<Record<string, string>>(raw.qualifiers) ?? {},
+        state: raw.state as ClaimState,
+        buildApplicability: applicability,
+        evidenceFamilies: new Set((await currentEvidenceForIdentity(db, identity)).map((evidence) => evidence.provenance_family_id as string)).size,
+        stance: await memberStanceFor(db, claimId, identity),
+        hops: hop as 1 | 2 | 3,
+      });
+      if (raw.subject_entity_id && !frontier.has(raw.subject_entity_id as string)) next.add(raw.subject_entity_id as string);
+      if (raw.object_entity_id && !frontier.has(raw.object_entity_id as string)) next.add(raw.object_entity_id as string);
+    }
+    frontier = next;
+    if (frontier.size === 0) break;
+  }
+  return results.sort((left, right) => left.claimId.localeCompare(right.claimId));
+}
+
+export async function findClaimsByBuild(db: Db, collectionId: string, build: string, input: { predicate?: string; states?: ClaimState[] } = {}): Promise<Array<ClaimView & { buildApplicability: BuildApplicability }>> {
+  const rows = await db`
+    ${db.unsafe(CLAIM_VIEW_SELECT)}
+    FROM claims claim
+    LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+    WHERE claim.game_id = ${collectionId}
+    ORDER BY claim.id
+  `;
+  const out: Array<ClaimView & { buildApplicability: BuildApplicability }> = [];
+  for (const raw of rows as Array<Record<string, unknown>>) {
+    if (input.predicate !== undefined && normalizePredicate(raw.predicate as string) !== normalizePredicate(input.predicate)) continue;
+    if (input.states && input.states.length && !input.states.includes(raw.state as ClaimState)) continue;
+    const applicability = applicabilityFromRow(raw, build);
+    if (applicability === "unknown") continue;
+    out.push({ ...claimViewFromRow(raw), buildApplicability: applicability });
+  }
+  return out.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+export async function findClaimsByLocation(db: Db, collectionId: string, locationEntityId: string, input: { predicates?: string[]; states?: ClaimState[] } = {}): Promise<ClaimView[]> {
+  const rows = await db`
+    ${db.unsafe(CLAIM_VIEW_SELECT)}
+    FROM claims claim
+    LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+    WHERE claim.game_id = ${collectionId}
+      AND (claim.object_entity_id = ${locationEntityId}
+        OR (claim.subject_entity_id = ${locationEntityId} AND UPPER(REPLACE(claim.predicate, ' ', '_')) = 'LOCATED_IN'))
+    ORDER BY claim.id
+  `;
+  const out: ClaimView[] = [];
+  for (const raw of rows as Array<Record<string, unknown>>) {
+    if (input.predicates && input.predicates.length && !input.predicates.map((predicate) => normalizePredicate(predicate)).includes(normalizePredicate(raw.predicate as string))) continue;
+    if (input.states && input.states.length && !input.states.includes(raw.state as ClaimState)) continue;
+    out.push(claimViewFromRow(raw));
+  }
+  return out;
+}
+
+export async function getMapProjection(db: Db, collectionId: string, input: { build?: string | null } = {}): Promise<MapMarker[]> {
+  const build = input.build ?? null;
+  const rows = await db`
+    SELECT claim.id, claim.canonical_claim_id, claim.predicate, claim.state,
+      claim.subject_entity_id, claim.object_entity_id,
+      subject_entity.canonical_name AS subject_canonical_name, subject_entity.type AS subject_type,
+      object_entity.canonical_name AS object_canonical_name, object_entity.type AS object_type,
+      object_entity.coordinates AS object_coordinates,
+      claim.valid_build_from, claim.valid_build_to,
+      cc.valid_build_from AS cc_valid_build_from, cc.valid_build_to AS cc_valid_build_to
+    FROM claims claim
+    LEFT JOIN canonical_claims cc ON cc.id = claim.canonical_claim_id
+    JOIN entities subject_entity ON subject_entity.id = claim.subject_entity_id
+    JOIN entities object_entity ON object_entity.id = claim.object_entity_id
+    WHERE claim.game_id = ${collectionId}
+      AND claim.state <> 'retracted'
+      AND (UPPER(REPLACE(claim.predicate, ' ', '_')) = 'SPAWNS_AT' OR UPPER(REPLACE(claim.predicate, ' ', '_')) = 'LOCATED_AT')
+      AND object_entity.coordinates IS NOT NULL
+    ORDER BY claim.id
+  `;
+  return (rows as Array<Record<string, unknown>>).map((row) => ({
+    claimId: row.id as string,
+    canonicalClaimId: (row.canonical_claim_id as string | null) ?? (row.id as string),
+    predicate: row.predicate as string,
+    subject: { id: row.subject_entity_id as string, canonicalName: row.subject_canonical_name as string, type: row.subject_type as string },
+    object: { id: row.object_entity_id as string, canonicalName: row.object_canonical_name as string, type: row.object_type as string },
+    coordinates: parseStoredJson<{ x: number; y: number; z?: number }>(row.object_coordinates),
+    state: row.state as ClaimState,
+    buildApplicability: buildApplicability(
+      {
+        validBuildFrom: (row.cc_valid_build_from as string | null) ?? (row.valid_build_from as string | null),
+        validBuildTo: (row.cc_valid_build_to as string | null) ?? (row.valid_build_to as string | null),
+      },
+      build,
+    ),
+  }));
+}
+
+export async function listPublicationsForClaims(db: Db, claimIds: string[]): Promise<ClaimPublications[]> {
+  const out: ClaimPublications[] = [];
+  for (const claimId of claimIds) {
+    const claim = await db`SELECT canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
+    if (!claim.length) continue;
+    out.push({ claimId, ...(await publicationsForIdentity(db, (claim[0].canonical_claim_id as string | null) ?? claimId)) });
+  }
+  return out;
+}
+
+export async function setClaimBuildRange(db: Db, claimId: string, input: { from?: string | null; to?: string | null }): Promise<void> {
+  const claim = await db`SELECT canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
+  if (!claim.length) throw new Error("Claim not found");
+  if (input.from !== undefined) {
+    await db`UPDATE claims SET valid_build_from = ${input.from} WHERE id = ${claimId}`;
+    if (claim[0].canonical_claim_id !== null) {
+      await db`UPDATE canonical_claims SET valid_build_from = ${input.from} WHERE id = ${claim[0].canonical_claim_id as string}`;
+    }
+  }
+  if (input.to !== undefined) {
+    await db`UPDATE claims SET valid_build_to = ${input.to} WHERE id = ${claimId}`;
+    if (claim[0].canonical_claim_id !== null) {
+      await db`UPDATE canonical_claims SET valid_build_to = ${input.to} WHERE id = ${claim[0].canonical_claim_id as string}`;
+    }
+  }
+}
+
+export async function createGuideDraft(db: Db, input: {
+  collectionId: string;
+  title: string;
+  description: string;
+  spec: Record<string, unknown>;
+  claimRefs: string[];
+}): Promise<string> {
+  const game = await db`SELECT id FROM games WHERE id = ${input.collectionId} LIMIT 1`;
+  if (!game.length) throw new Error("Collection not found");
+  if (!input.title.trim() || !input.description.trim()) throw new Error("Guide title and description are required");
+  const guideId = id("gde");
+  await db`
+    INSERT INTO guides (id, collection_id, slug, title, description, spec, status, created_at, updated_at)
+    VALUES (${guideId}, ${input.collectionId}, ${articleSlug(input.title, guideId)}, ${input.title}, ${input.description}, ${JSON.stringify(input.spec)}, 'draft', now(), now())
+  `;
+  for (const claimId of input.claimRefs) {
+    const claim = await db`SELECT canonical_claim_id FROM claims WHERE id = ${claimId} LIMIT 1`;
+    if (!claim.length) throw new Error(`Claim ${claimId} not found`);
+    await db`
+      INSERT INTO guide_claims (guide_id, claim_id, canonical_claim_id)
+      VALUES (${guideId}, ${claimId}, ${(claim[0].canonical_claim_id as string | null) ?? claimId})
+    `;
+  }
+  return guideId;
+}
+
+export async function getGuide(db: Db, guideId: string): Promise<Guide | null> {
+  const rows = await db`
+    SELECT id, collection_id, slug, title, description, spec, status, created_at, updated_at
+    FROM guides WHERE id = ${guideId} LIMIT 1
+  `;
+  if (!rows.length) return null;
+  const row = rows[0] as Record<string, unknown>;
+  return {
+    id: row.id as string,
+    collectionId: row.collection_id as string,
+    slug: row.slug as string,
+    title: row.title as string,
+    description: row.description as string,
+    spec: parseStoredJson<Record<string, unknown>>(row.spec) ?? {},
+    status: row.status as Guide["status"],
+    createdAt: new Date(row.created_at as string).toISOString(),
+    updatedAt: new Date(row.updated_at as string).toISOString(),
+  };
+}
+
+export async function listGuides(db: Db, collectionId: string): Promise<Guide[]> {
+  const rows = await db`
+    SELECT id, collection_id, slug, title, description, spec, status, created_at, updated_at
+    FROM guides WHERE collection_id = ${collectionId} ORDER BY created_at DESC
+  `;
+  return Promise.all(rows.map(async (row) => (await getGuide(db, row.id as string))!));
+}
+
+export async function listGuideClaims(db: Db, guideId: string): Promise<GuideClaimView[]> {
+  const rows = await db`
+    SELECT gc.guide_id, gc.claim_id, gc.canonical_claim_id,
+      claim.subject, claim.predicate, claim.value, claim.state
+    FROM guide_claims gc
+    LEFT JOIN claims claim ON claim.id = gc.claim_id
+    WHERE gc.guide_id = ${guideId}
+    ORDER BY gc.claim_id
+  `;
+  return rows.map((row) => ({
+    guideId: row.guide_id as string,
+    claimId: row.claim_id as string,
+    canonicalClaimId: (row.canonical_claim_id as string | null) ?? null,
+    subject: (row.subject as string | null) ?? "",
+    predicate: (row.predicate as string | null) ?? "",
+    value: (row.value as string | null) ?? "",
+    state: (row.state as ClaimState | null) ?? null,
+  }));
+}
+
+export async function publishGuide(db: Db, guideId: string, operator: string): Promise<Guide> {
+  const guide = await db`SELECT id FROM guides WHERE id = ${guideId} LIMIT 1`;
+  if (!guide.length) throw new Error("Guide not found");
+  const blocked = await db`
+    SELECT claim.id AS claim_id, claim.state
+    FROM guide_claims gc
+    JOIN claims claim ON claim.id = gc.claim_id
+    WHERE gc.guide_id = ${guideId} AND claim.state NOT IN ('supported', 'confirmed')
+    LIMIT 1
+  `;
+  if (blocked.length) {
+    throw new Error(`Guide cannot be published: claim ${blocked[0].claim_id as string} is ${blocked[0].state as string}`);
+  }
+  await db`UPDATE guides SET status = 'published', updated_at = now() WHERE id = ${guideId}`;
+  await audit(db, operator, "guide.published", "guide", guideId, "Published guide projection");
+  const published = await getGuide(db, guideId);
+  if (!published) throw new Error("Published guide is not readable");
+  return published;
+}
+
 // PostgreSQL reference persistence adapter. PostgreSQL-specific concerns
 // (advisory locks, SKIP LOCKED, partial indexes, savepoints) stay inside this
 // adapter and never define GameIntel Core.
@@ -2105,8 +2813,10 @@ export class PostgresPersistence implements GameIntelPersistence {
   getRevisionForAnalysis = (revisionId: string) => getRevisionForAnalysis(this.handle, revisionId);
   resolveExistingArticleForCanonicalClaims = (canonicalClaimIds: string[]) =>
     resolveExistingArticleForCanonicalClaims(this.handle, canonicalClaimIds);
-  refreshArticlesForCanonicalClaims = (canonicalClaimIds: string[], auditAction: string, auditReason: string) =>
-    refreshArticlesForCanonicalClaims(this.handle, canonicalClaimIds, auditAction, auditReason);
+  refreshPublicationsForCanonicalClaims = (canonicalClaimIds: string[], auditAction: string, auditReason: string) =>
+    refreshPublicationsForCanonicalClaims(this.handle, canonicalClaimIds, auditAction, auditReason);
+  setClaimBuildRange = (claimId: string, input: { from?: string | null; to?: string | null }) =>
+    setClaimBuildRange(this.handle, claimId, input);
 
   invalidateEvidenceApprovalsForSourceItem = (sourceItemId: string) => invalidateEvidenceApprovalsForSourceItem(this.handle, sourceItemId);
   listArticleEvidence = (articleId: string) => listArticleEvidence(this.handle, articleId);
@@ -2164,6 +2874,31 @@ export class PostgresPersistence implements GameIntelPersistence {
   approveCoverMedia = (articleId: string, reviewer: string) => approveCoverMedia(this.handle, articleId, reviewer);
   rejectCoverMedia = (articleId: string, reviewer: string) => rejectCoverMedia(this.handle, articleId, reviewer);
   clearCoverMedia = (articleId: string) => clearCoverMedia(this.handle, articleId);
+  upsertEntity = (input: Parameters<typeof upsertEntity>[1]) => upsertEntity(this.handle, input);
+  addEntityAlias = (entityId: string, alias: string) => addEntityAlias(this.handle, entityId, alias);
+  getEntity = (entityId: string) => getEntity(this.handle, entityId);
+  listEntities = (collectionId: string) => listEntities(this.handle, collectionId);
+  findEntities = (input: Parameters<typeof findEntities>[1]) => findEntities(this.handle, input);
+  resolveEntityMention = (collectionId: string, mention: string) => resolveEntityMention(this.handle, collectionId, mention);
+
+  getClaim = (claimId: string) => getClaim(this.handle, claimId);
+  getClaimEvidence = (claimId: string) => getClaimEvidence(this.handle, claimId);
+  explainClaim = (claimId: string, input?: { currentBuild?: string | null }) => explainClaim(this.handle, claimId, input);
+  findRelationships = (input: Parameters<typeof findRelationships>[1]) => findRelationships(this.handle, input);
+  getEntityRelationships = (entityId: string, input?: Parameters<typeof getEntityRelationships>[2]) =>
+    getEntityRelationships(this.handle, entityId, input);
+  findClaimsByBuild = (collectionId: string, build: string, input?: Parameters<typeof findClaimsByBuild>[3]) =>
+    findClaimsByBuild(this.handle, collectionId, build, input);
+  findClaimsByLocation = (collectionId: string, locationEntityId: string, input?: Parameters<typeof findClaimsByLocation>[3]) =>
+    findClaimsByLocation(this.handle, collectionId, locationEntityId, input);
+  getMapProjection = (collectionId: string, input?: { build?: string | null }) => getMapProjection(this.handle, collectionId, input);
+  listPublicationsForClaims = (claimIds: string[]) => listPublicationsForClaims(this.handle, claimIds);
+
+  createGuideDraft = (input: Parameters<typeof createGuideDraft>[1]) => createGuideDraft(this.handle, input);
+  getGuide = (guideId: string) => getGuide(this.handle, guideId);
+  listGuides = (collectionId: string) => listGuides(this.handle, collectionId);
+  listGuideClaims = (guideId: string) => listGuideClaims(this.handle, guideId);
+  publishGuide = (guideId: string, operator: string) => publishGuide(this.handle, guideId, operator);
 
   transaction = async <T>(callback: (transaction: GameIntelPersistence) => Promise<T>): Promise<T> => {
     return inTransaction(this.handle, async (transaction) => {

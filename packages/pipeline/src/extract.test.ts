@@ -35,7 +35,7 @@ describe("versioned claim extraction", () => {
   test("does not extract from manually curated fixtures or empty content", () => {
     expect(extractClaims({ title: "Fixture", text: "Curated by an operator.", inputKind: "manual_fixture", claims: [] }, "PRIMARY")).toEqual([]);
     expect(extractClaims({ title: "Empty", text: "", inputKind: "url", claims: [] }, "PRIMARY")).toEqual([]);
-    expect(extractClaims({ title: "Curated", text: "Provided claims win.", inputKind: "url", claims: [{ subject: "s", predicate: "p", value: "v", qualifiers: {}, spoilerTags: [], exploitClass: null, evidenceLevel: "suspected", attributionType: "trusted_secondary", statement: null, editorialAssessment: null, stance: "supports", evidenceType: "trusted_reporting", excerpt: "v", startMs: null, endMs: null }] }, "PRIMARY"))
+    expect(extractClaims({ title: "Curated", text: "Provided claims win.", inputKind: "url", claims: [{ subject: "s", predicate: "p", value: "v", subjectEntityId: null, objectEntityId: null, validBuildFrom: null, validBuildTo: null, qualifiers: {}, spoilerTags: [], exploitClass: null, evidenceLevel: "suspected", attributionType: "trusted_secondary", statement: null, editorialAssessment: null, stance: "supports", evidenceType: "trusted_reporting", excerpt: "v", startMs: null, endMs: null }] }, "PRIMARY"))
       .toHaveLength(1);
   });
 });
@@ -60,6 +60,6 @@ describe("canonical claim keys", () => {
   });
 
   test("exports the extractor version used by analysis runs", () => {
-    expect(CLAIM_EXTRACTOR_VERSION).toBe("1");
+    expect(CLAIM_EXTRACTOR_VERSION).toBe("2");
   });
 });

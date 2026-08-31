@@ -83,9 +83,9 @@ export function ingestHttpStatus(inputKind: InputKind): number | null {
 // behavior changes so stored revisions and review surfaces can answer "why
 // does GameIntel currently believe this?" and "would reprocessing with the
 // current pipeline produce a different result?".
-export const NORMALIZATION_VERSION = "1";
+export const NORMALIZATION_VERSION = "2";
 export const CONFIDENCE_MODEL_VERSION = "1";
-export const CLAIM_EXTRACTOR_VERSION = "1";
+export const CLAIM_EXTRACTOR_VERSION = "2";
 
 export const EvidenceLevelSchema = z.enum(["suspected", "corroborated", "confirmed", "disputed"]);
 export type EvidenceLevel = z.infer<typeof EvidenceLevelSchema>;
@@ -144,6 +144,7 @@ export type Qualifiers = z.infer<typeof QualifiersSchema>;
 
 export const SEMANTIC_QUALIFIER_KEYS = [
   "platform", "mode", "build", "region", "time_of_day", "weather", "mission", "progression", "wanted_level", "inventory",
+  "game", "patch", "game_mode", "story_progress", "mission_state", "character", "difficulty", "online", "singleplayer", "multiplayer",
 ] as const;
 export type SemanticQualifierKey = (typeof SEMANTIC_QUALIFIER_KEYS)[number];
 
@@ -161,7 +162,24 @@ const QUALIFIER_VALUE_NORMALIZERS: Record<SemanticQualifierKey, (value: string) 
     return /^\d+$/.test(trimmed) ? String(Number(trimmed)) : trimmed;
   },
   inventory: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  game: (v) => v.trim().replaceAll(/\s+/g, " "),
+  patch: (v) => v.trim().replaceAll(/\s+/g, " "),
+  game_mode: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  story_progress: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  mission_state: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  character: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  difficulty: (v) => v.trim().toLowerCase().replaceAll(/\s+/g, "_"),
+  online: (v) => booleanQualifierValue(v),
+  singleplayer: (v) => booleanQualifierValue(v),
+  multiplayer: (v) => booleanQualifierValue(v),
 };
+
+function booleanQualifierValue(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  if (["true", "yes", "1"].includes(trimmed)) return "true";
+  if (["false", "no", "0"].includes(trimmed)) return "false";
+  return trimmed;
+}
 
 export function normalizeQualifiers(input: Record<string, string>): Record<string, string> {
   const out: Record<string, string> = {};
@@ -172,6 +190,150 @@ export function normalizeQualifiers(input: Record<string, string>): Record<strin
     out[key] = normalize ? normalize(value) : value;
   }
   return out;
+}
+
+// ── Ontology: entities, predicates, and the semantic claim model ──────────
+// Entities are first-class domain objects with stable ids and aliases. The
+// core vocabulary is game-shaped but profile-extensible; profiles supply
+// their own entity types and may add predicates.
+
+export const CORE_ENTITY_TYPES = [
+  "game", "game_build", "platform", "character", "vehicle", "weapon", "item", "collectible", "location", "region",
+  "mission", "activity", "event", "vendor", "faction", "mechanic", "requirement", "reward", "patch", "update",
+] as const;
+export type CoreEntityType = (typeof CORE_ENTITY_TYPES)[number];
+
+export const EntitySchema = z.object({
+  id: z.string(),
+  collectionId: z.string(),
+  type: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
+  canonicalName: z.string().min(1),
+  aliases: z.array(z.string()),
+  properties: z.record(z.string(), z.string()).default({}),
+  coordinates: z.object({ x: z.number(), y: z.number(), z: z.number().optional() }).nullable().default(null),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type Entity = z.infer<typeof EntitySchema>;
+
+export type EntityUpsertInput = {
+  id?: string | null;
+  collectionId: string;
+  type: string;
+  canonicalName: string;
+  aliases?: string[];
+  properties?: Record<string, string>;
+  coordinates?: { x: number; y: number; z?: number } | null;
+};
+
+// Entity names normalize for matching: lowercase, non-alphanumeric runs
+// collapse to a single space. Matching is exact-after-normalization; there is
+// no fuzzy or substring resolution anywhere.
+export function normalizeEntityName(value: string): string {
+  return value.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").replaceAll(/\s+/g, " ").trim();
+}
+
+export function entityIdFor(type: string, canonicalName: string): string {
+  const slug = canonicalName.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-").replaceAll(/(^-|-$)/g, "");
+  return `${type}:${slug}`;
+}
+
+export function resolveMention(
+  candidates: Array<{ id: string; canonicalName: string; aliases: string[] }>,
+  mention: string,
+): { status: "resolved" | "ambiguous" | "unresolved"; entityId: string | null; candidates: string[] } {
+  const normalized = normalizeEntityName(mention);
+  const matches = candidates.filter((candidate) =>
+    normalizeEntityName(candidate.canonicalName) === normalized ||
+    candidate.aliases.some((alias) => normalizeEntityName(alias) === normalized),
+  );
+  if (matches.length === 0) return { status: "unresolved", entityId: null, candidates: [] };
+  if (matches.length > 1) return { status: "ambiguous", entityId: null, candidates: matches.map((m) => m.id) };
+  return { status: "resolved", entityId: matches[0].id, candidates: [matches[0].id] };
+}
+
+export const PredicateDefinitionSchema = z.object({
+  id: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/),
+  subjectTypes: z.array(z.string()),
+  objectTypes: z.array(z.string()),
+  description: z.string().optional(),
+});
+export type PredicateDefinition = z.infer<typeof PredicateDefinitionSchema>;
+
+// Controlled predicate vocabulary. `objectTypes` may contain "literal" (the
+// object is a literal value, not an entity) and "*" (any type).
+export const CORE_PREDICATES: PredicateDefinition[] = [
+  { id: "SPAWNS_AT", subjectTypes: ["vehicle", "weapon", "item", "character", "collectible"], objectTypes: ["location", "region"], description: "Subject spawns or appears at object" },
+  { id: "LOCATED_AT", subjectTypes: ["*"], objectTypes: ["location", "region"], description: "Subject is located at object" },
+  { id: "LOCATED_IN", subjectTypes: ["*"], objectTypes: ["location", "region"], description: "Subject is located inside object" },
+  { id: "SOLD_AT", subjectTypes: ["item", "vehicle", "weapon"], objectTypes: ["vendor", "location"], description: "Subject is sold at object" },
+  { id: "UNLOCKS", subjectTypes: ["mission", "activity", "event", "mechanic", "requirement"], objectTypes: ["*"], description: "Subject unlocks object" },
+  { id: "REQUIRES", subjectTypes: ["*"], objectTypes: ["*"], description: "Subject requires object" },
+  { id: "REWARDS", subjectTypes: ["mission", "activity", "event"], objectTypes: ["item", "vehicle", "weapon", "collectible"], description: "Subject rewards object" },
+  { id: "AVAILABLE_AFTER", subjectTypes: ["*"], objectTypes: ["mission", "activity", "event"], description: "Subject becomes available after object" },
+  { id: "AVAILABLE_BEFORE", subjectTypes: ["*"], objectTypes: ["mission", "activity", "event"], description: "Subject is available before object" },
+  { id: "OWNED_BY", subjectTypes: ["*"], objectTypes: ["vendor", "faction", "character"], description: "Subject is owned by object" },
+  { id: "USED_BY", subjectTypes: ["item", "vehicle", "weapon"], objectTypes: ["character", "faction"], description: "Subject is used by object" },
+  { id: "PART_OF", subjectTypes: ["*"], objectTypes: ["*"], description: "Subject is part of object" },
+  { id: "STARTS_AT", subjectTypes: ["mission", "activity", "event"], objectTypes: ["location"], description: "Subject starts at object" },
+  { id: "CHANGED_BY", subjectTypes: ["*"], objectTypes: ["patch", "update"], description: "Subject was changed by object; qualifier `aspect` names what changed" },
+  { id: "ADDED_BY", subjectTypes: ["*"], objectTypes: ["patch", "update"], description: "Subject was added by object; qualifier `aspect` names what changed" },
+  { id: "REMOVED_BY", subjectTypes: ["*"], objectTypes: ["patch", "update"], description: "Subject was removed by object; qualifier `aspect` names what changed" },
+  { id: "NERFED_BY", subjectTypes: ["*"], objectTypes: ["patch", "update"], description: "Subject was nerfed by object; qualifier `aspect` names what changed" },
+  { id: "BUFFED_BY", subjectTypes: ["*"], objectTypes: ["patch", "update"], description: "Subject was buffed by object; qualifier `aspect` names what changed" },
+  { id: "REPORTS", subjectTypes: ["*"], objectTypes: ["literal"], description: "Subject reports the literal object value (deterministic fallback extractor)" },
+];
+
+export function normalizePredicate(value: string): string {
+  return value.trim().replaceAll(/\s+/g, " ").replaceAll(/[^a-zA-Z0-9]+/g, "_").replaceAll(/(^_+|_+$)/g, "").toUpperCase();
+}
+
+export const OntologySchema = z.object({
+  entityTypes: z.array(z.string()).default([]),
+  predicates: z.array(PredicateDefinitionSchema).default([]),
+});
+export type Ontology = z.infer<typeof OntologySchema>;
+
+export function defaultOntology(): Ontology {
+  return {
+    entityTypes: [...CORE_ENTITY_TYPES],
+    predicates: CORE_PREDICATES.map((predicate) => ({ ...predicate })),
+  };
+}
+
+export function mergedOntology(profile: Ontology): Ontology {
+  const core = defaultOntology();
+  const corePredicateIds = new Set(core.predicates.map((predicate) => predicate.id));
+  return {
+    entityTypes: [...new Set([...core.entityTypes, ...profile.entityTypes])],
+    // Profile predicates extend the core vocabulary; a profile redefining a
+    // core predicate id replaces the core definition.
+    predicates: [...core.predicates, ...profile.predicates.filter((predicate) => !corePredicateIds.has(predicate.id))],
+  };
+}
+
+export function validateClaimAgainstOntology(input: {
+  predicate: string;
+  subjectType?: string | null;
+  objectType?: string | null;
+  ontology: Ontology;
+}): string[] {
+  const issues: string[] = [];
+  const predicate = normalizePredicate(input.predicate);
+  const definition = input.ontology.predicates.find((candidate) => candidate.id === predicate);
+  if (!definition) {
+    issues.push(`Predicate ${predicate} is not in the ontology`);
+    return issues;
+  }
+  const allows = (types: string[], value: string | null | undefined): boolean =>
+    types.includes("*") || (value !== null && value !== undefined && types.includes(value));
+  if (!allows(definition.subjectTypes, input.subjectType)) {
+    issues.push(`Subject type ${input.subjectType ?? "<none>"} is not allowed for ${predicate}`);
+  }
+  if (!allows(definition.objectTypes, input.objectType) && !definition.objectTypes.includes("literal")) {
+    issues.push(`Object type ${input.objectType ?? "<none>"} is not allowed for ${predicate}`);
+  }
+  return issues;
 }
 
 export const CollectionProfileSchema = z.object({
@@ -185,6 +347,7 @@ export const CollectionProfileSchema = z.object({
   defaultExploitMode: z.string().optional(),
   platforms: z.array(z.string()).default([]),
   sourceQueries: z.array(z.string()).default([]),
+  ontology: OntologySchema.optional(),
 });
 export type CollectionProfile = z.infer<typeof CollectionProfileSchema>;
 
@@ -329,6 +492,10 @@ export const ClaimSchema = z.object({
   subject: z.string().min(1),
   predicate: z.string().min(1),
   value: z.string().min(1),
+  subjectEntityId: z.string().nullable().default(null),
+  objectEntityId: z.string().nullable().default(null),
+  validBuildFrom: z.string().nullable().default(null),
+  validBuildTo: z.string().nullable().default(null),
   qualifiers: QualifiersSchema,
   spoilerTags: z.array(z.string()),
   exploitClass: z.string().nullable(),
@@ -363,6 +530,10 @@ export const NormalizedSourceItemSchema = z.object({
     subject: z.string(),
     predicate: z.string(),
     value: z.string(),
+    subjectEntityId: z.string().nullable().default(null),
+    objectEntityId: z.string().nullable().default(null),
+    validBuildFrom: z.string().nullable().default(null),
+    validBuildTo: z.string().nullable().default(null),
     qualifiers: QualifiersSchema.default({}),
     spoilerTags: z.array(z.string()).default([]),
      exploitClass: z.string().nullable().default(null),
@@ -657,17 +828,75 @@ export function canonicalizeClaimText(value: string): string {
   return value.trim().toLowerCase().replaceAll(/\s+/g, " ").replaceAll(/[.!?]+$/g, "").trim();
 }
 
-export function canonicalClaimKey(input: { subject: string; predicate: string; value: string; qualifiers?: Record<string, string> }): string {
+// Semantic triple identity (plan section 1). When entity ids are present they
+// replace the display text in the identity, so "Grotti Turismo" and "Turismo
+// Omaggio" converge on one canonical claim; display-text spelling stops
+// mattering. The predicate is normalized so casing/spacing variants converge.
+export function canonicalClaimKey(input: {
+  subject: string;
+  predicate: string;
+  value: string;
+  subjectEntityId?: string | null;
+  objectEntityId?: string | null;
+  qualifiers?: Record<string, string>;
+}): string {
   const qualifiers = normalizeQualifiers(input.qualifiers ?? {});
   const qualifierEntries = Object.entries(qualifiers)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => `${key}=${canonicalizeClaimText(value)}`);
   return hashText([
-    canonicalizeClaimText(input.subject),
-    canonicalizeClaimText(input.predicate),
-    canonicalizeClaimText(input.value),
+    input.subjectEntityId ?? canonicalizeClaimText(input.subject),
+    normalizePredicate(input.predicate),
+    input.objectEntityId ?? canonicalizeClaimText(input.value),
     ...qualifierEntries,
   ].join("|"));
+}
+
+export function buildApplicability(
+  input: { validBuildFrom: string | null; validBuildTo: string | null },
+  build: string | null,
+): "current" | "historical" | "superseded" | "unknown" {
+  if (build === null || (input.validBuildFrom === null && input.validBuildTo === null)) return "unknown";
+  if (input.validBuildTo !== null && build > input.validBuildTo) return "superseded";
+  if (input.validBuildFrom !== null && build < input.validBuildFrom) return "historical";
+  return "current";
+  // ponytail: string build comparison; switch to semver compare when mixed-length builds (1.4 vs 1.10) appear
+}
+
+// Contradiction is qualifier-aware: two claims that disagree only on their
+// build/patch qualifiers are a build change (each true of its own build), not
+// a contradiction of the same fact.
+export function claimsPotentiallyContradict(
+  a: {
+    subjectEntityId: string | null;
+    subject: string;
+    predicate: string;
+    objectEntityId: string | null;
+    value: string;
+    qualifiers: Record<string, string>;
+    stance: "supports" | "contradicts" | "context";
+  },
+  b: {
+    subjectEntityId: string | null;
+    subject: string;
+    predicate: string;
+    objectEntityId: string | null;
+    value: string;
+    qualifiers: Record<string, string>;
+    stance: "supports" | "contradicts" | "context";
+  },
+): "contradiction" | "build_change" | "distinct" {
+  const sameTriple =
+    (a.subjectEntityId ?? canonicalizeClaimText(a.subject)) === (b.subjectEntityId ?? canonicalizeClaimText(b.subject)) &&
+    normalizePredicate(a.predicate) === normalizePredicate(b.predicate) &&
+    (a.objectEntityId ?? canonicalizeClaimText(a.value)) === (b.objectEntityId ?? canonicalizeClaimText(b.value));
+  if (!sameTriple) return "distinct";
+  if (a.stance === b.stance) return "distinct";
+  const aQualifiers = normalizeQualifiers(a.qualifiers);
+  const bQualifiers = normalizeQualifiers(b.qualifiers);
+  const differingKeys = Object.keys({ ...aQualifiers, ...bQualifiers }).filter((key) => aQualifiers[key] !== bQualifiers[key]);
+  if (differingKeys.length > 0 && differingKeys.every((key) => key === "build" || key === "patch")) return "build_change";
+  return "contradiction";
 }
 
 export function publicSubmissionFingerprint(submission: PublicSubmission): string {

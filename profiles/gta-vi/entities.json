@@ -1,0 +1,50 @@
+{
+  "collectionId": "gta-vi",
+  "entities": [
+    {
+      "id": "vehicle:turismo-omaggio",
+      "type": "vehicle",
+      "canonicalName": "Grotti Turismo Omaggio",
+      "aliases": ["Turismo", "Grotti Turismo"],
+      "properties": { "acquisition_cost": "0", "available_early": "true" }
+    },
+    {
+      "type": "location",
+      "canonicalName": "Casino Parking Lot",
+      "aliases": ["Vice City casino parking lot"],
+      "coordinates": { "x": 100, "y": 200 }
+    },
+    {
+      "type": "location",
+      "canonicalName": "Vice City Airport",
+      "coordinates": { "x": 300, "y": 400 }
+    },
+    {
+      "type": "region",
+      "canonicalName": "Vice City",
+      "aliases": ["VC"]
+    },
+    {
+      "type": "patch",
+      "canonicalName": "1.04",
+      "aliases": ["Patch 1.04"],
+      "properties": { "build": "1.04" }
+    },
+    {
+      "type": "patch",
+      "canonicalName": "1.05",
+      "aliases": ["Patch 1.05"],
+      "properties": { "build": "1.05" }
+    },
+    {
+      "type": "platform",
+      "canonicalName": "PS5",
+      "aliases": ["PlayStation 5"]
+    },
+    {
+      "type": "platform",
+      "canonicalName": "PC",
+      "aliases": ["Windows"]
+    }
+  ]
+}

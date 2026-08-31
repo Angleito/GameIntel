@@ -1,5 +1,6 @@
 import { describe, test } from "bun:test";
 import { runPersistenceContract, runQueueContract, runSourceHealthContract } from "@gameintel/adapter-contract-tests";
+import { runOntologyKnowledgeContract } from "@gameintel/adapter-contract-tests";
 import { closeDb, createDb, type Db } from "./index.ts";
 import { PostgresJobQueue, PostgresPersistence } from "./index.ts";
 import { PostgresSourceHealthStore } from "./source-health.ts";
@@ -31,12 +32,14 @@ function cleanupContractData(db: Db): Promise<void> {
     await transaction`DELETE FROM articles WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM events WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM evidence WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'contract-test')`;
-    await transaction`
-      DELETE FROM analysis_runs
+        await transaction`DELETE FROM analysis_runs
       WHERE source_item_revision_id IN (SELECT id FROM source_item_revisions WHERE source_item_id IN (SELECT id FROM source_items WHERE game_id = 'contract-test'))
     `;
+    await transaction`DELETE FROM guide_claims WHERE guide_id IN (SELECT id FROM guides WHERE collection_id = 'contract-test')`;
+    await transaction`DELETE FROM guides WHERE collection_id = 'contract-test'`;
     await transaction`DELETE FROM claims WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM canonical_claims WHERE game_id = 'contract-test'`;
+    await transaction`DELETE FROM entities WHERE collection_id = 'contract-test'`;
     await transaction`DELETE FROM media_assets WHERE game_id = 'contract-test'`;
     await transaction`DELETE FROM submission_moderation_actions WHERE submission_id IN (SELECT id FROM public_submissions WHERE collection_id = 'contract-test')`;
     await transaction`DELETE FROM public_submissions WHERE collection_id = 'contract-test'`;
@@ -75,6 +78,7 @@ describe("PostgreSQL adapter conformance", () => {
 
   runPersistenceContract(factory);
   runQueueContract(factory);
+  runOntologyKnowledgeContract(factory);
   runSourceHealthContract(async () => {
     const db = createDb();
     return {

@@ -1,5 +1,6 @@
 import { describe, test } from "bun:test";
 import { runPersistenceContract, runQueueContract, runSourceHealthContract } from "@gameintel/adapter-contract-tests";
+import { runOntologyKnowledgeContract } from "@gameintel/adapter-contract-tests";
 import { createSqliteRuntime } from "./index.ts";
 
 // Conformance suite for the SQLite portability adapter. Always runs locally
@@ -18,6 +19,10 @@ describe("SQLite adapter conformance", () => {
 
   runPersistenceContract(factory);
   runQueueContract(factory);
+  runOntologyKnowledgeContract(async () => {
+    const runtime = createSqliteRuntime();
+    return { persistence: runtime.persistence, close: async () => runtime.close() };
+  });
   runSourceHealthContract(async () => {
     const runtime = createSqliteRuntime();
     return { store: runtime.sourceHealth, close: async () => runtime.close() };

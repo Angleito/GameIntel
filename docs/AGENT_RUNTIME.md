@@ -16,15 +16,20 @@ model output never writes evidence, claim state, or publication state directly.
 
 ## Configuration
 
-Pi remains off by default. Set `PI_ENABLED=true` only in the isolated process
-that is intended to draft articles. The reference Compose deployment does not
-run Pi yet: the durable agent-job worker is the next migration. The configured
-`PI_MODEL` must be present in `PI_ALLOWED_MODELS`. The current built-in provider
-allowlist is OpenAI, Anthropic, and Google, each requiring its respective API key.
+The AI provider is selected by `AI_PROVIDER` (`pi` default, `openrouter`
+optional) and is wired only by operator entry points (the CLI commands
+`ingest`, `ingest-text`, `promote-submission`). The ingestion worker and the
+API never construct an AI runtime — isolation by construction, not by flag.
+AI failures degrade to warnings and never block ingestion.
 
-`PI_MAX_OUTPUT_TOKENS` and `PI_MAX_RUNTIME_MS` bound an individual run. A
-provider request has no automatic retries; durable retry policy belongs to the
-job orchestrator.
+The configured `PI_MODEL` must be present in `PI_ALLOWED_MODELS`. The current
+built-in provider allowlist is OpenAI, Anthropic, and Google, each requiring
+its respective API key; the openrouter provider requires `OPENROUTER_API_KEY`.
+
+`PI_MAX_OUTPUT_TOKENS`/`PI_MAX_RUNTIME_MS` (pi) and
+`OPENROUTER_MAX_OUTPUT_TOKENS`/`OPENROUTER_MAX_RUNTIME_MS` (openrouter) bound
+an individual run. A provider request has no automatic retries; durable retry
+policy belongs to the job orchestrator.
 
 ## Next roles
 

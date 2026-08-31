@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 // Like the in-memory backend it is single-process only: schema versioning uses
 // PRAGMA user_version, timestamps are ISO-8601 strings, JSON columns are TEXT.
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS games (
@@ -67,6 +67,25 @@ CREATE TABLE IF NOT EXISTS canonical_claims (
   value TEXT NOT NULL, qualifiers TEXT NOT NULL, canonical_key TEXT NOT NULL, created_at TEXT NOT NULL,
   UNIQUE (game_id, canonical_key)
 );
+CREATE TABLE IF NOT EXISTS entities (
+  id TEXT PRIMARY KEY, collection_id TEXT NOT NULL REFERENCES games(id),
+  type TEXT NOT NULL, canonical_name TEXT NOT NULL, aliases TEXT NOT NULL,
+  properties TEXT NOT NULL DEFAULT '{}', coordinates TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE (collection_id, canonical_name)
+);
+CREATE INDEX IF NOT EXISTS entities_collection_type_idx ON entities(collection_id, type);
+CREATE TABLE IF NOT EXISTS guides (
+  id TEXT PRIMARY KEY, collection_id TEXT NOT NULL REFERENCES games(id),
+  slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, description TEXT NOT NULL,
+  spec TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS guide_claims (
+  guide_id TEXT NOT NULL REFERENCES guides(id) ON DELETE CASCADE,
+  claim_id TEXT NOT NULL REFERENCES claims(id),
+  canonical_claim_id TEXT,
+  PRIMARY KEY (guide_id, claim_id)
+);
+CREATE INDEX IF NOT EXISTS guide_claims_guide_idx ON guide_claims(guide_id);
 CREATE TABLE IF NOT EXISTS analysis_runs (
   id TEXT PRIMARY KEY, source_item_revision_id TEXT NOT NULL REFERENCES source_item_revisions(id),
   processing_version TEXT, normalization_version TEXT, claim_extractor_version TEXT, confidence_model_version TEXT,
@@ -180,6 +199,18 @@ export function openSqliteDatabase(path: string): Database {
   if (!columns.some((column) => column.name === "claim_key")) db.exec("ALTER TABLE claims ADD COLUMN claim_key TEXT");
   const runColumns = db.query("PRAGMA table_info(analysis_runs)").all() as Array<{ name: string }>;
   if (!runColumns.some((column) => column.name === "normalization_version")) db.exec("ALTER TABLE analysis_runs ADD COLUMN normalization_version TEXT");
+  // The v4 shape: entity-linked claims and build validity ranges. Apply via
+  // the same PRAGMA table_info pattern so older databases upgrade in place.
+  for (const table of ["claims", "canonical_claims"]) {
+    const tableColumns = db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    const columnNames = new Set(tableColumns.map((column) => column.name));
+    if (!columnNames.has("subject_entity_id")) db.exec(`ALTER TABLE ${table} ADD COLUMN subject_entity_id TEXT`);
+    if (!columnNames.has("object_entity_id")) db.exec(`ALTER TABLE ${table} ADD COLUMN object_entity_id TEXT`);
+    if (!columnNames.has("valid_build_from")) db.exec(`ALTER TABLE ${table} ADD COLUMN valid_build_from TEXT`);
+    if (!columnNames.has("valid_build_to")) db.exec(`ALTER TABLE ${table} ADD COLUMN valid_build_to TEXT`);
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS claims_subject_entity_idx ON claims(subject_entity_id)");
+  db.exec("CREATE INDEX IF NOT EXISTS claims_object_entity_idx ON claims(object_entity_id)");
   db.exec("DROP INDEX IF EXISTS analysis_runs_identity_idx");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS claims_source_item_key_idx ON claims(source_item_id, claim_key) WHERE claim_key IS NOT NULL");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS analysis_runs_identity_idx ON analysis_runs(source_item_revision_id, normalization_version, claim_extractor_version, confidence_model_version) WHERE status = 'completed'");

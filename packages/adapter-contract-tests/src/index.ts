@@ -1,5 +1,6 @@
 export { runPersistenceContract } from "./persistence.ts";
 export type { PersistenceFactory } from "./persistence.ts";
+export { runOntologyKnowledgeContract } from "./persistence.ts";
 export { runQueueContract } from "./job-queue.ts";
 export type { QueueFactory } from "./job-queue.ts";
 export { runObjectStoreContract } from "./object-store.ts";

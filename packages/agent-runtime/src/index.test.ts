@@ -1,5 +1,46 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { PiArticleDraftRuntime, buildResearchPrompt } from "./index.ts";
+import { createAiRuntime } from "./index.ts";
+
+const AI_ENV_KEYS = ["AI_PROVIDER", "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_MAX_OUTPUT_TOKENS", "OPENROUTER_MAX_RUNTIME_MS"];
+
+function restoreAiEnv(): void {
+  for (const key of AI_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
+describe("createAiRuntime", () => {
+  afterEach(restoreAiEnv);
+
+  test("defaults to the pi provider", () => {
+    restoreAiEnv();
+    const runtime = createAiRuntime();
+    expect(typeof runtime.draft).toBe("function");
+    expect(typeof runtime.extract).toBe("function");
+  });
+
+  test("openrouter without an API key fails fast", () => {
+    restoreAiEnv();
+    process.env.AI_PROVIDER = "openrouter";
+    expect(() => createAiRuntime()).toThrow("OPENROUTER_API_KEY is required when AI_PROVIDER=openrouter");
+  });
+
+  test("unknown providers are rejected", () => {
+    restoreAiEnv();
+    process.env.AI_PROVIDER = "banana";
+    expect(() => createAiRuntime()).toThrow("AI_PROVIDER must be 'pi' or 'openrouter', received 'banana'");
+  });
+
+  test("openrouter with a dummy key constructs without network", () => {
+    restoreAiEnv();
+    process.env.AI_PROVIDER = "openrouter";
+    process.env.OPENROUTER_API_KEY = "dummy-key";
+    process.env.OPENROUTER_MODEL = "openai/gpt-4o";
+    const runtime = createAiRuntime();
+    expect(typeof runtime.draft).toBe("function");
+  });
+});
 
 const packet = {
   jobId: "job-1",

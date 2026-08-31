@@ -14,6 +14,29 @@ import { LocalAbuseProtection, StaticOperatorIdentityProvider, SubmissionIdentit
 import { createServiceRuntime } from "@gameintel/newsroom/runtime";
 import { createPublicOutputArtifact } from "@gameintel/output";
 import { z } from "zod";
+import { generateGuide, GuideSpecSchema } from "@gameintel/newsroom/guides";
+import type { EntityUpsertInput } from "@gameintel/core";
+
+const EntityUpsertBodySchema = z.object({
+  id: z.string().min(1).optional(),
+  type: z.string().min(1),
+  canonicalName: z.string().min(1),
+  aliases: z.array(z.string().min(1)).optional(),
+  properties: z.record(z.string(), z.string()).optional(),
+  coordinates: z.object({ x: z.number(), y: z.number(), z: z.number().optional() }).nullable().optional(),
+}).strict();
+const EntityAliasBodySchema = z.object({
+  alias: z.string().min(1),
+}).strict();
+const ClaimStateListSchema = z.array(z.enum(["unverified", "supported", "contested", "confirmed", "superseded", "retracted"])).optional();
+
+function queryState(value: string | undefined): import("@gameintel/core").ClaimState[] | undefined {
+  return value ? [value as import("@gameintel/core").ClaimState] : undefined;
+}
+
+function queryBuild(value: string | undefined): string | null {
+  return value ?? null;
+}
 
 const project = await loadProjectConfig(new URL("../../../config/project.json", import.meta.url));
 const profile = await loadCollectionProfile(profilePath(project.defaultProfileId));
@@ -304,6 +327,121 @@ app.post("/internal/operator/ingest/text", async (c) => {
     }));
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : "Ingestion failed" }, 400);
+  }
+});
+// ── Ontology knowledge surface (operator-protected, no raw SQL exposure) ──
+app.get("/internal/operator/knowledge/entities", async (c) => {
+  const type = c.req.query("type");
+  const q = c.req.query("q");
+  if (q) {
+    return c.json(await operatorRuntime.persistence.resolveEntityMention(profile.id, q));
+  }
+  const entities = type ? (await operatorRuntime.persistence.listEntities(profile.id)).filter((entity) => entity.type === type) : await operatorRuntime.persistence.listEntities(profile.id);
+  return c.json(entities);
+});
+app.post("/internal/operator/knowledge/entities", async (c) => {
+  let payload: unknown;
+  try {
+    payload = await readJsonBody(c.req.raw, 32_000);
+  } catch (error) {
+    if (error instanceof RequestBodyError) return c.json({ error: error.message }, error.status);
+    return c.json({ error: "Unable to read request body" }, 400);
+  }
+  const parsed = EntityUpsertBodySchema.safeParse(payload);
+  if (!parsed.success) return c.json({ error: "Entity body is invalid" }, 400);
+  try {
+    const input: EntityUpsertInput = { collectionId: profile.id, ...parsed.data };
+    return c.json(await operatorRuntime.persistence.upsertEntity(input), 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unable to upsert entity" }, 400);
+  }
+});
+app.post("/internal/operator/knowledge/entities/:id/aliases", async (c) => {
+  let payload: unknown;
+  try {
+    payload = await readJsonBody(c.req.raw, 4_096);
+  } catch (error) {
+    if (error instanceof RequestBodyError) return c.json({ error: error.message }, error.status);
+    return c.json({ error: "Unable to read request body" }, 400);
+  }
+  const parsed = EntityAliasBodySchema.safeParse(payload);
+  if (!parsed.success) return c.json({ error: "Alias body is invalid" }, 400);
+  try {
+    await operatorRuntime.persistence.addEntityAlias(c.req.param("id"), parsed.data.alias);
+    return c.json({ ok: true });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unable to add alias" }, 400);
+  }
+});
+app.get("/internal/operator/knowledge/entities/:id", async (c) => {
+  const entity = await operatorRuntime.persistence.getEntity(c.req.param("id"));
+  return entity ? c.json(entity) : c.json({ error: "Entity not found" }, 404);
+});
+app.get("/internal/operator/knowledge/entities/:id/relationships", async (c) => {
+  const hops = c.req.query("hops") === undefined ? 1 : Number(c.req.query("hops"));
+  if (![1, 2, 3].includes(hops)) return c.json({ error: "hops must be 1, 2, or 3" }, 400);
+  return c.json(await operatorRuntime.persistence.getEntityRelationships(c.req.param("id"), {
+    collectionId: profile.id,
+    hops: hops as 1 | 2 | 3,
+    predicates: c.req.query("predicate") ? [c.req.query("predicate")!] : undefined,
+    states: queryState(c.req.query("state")),
+    build: queryBuild(c.req.query("build")),
+  }));
+});
+app.get("/internal/operator/knowledge/claims/:claimId", async (c) => {
+  const explanation = await operatorRuntime.persistence.explainClaim(c.req.param("claimId"), { currentBuild: queryBuild(c.req.query("build")) });
+  return explanation ? c.json(explanation) : c.json({ error: "Claim not found" }, 404);
+});
+app.get("/internal/operator/knowledge/relationships", async (c) => {
+  return c.json(await operatorRuntime.persistence.findRelationships({
+    collectionId: profile.id,
+    subjectEntityId: c.req.query("subject") ?? undefined,
+    predicate: c.req.query("predicate") ?? undefined,
+    objectEntityId: c.req.query("object") ?? undefined,
+    subjectType: c.req.query("subjectType") ?? undefined,
+    objectType: c.req.query("objectType") ?? undefined,
+    states: queryState(c.req.query("state")),
+    build: queryBuild(c.req.query("build")),
+  }));
+});
+app.get("/internal/operator/knowledge/claims-by-build", async (c) => {
+  const build = c.req.query("build");
+  if (!build) return c.json({ error: "build is required" }, 400);
+  return c.json(await operatorRuntime.persistence.findClaimsByBuild(profile.id, build, {
+    predicate: c.req.query("predicate") ?? undefined,
+    states: queryState(c.req.query("state")),
+  }));
+});
+app.get("/internal/operator/knowledge/locations/:entityId/claims", async (c) => {
+  return c.json(await operatorRuntime.persistence.findClaimsByLocation(profile.id, c.req.param("entityId")));
+});
+app.get("/internal/operator/knowledge/map", async (c) => {
+  return c.json(await operatorRuntime.persistence.getMapProjection(profile.id, { build: queryBuild(c.req.query("build")) }));
+});
+app.get("/internal/operator/knowledge/guides", async (c) => {
+  return c.json(await operatorRuntime.persistence.listGuides(profile.id));
+});
+app.post("/internal/operator/knowledge/guides/generate", async (c) => {
+  let payload: unknown;
+  try {
+    payload = await readJsonBody(c.req.raw, 32_000);
+  } catch (error) {
+    if (error instanceof RequestBodyError) return c.json({ error: error.message }, error.status);
+    return c.json({ error: "Unable to read request body" }, 400);
+  }
+  const parsed = GuideSpecSchema.safeParse(payload);
+  if (!parsed.success) return c.json({ error: "Guide spec is invalid" }, 400);
+  try {
+    return c.json(await generateGuide(operatorRuntime.persistence, parsed.data, profile.id), 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unable to generate guide" }, 400);
+  }
+});
+app.post("/internal/operator/knowledge/guides/:id/publish", async (c) => {
+  try {
+    return c.json(await operatorRuntime.persistence.publishGuide(c.req.param("id"), currentOperatorId));
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Unable to publish guide" }, 400);
   }
 });
 

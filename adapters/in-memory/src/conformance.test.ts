@@ -1,9 +1,14 @@
 import { runObjectStoreContract, runPersistenceContract, runQueueContract } from "@gameintel/adapter-contract-tests";
 import { runSourceHealthContract } from "@gameintel/adapter-contract-tests";
+import { runOntologyKnowledgeContract } from "@gameintel/adapter-contract-tests";
 import { createInMemoryRuntime, InMemoryJobQueue } from "./index.ts";
 import { InMemoryObjectStore } from "./object-store.ts";
 
 runPersistenceContract(async () => {
+  const runtime = createInMemoryRuntime();
+  return { persistence: runtime.persistence, close: runtime.close };
+});
+runOntologyKnowledgeContract(async () => {
   const runtime = createInMemoryRuntime();
   return { persistence: runtime.persistence, close: runtime.close };
 });

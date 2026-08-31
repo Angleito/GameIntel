@@ -29,9 +29,9 @@ function sourceIngestPayload(value: unknown): Parameters<typeof ingestUrl>[1] {
   };
 }
 
-if (process.env.PI_ENABLED === "true") {
-  throw new Error("The ingestion worker must not run Pi drafting; use a separately isolated AI worker");
-}
+// The ingestion worker never wires an AI runtime: AI drafting and semantic
+// extraction belong to operator processes (the CLI), which construct their
+// own runtime from AI_PROVIDER. Isolation by construction, not by flag.
 if (!process.env.SOURCE_FETCH_PROXY_URL) {
   throw new Error("SOURCE_FETCH_PROXY_URL is required for the ingestion worker");
 }
